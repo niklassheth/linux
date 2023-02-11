@@ -8,6 +8,8 @@ pub mod file;
 pub mod gem;
 pub mod gpuvm;
 pub mod ioctl;
+#[cfg(CONFIG_RUST_DRM_SCHED)]
+pub mod sched;
 pub mod syncobj;
 
 pub use self::device::Device;

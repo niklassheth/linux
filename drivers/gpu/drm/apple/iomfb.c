@@ -483,7 +483,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
 		iomfb_flush_v12_3(dcp, crtc, commit);
 		break;
 	case DCP_FIRMWARE_V_13_5:
-		iomfb_flush_v13_3(dcp, crtc, state);
+		iomfb_flush_v13_3(dcp, crtc, commit);
 		break;
 	default:
 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);

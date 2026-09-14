@@ -1,6 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Copyright The Gravity Linux Contributors
-// Adapted from the Asahi Linux software-float implementation.
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
 
 //! Basic soft floating-point support
 //!
@@ -298,9 +296,7 @@ impl F32U {
     const fn pack(mut self) -> F32 {
         self = self.norm();
         if !self.is_zero() {
-            // Round halfway cases to an even low bit, as the shim
-            // does at each binary32 operation.
-            self.frac += 0xff + ((self.frac >> 9) & 1);
+            self.frac += 0x100;
             self = self.norm();
         }
 

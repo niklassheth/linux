@@ -17,7 +17,6 @@
 #include <linux/slab.h>
 #include <linux/sizes.h>
 #include <linux/soc/apple/dockchannel.h>
-#include <linux/soc/apple/rtkit.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -191,7 +190,6 @@ struct dchid_iface {
 	/* A registration ACK does not relinquish coprocessor DMA ownership. */
 	void *firmware;
 	dma_addr_t firmware_dma;
-	size_t firmware_size;
 };
 
 struct dockchannel_hid {
@@ -201,7 +199,6 @@ struct dockchannel_hid {
 
 	struct mutex ring_mutex;
 	struct mutex tx_mutex;
-	bool stopping;
 	bool failed;
 	bool use_ring;
 	bool ring_registered;
@@ -346,7 +343,7 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 
 	/* Interface locks do not serialize the shared byte stream. */
 	mutex_lock(&dchid->tx_mutex);
-	if (READ_ONCE(dchid->stopping) || READ_ONCE(dchid->failed)) {
+	if (READ_ONCE(dchid->failed)) {
 		ret = -ESHUTDOWN;
 		goto unlock;
 	}
@@ -398,7 +395,7 @@ static int dchid_cmd(struct dchid_iface *iface, u32 type, u32 req,
 
 	mutex_lock(&iface->out_mutex);
 	spin_lock_irqsave(&iface->out_lock, flags);
-	if (READ_ONCE(dchid->stopping) || READ_ONCE(dchid->failed) || iface->failed) {
+	if (READ_ONCE(dchid->failed) || iface->failed) {
 		ret = -ESHUTDOWN;
 		goto unlock;
 	}
@@ -535,7 +532,6 @@ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t
 					    &iface->firmware_dma, GFP_KERNEL);
 	if (!iface->firmware)
 		return -ENOMEM;
-	iface->firmware_size = size;
 
 	msg.addr = cpu_to_le64(iface->firmware_dma);
 	memcpy(iface->firmware, firmware, size);
@@ -722,7 +718,7 @@ static int dchid_open(struct hid_device *hdev)
 	struct dchid_iface *iface = hdev->driver_data;
 	int ret;
 
-	if (READ_ONCE(iface->dchid->stopping) || READ_ONCE(iface->dchid->failed))
+	if (READ_ONCE(iface->dchid->failed))
 		return -ESHUTDOWN;
 
 	if (!completion_done(&iface->ready)) {
@@ -736,7 +732,7 @@ static int dchid_open(struct hid_device *hdev)
 		}
 	}
 
-	if (READ_ONCE(iface->dchid->stopping) || READ_ONCE(iface->dchid->failed))
+	if (READ_ONCE(iface->dchid->failed))
 		return -ESHUTDOWN;
 
 	WRITE_ONCE(iface->open, true);
@@ -809,7 +805,7 @@ static void dchid_create_interface_work(struct work_struct *ws)
 	struct hid_device *hid;
 	int ret;
 
-	if (READ_ONCE(dchid->stopping) || READ_ONCE(dchid->failed))
+	if (READ_ONCE(dchid->failed))
 		return;
 
 	if (iface->hid) {
@@ -878,8 +874,7 @@ static void dchid_create_interface_work(struct work_struct *ws)
 
 static int dchid_create_interface(struct dchid_iface *iface)
 {
-	if (iface->creating || READ_ONCE(iface->dchid->stopping) ||
-	    READ_ONCE(iface->dchid->failed))
+	if (iface->creating || READ_ONCE(iface->dchid->failed))
 		return -EBUSY;
 
 	iface->creating = true;
@@ -1147,7 +1142,7 @@ static void dchid_packet_work(struct work_struct *ws)
 	u8 *payload = work->data + sizeof(*shdr);
 	size_t length = le16_to_cpu(shdr->length);
 
-	if (!READ_ONCE(dchid->stopping) && !READ_ONCE(dchid->failed)) {
+	if (!READ_ONCE(dchid->failed)) {
 		if (work->hdr.iface == IFACE_COMM)
 			dchid_handle_event(dchid, payload, length);
 		else
@@ -1279,7 +1274,7 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 	if (!READ_ONCE(dchid->ring_registered))
 		return -EPROTO;
 
-	while (!READ_ONCE(dchid->stopping) && !READ_ONCE(dchid->failed)) {
+	while (!READ_ONCE(dchid->failed)) {
 		producer = le32_to_cpu(READ_ONCE(indices[0]));
 		consumer = le32_to_cpu(READ_ONCE(indices[1]));
 		if (producer >= capacity || consumer != dchid->ring_read ||
@@ -1320,7 +1315,7 @@ static void dchid_handle_packet(void *cookie, size_t avail)
 	size_t count;
 	int ret;
 
-	while (avail && !READ_ONCE(dchid->stopping) && !READ_ONCE(dchid->failed)) {
+	while (avail && !READ_ONCE(dchid->failed)) {
 		count = min(avail, dchid->pkt_size - dchid->pkt_used);
 		ret = dockchannel_recv(dchid->dc, dchid->pkt_buf + dchid->pkt_used, count);
 		if (ret != count) {
@@ -1351,7 +1346,7 @@ static void dchid_handle_packet(void *cookie, size_t avail)
 	 * A producer notification arriving during draining stays in the FIFO.
 	 * Rearming its level/threshold IRQ observes it even if it preceded rearm.
 	 */
-	if (!READ_ONCE(dchid->stopping) && !READ_ONCE(dchid->failed))
+	if (!READ_ONCE(dchid->failed))
 		dockchannel_await(dchid->dc, dchid_handle_packet, dchid,
 				  dchid->pkt_size - dchid->pkt_used);
 	return;
@@ -1383,7 +1378,6 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 	mutex_init(&dchid->ring_mutex);
 	dchid->pkt_size = sizeof(struct dchid_hdr);
 	dchid->use_ring = of_device_is_compatible(dev->of_node, "apple,t8132-dockchannel-hid");
-	platform_set_drvdata(pdev, dchid);
 
 	/*
 	 * First make sure all the GPIOs are available, in cased we need to defer.
@@ -1436,8 +1430,6 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 
 	if (dchid->helper_link->supplier->links.status != DL_DEV_DRIVER_BOUND)
 		return -EPROBE_DEFER;
-	if (!apple_rtkit_helper_is_running(dchid->helper_link->supplier))
-		return dev_err_probe(dev, -ESHUTDOWN, "Helper must be restarted before rebinding HID\n");
 
 	/* Now it is safe to begin initializing */
 	dchid->dc = dockchannel_init(pdev);
@@ -1479,49 +1471,7 @@ free_ring:
 
 static void dockchannel_hid_remove(struct platform_device *pdev)
 {
-	struct dockchannel_hid *dchid = platform_get_drvdata(pdev);
-	struct dchid_iface *iface;
-	bool dma_stopped;
-	int i;
-
-	WRITE_ONCE(dchid->stopping, true);
-	dchid_cancel_commands(dchid, -ESHUTDOWN);
-	dockchannel_cancel(dchid->dc);
-
-	/* Finish discovery before enumerating interfaces, then join creators. */
-	flush_workqueue(dchid->comm->wq);
-	destroy_workqueue(dchid->new_iface_wq);
-	for (i = 0; i < MAX_INTERFACES; i++) {
-		iface = dchid->ifaces[i];
-		if (!iface)
-			continue;
-		destroy_workqueue(iface->wq);
-		if (iface->hid) {
-			hid_destroy_device(iface->hid);
-			iface->hid = NULL;
-		}
-		mutex_lock(&iface->out_mutex);
-		mutex_unlock(&iface->out_mutex);
-		of_node_put(iface->of_node);
-	}
-	mutex_lock(&dchid->tx_mutex);
-	mutex_unlock(&dchid->tx_mutex);
-
-	/* RUN-clear alone is not a DMA ownership boundary. */
-	dma_stopped = !apple_rtkit_helper_stop(dchid->helper_link->supplier);
-	if (!dma_stopped) {
-		dev_crit(dchid->dev, "Retaining HID DMA buffers after failed shutdown; reboot required\n");
-		get_device(dchid->dev);
-		return;
-	}
-	for (i = 0; i < MAX_INTERFACES; i++) {
-		iface = dchid->ifaces[i];
-		if (iface && iface->firmware)
-			dma_free_coherent(dchid->dev, iface->firmware_size,
-					  iface->firmware, iface->firmware_dma);
-	}
-	if (dchid->ring)
-		dma_free_coherent(dchid->dev, DCHID_RING_SIZE, dchid->ring, dchid->ring_dma);
+	BUG_ON(1);
 }
 
 static const struct of_device_id dockchannel_hid_of_match[] = {
@@ -1539,7 +1489,6 @@ static struct platform_driver dockchannel_hid_driver = {
 	},
 	.probe = dockchannel_hid_probe,
 	.remove = dockchannel_hid_remove,
-	.shutdown = dockchannel_hid_remove,
 };
 module_platform_driver(dockchannel_hid_driver);
 

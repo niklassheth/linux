@@ -17,7 +17,6 @@
 #include <linux/slab.h>
 #include <linux/sizes.h>
 #include <linux/soc/apple/dockchannel.h>
-#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 #include <linux/of.h>
@@ -174,10 +173,6 @@ struct dchid_iface {
 	int gpio_id;
 
 	struct mutex out_mutex;
-	spinlock_t out_lock;
-	int out_error;
-	bool out_pending;
-	bool failed;
 	u32 out_flags;
 	int out_report;
 	u32 retcode;
@@ -198,10 +193,9 @@ struct dockchannel_hid {
 	struct device_link *helper_link;
 
 	struct mutex ring_mutex;
-	struct mutex tx_mutex;
-	bool failed;
 	bool use_ring;
 	bool ring_registered;
+	int ring_error;
 	void *ring;
 	dma_addr_t ring_dma;
 	u32 ring_read;
@@ -237,7 +231,7 @@ dchid_get_interface(struct dockchannel_hid *dchid, int index, const char *name)
 {
 	struct dchid_iface *iface;
 
-	if (index < 0 || index >= MAX_INTERFACES) {
+	if (index >= MAX_INTERFACES) {
 		dev_err(dchid->dev, "Interface index %d out of range\n", index);
 		return NULL;
 	}
@@ -251,29 +245,28 @@ dchid_get_interface(struct dockchannel_hid *dchid, int index, const char *name)
 
 	iface->index = index;
 	iface->name = devm_kstrdup(dchid->dev, name, GFP_KERNEL);
-	if (!iface->name)
-		return NULL;
 	iface->dchid = dchid;
 	iface->out_report= -1;
 	init_completion(&iface->out_complete);
 	init_completion(&iface->ready);
 	mutex_init(&iface->out_mutex);
-	spin_lock_init(&iface->out_lock);
-	if (index != IFACE_COMM) {
-		iface->of_node = of_get_child_by_name(dchid->dev->of_node, name);
-		if (!iface->of_node) {
-			dev_warn(dchid->dev, "No OF node for subdevice %s, ignoring\n", name);
-			return NULL;
-		}
+	iface->wq = alloc_ordered_workqueue("dchid-%s", WQ_MEM_RECLAIM, iface->name);
+	if (!iface->wq)
+		return NULL;
+
+	/* Comm is not a HID subdevice */
+	if (!strcmp(name, "comm")) {
+		dchid->ifaces[index] = iface;
+		return iface;
 	}
 
-	iface->wq = alloc_ordered_workqueue("dchid-%s", WQ_MEM_RECLAIM, iface->name);
-	if (!iface->wq) {
-		of_node_put(iface->of_node);
+	iface->of_node = of_get_child_by_name(dchid->dev->of_node, name);
+	if (!iface->of_node) {
+		dev_warn(dchid->dev, "No OF node for subdevice %s, ignoring.", name);
 		return NULL;
 	}
 
-	smp_store_release(&dchid->ifaces[index], iface);
+	dchid->ifaces[index] = iface;
 	return iface;
 }
 
@@ -291,35 +284,8 @@ static u32 dchid_checksum(const void *p, size_t length)
 	return sum;
 }
 
-static void dchid_cancel_commands(struct dockchannel_hid *dchid, int error)
-{
-	struct dchid_iface *iface;
-	unsigned long flags;
-	int i;
-
-	for (i = 0; i < MAX_INTERFACES; i++) {
-		iface = smp_load_acquire(&dchid->ifaces[i]);
-		if (!iface)
-			continue;
-		spin_lock_irqsave(&iface->out_lock, flags);
-		iface->out_error = error;
-		iface->out_pending = false;
-		complete_all(&iface->out_complete);
-		spin_unlock_irqrestore(&iface->out_lock, flags);
-		complete_all(&iface->ready);
-	}
-}
-
-static void dchid_fail(struct dockchannel_hid *dchid, int error)
-{
-	/* No speculative resynchronization after loss of a frame boundary. */
-	WRITE_ONCE(dchid->failed, true);
-	dchid_cancel_commands(dchid, error);
-}
-
 static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t size)
 {
-	struct dockchannel_hid *dchid = iface->dchid;
 	u32 checksum = 0xffffffff;
 	size_t wsize = round_down(size, 4);
 	size_t tsize = size - wsize;
@@ -327,11 +293,9 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 	struct {
 		struct dchid_hdr hdr;
 		struct dchid_subhdr sub;
-	} __packed h = {};
+	} __packed h;
 
-	if (round_up(size, 4) > 0xfffc - sizeof(h.sub))
-		return -EMSGSIZE;
-
+	memset(&h, 0, sizeof(h));
 	h.hdr.hdr_len = sizeof(h.hdr);
 	h.hdr.channel = DCHID_CHANNEL_CMD;
 	h.hdr.length = round_up(size, 4) + sizeof(h.sub);
@@ -340,98 +304,73 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 	h.sub.flags = flags;
 	h.sub.length = size;
 
-	/* Interface locks do not serialize the shared byte stream. */
-	mutex_lock(&dchid->tx_mutex);
-	if (READ_ONCE(dchid->failed)) {
-		ret = -ESHUTDOWN;
-		goto unlock;
-	}
-
-	ret = dockchannel_send(dchid->dc, &h, sizeof(h));
+	ret = dockchannel_send(iface->dchid->dc, &h, sizeof(h));
 	if (ret < 0)
-		goto failed;
+		return ret;
 	checksum -= dchid_checksum(&h, sizeof(h));
 
-	ret = dockchannel_send(dchid->dc, msg, wsize);
+	ret = dockchannel_send(iface->dchid->dc, msg, wsize);
 	if (ret < 0)
-		goto failed;
+		return ret;
 	checksum -= dchid_checksum(msg, wsize);
 
 	if (tsize) {
-		u8 tail[4] = {};
+		u8 tail[4] = {0, 0, 0, 0};
 
 		memcpy(tail, msg + wsize, tsize);
-		ret = dockchannel_send(dchid->dc, tail, sizeof(tail));
+		ret = dockchannel_send(iface->dchid->dc, tail, sizeof(tail));
 		if (ret < 0)
-			goto failed;
+			return ret;
 		checksum -= dchid_checksum(tail, sizeof(tail));
 	}
 
-	ret = dockchannel_send(dchid->dc, &checksum, sizeof(checksum));
+	ret = dockchannel_send(iface->dchid->dc, &checksum, sizeof(checksum));
 	if (ret < 0)
-		goto failed;
-	ret = 0;
-	goto unlock;
+		return ret;
 
-failed:
-	dchid_fail(dchid, ret);
-unlock:
-	mutex_unlock(&dchid->tx_mutex);
-	return ret;
+	return 0;
 }
 
 static int dchid_cmd(struct dchid_iface *iface, u32 type, u32 req,
 		     void *data, size_t size, void *resp_buf, size_t resp_size)
 {
-	struct dockchannel_hid *dchid = iface->dchid;
-	unsigned long flags;
-	int ret, report_id;
-
-	if (!size || size > 0xfffc - sizeof(struct dchid_subhdr))
-		return -EINVAL;
-	report_id = *(u8 *)data;
+	int ret;
+	int report_id = *(u8*)data;
 
 	mutex_lock(&iface->out_mutex);
-	spin_lock_irqsave(&iface->out_lock, flags);
-	if (READ_ONCE(dchid->failed) || iface->failed) {
-		ret = -ESHUTDOWN;
-		goto unlock;
-	}
 
+	WARN_ON(iface->out_report != -1);
 	iface->out_report = report_id;
 	iface->out_flags = FIELD_PREP(FLAGS_GROUP, type) | FIELD_PREP(FLAGS_REQ, req);
 	iface->resp_buf = resp_buf;
 	iface->resp_size = resp_size;
-	iface->out_error = 0;
-	iface->retcode = 0;
-	iface->out_pending = true;
 	reinit_completion(&iface->out_complete);
-	spin_unlock_irqrestore(&iface->out_lock, flags);
 
 	ret = dchid_send(iface, iface->out_flags, data, size);
-	if (!ret && !wait_for_completion_timeout(&iface->out_complete,
-						msecs_to_jiffies(COMMAND_TIMEOUT_MS)))
-		ret = -ETIMEDOUT;
+	if (ret < 0)
+		goto done;
 
-	spin_lock_irqsave(&iface->out_lock, flags);
-	if (ret == -ETIMEDOUT) {
-		/*
-		 * The wire sequence is only eight bits. Do not reuse an uncertain
-		 * command identity after timeout, even after sequence wraparound.
-		 */
-		iface->failed = true;
-		dev_err(dchid->dev, "Report 0x%x to iface %d (%s) timed out\n",
+	if (!wait_for_completion_timeout(&iface->out_complete, msecs_to_jiffies(COMMAND_TIMEOUT_MS))) {
+		dev_err(iface->dchid->dev, "output report 0x%x to iface  %d (%s) timed out\n",
 			report_id, iface->index, iface->name);
+		ret = -ETIMEDOUT;
+		goto done;
 	}
-	if (!ret)
-		ret = iface->out_error ?: (iface->retcode ? -EIO : iface->resp_size);
+
+	ret = iface->resp_size;
+	if (iface->retcode) {
+		dev_err(iface->dchid->dev,
+			"output report 0x%x to iface %d (%s) failed with err 0x%x\n",
+			report_id, iface->index, iface->name, iface->retcode);
+		ret = -EIO;
+	}
+
+done:
 	iface->tx_seq++;
-	iface->out_pending = false;
 	iface->out_report = -1;
+	iface->out_flags = 0;
 	iface->resp_buf = NULL;
 	iface->resp_size = 0;
-unlock:
-	spin_unlock_irqrestore(&iface->out_lock, flags);
 	mutex_unlock(&iface->out_mutex);
 	return ret;
 }
@@ -489,10 +428,10 @@ static int dchid_register_ring(struct dockchannel_hid *dchid)
 		return 0;
 
 	mutex_lock(&dchid->ring_mutex);
+	ret = dchid->ring_error;
 	if (!dchid->ring_registered) {
 		ret = dchid_comm_cmd(dchid, prepare, sizeof(prepare));
 		if (ret < 0) {
-			dchid_fail(dchid, ret);
 			mutex_unlock(&dchid->ring_mutex);
 			return ret;
 		}
@@ -500,8 +439,7 @@ static int dchid_register_ring(struct dockchannel_hid *dchid)
 		dma_wmb();
 		WRITE_ONCE(dchid->ring_registered, true);
 		ret = dchid_comm_cmd(dchid, &msg, sizeof(msg));
-		if (ret < 0)
-			dchid_fail(dchid, ret);
+		dchid->ring_error = ret;
 	}
 	mutex_unlock(&dchid->ring_mutex);
 	return ret;
@@ -712,9 +650,6 @@ static int dchid_open(struct hid_device *hdev)
 	struct dchid_iface *iface = hdev->driver_data;
 	int ret;
 
-	if (READ_ONCE(iface->dchid->failed))
-		return -ESHUTDOWN;
-
 	if (!completion_done(&iface->ready)) {
 		ret = dchid_start_interface(iface);
 		if (ret < 0)
@@ -726,10 +661,7 @@ static int dchid_open(struct hid_device *hdev)
 		}
 	}
 
-	if (READ_ONCE(iface->dchid->failed))
-		return -ESHUTDOWN;
-
-	WRITE_ONCE(iface->open, true);
+	iface->open = true;
 	return 0;
 }
 
@@ -737,7 +669,7 @@ static void dchid_close(struct hid_device *hdev)
 {
 	struct dchid_iface *iface = hdev->driver_data;
 
-	WRITE_ONCE(iface->open, false);
+	iface->open = false;
 }
 
 static int dchid_parse(struct hid_device *hdev)
@@ -799,9 +731,6 @@ static void dchid_create_interface_work(struct work_struct *ws)
 	struct hid_device *hid;
 	int ret;
 
-	if (READ_ONCE(dchid->failed))
-		return;
-
 	if (iface->hid) {
 		dev_warn(dchid->dev, "Interface %s already created!\n",
 			 iface->name);
@@ -855,12 +784,11 @@ static void dchid_create_interface_work(struct work_struct *ws)
 	hid->dev.parent = iface->dchid->dev;
 	hid->driver_data = iface;
 
-	WRITE_ONCE(iface->hid, hid);
+	iface->hid = hid;
 
 	ret = hid_add_device(hid);
 	if (ret < 0) {
-		WRITE_ONCE(iface->hid, NULL);
-		flush_workqueue(iface->wq);
+		iface->hid = NULL;
 		hid_destroy_device(hid);
 		dev_warn(iface->dchid->dev, "Failed to register hid device %s", iface->name);
 	}
@@ -868,7 +796,7 @@ static void dchid_create_interface_work(struct work_struct *ws)
 
 static int dchid_create_interface(struct dchid_iface *iface)
 {
-	if (iface->creating || READ_ONCE(iface->dchid->failed))
+	if (iface->creating)
 		return -EBUSY;
 
 	iface->creating = true;
@@ -924,10 +852,11 @@ static void dchid_handle_ready(struct dockchannel_hid *dchid, void *data, size_t
 	if (!strcmp(iface->name, "stm")) {
 		ret = dchid_get_report_cmd(iface, STM_REPORT_ID, &dchid->device_id,
 					   sizeof(dchid->device_id));
-		if (ret != sizeof(dchid->device_id)) {
-			dev_err(dchid->dev, "Failed to get device ID from STM: %d\n", ret);
-			dchid_fail(dchid, ret < 0 ? ret : -EPROTO);
-			return;
+		if (ret < sizeof(dchid->device_id)) {
+			dev_warn(iface->dchid->dev, "Failed to get device ID from STM!\n");
+			/* Fake it and keep going. Things might still work... */
+			memset(&dchid->device_id, 0, sizeof(dchid->device_id));
+			dchid->device_id.vendor_id = HOST_VENDOR_ID_APPLE;
 		}
 		ret = dchid_get_report_cmd(iface, STM_REPORT_SERIAL, dchid->serial,
 					   sizeof(dchid->serial) - 1);
@@ -1112,17 +1041,16 @@ static void dchid_handle_event(struct dockchannel_hid *dchid, void *data, size_t
 static void dchid_handle_report(struct dchid_iface *iface, void *data, size_t length)
 {
 	struct dockchannel_hid *dchid = iface->dchid;
-	struct hid_device *hid = READ_ONCE(iface->hid);
 
-	if (!hid) {
+	if (!iface->hid) {
 		dev_warn(dchid->dev, "Report received but %s is not initialized!\n", iface->name);
 		return;
 	}
 
-	if (!READ_ONCE(iface->open))
+	if (!iface->open)
 		return;
 
-	hid_input_report(hid, HID_INPUT_REPORT, data, length, 1);
+	hid_input_report(iface->hid, HID_INPUT_REPORT, data, length, 1);
 }
 
 static void dchid_packet_work(struct work_struct *ws)
@@ -1130,42 +1058,69 @@ static void dchid_packet_work(struct work_struct *ws)
 	struct dchid_work *work = container_of(ws, struct dchid_work, work);
 	struct dchid_subhdr *shdr = (void *)work->data;
 	struct dockchannel_hid *dchid = work->iface->dchid;
+	int type = FIELD_GET(FLAGS_GROUP, shdr->flags);
 	u8 *payload = work->data + sizeof(*shdr);
-	size_t length = shdr->length;
 
-	if (!READ_ONCE(dchid->failed)) {
-		if (work->hdr.iface == IFACE_COMM)
-			dchid_handle_event(dchid, payload, length);
-		else
-			dchid_handle_report(work->iface, payload, length);
+	if (shdr->length + sizeof(*shdr) > work->hdr.length) {
+		dev_err(dchid->dev, "Bad sub header length (%hu > %zu)\n",
+			shdr->length, work->hdr.length - sizeof(*shdr));
+		return;
 	}
+
+	switch (type) {
+	case HID_INPUT_REPORT:
+		if (work->hdr.iface == IFACE_COMM)
+			dchid_handle_event(dchid, payload, shdr->length);
+		else
+			dchid_handle_report(work->iface, payload, shdr->length);
+		break;
+	default:
+		dev_err(dchid->dev, "Received unknown packet type %d\n", type);
+		break;
+	}
+
 	kfree(work);
 }
 
-static void dchid_handle_ack(struct dchid_iface *iface, const struct dchid_hdr *hdr,
-			     const struct dchid_subhdr *shdr)
+static void dchid_handle_ack(struct dchid_iface *iface, struct dchid_hdr *hdr, void *data)
 {
-	const u8 *payload = (const void *)(shdr + 1);
-	size_t length = shdr->length;
-	unsigned long flags;
+	struct dchid_subhdr *shdr = (void *)data;
+	u8 *payload = data + sizeof(*shdr);
 
-	spin_lock_irqsave(&iface->out_lock, flags);
-	if (!iface->out_pending || !length || iface->tx_seq != hdr->seq ||
-	    iface->out_flags != shdr->flags || iface->out_report != payload[0])
-		goto done;
-
-	if (iface->resp_buf) {
-		length = min(length - 1, iface->resp_size);
-		memcpy(iface->resp_buf, payload + 1, length);
-		iface->resp_size = length + 1;
-	} else {
-		iface->resp_size = length;
+	if (shdr->length + sizeof(*shdr) > hdr->length) {
+		dev_err(iface->dchid->dev, "Bad sub header length (%hu > %zu)\n",
+			shdr->length, hdr->length - sizeof(*shdr));
+		return;
 	}
+	if (shdr->flags != iface->out_flags) {
+		dev_err(iface->dchid->dev,
+			"Received unexpected flags 0x%x on ACK channel (expFected 0x%x)\n",
+			shdr->flags, iface->out_flags);
+		return;
+	}
+
+	if (shdr->length < 1) {
+		dev_err(iface->dchid->dev, "Received length 0 output report ack\n");
+		return;
+	}
+	if (iface->tx_seq != hdr->seq) {
+		dev_err(iface->dchid->dev, "Received ACK with bad seq (expected %d, got %d)\n",
+			iface->tx_seq, hdr->seq);
+		return;
+	}
+	if (iface->out_report != payload[0]) {
+		dev_err(iface->dchid->dev, "Received ACK with bad report (expected %d, got %d\n",
+			iface->out_report, payload[0]);
+		return;
+	}
+
+	if (iface->resp_buf && iface->resp_size)
+		memcpy(iface->resp_buf, payload + 1, min((size_t)shdr->length - 1, iface->resp_size));
+
+	iface->resp_size = shdr->length;
+	iface->out_report = -1;
 	iface->retcode = shdr->retcode;
-	iface->out_pending = false;
 	complete(&iface->out_complete);
-done:
-	spin_unlock_irqrestore(&iface->out_lock, flags);
 }
 
 /* Return the complete frame size, or reject a lost framing boundary. */
@@ -1185,7 +1140,7 @@ static int dchid_frame_size(const struct dchid_hdr *hdr)
 static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 			  size_t size, bool fifo)
 {
-	const struct dchid_hdr *hdr = packet;
+	struct dchid_hdr *hdr = (void *)packet;
 	const struct dchid_subhdr *shdr = packet + sizeof(*hdr);
 	struct dchid_iface *iface;
 	struct dchid_work *work;
@@ -1213,7 +1168,7 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 	}
 	if (hdr->iface >= MAX_INTERFACES)
 		return -EPROTO;
-	iface = smp_load_acquire(&dchid->ifaces[hdr->iface]);
+	iface = dchid->ifaces[hdr->iface];
 	if (!iface)
 		return 0;
 	if (body < sizeof(*shdr)) {
@@ -1226,7 +1181,7 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 	if (round_up(length, 4) + sizeof(*shdr) != body)
 		return -EPROTO;
 	if (hdr->channel == DCHID_CHANNEL_CMD) {
-		dchid_handle_ack(iface, hdr, shdr);
+		dchid_handle_ack(iface, hdr, (void *)shdr);
 		return 0;
 	}
 	if (!length || FIELD_GET(FLAGS_GROUP, shdr->flags) != HID_INPUT_REPORT ||
@@ -1265,7 +1220,7 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 	if (!READ_ONCE(dchid->ring_registered))
 		return -EPROTO;
 
-	while (!READ_ONCE(dchid->failed)) {
+	while (1) {
 		producer = READ_ONCE(indices[0]);
 		consumer = READ_ONCE(indices[1]);
 		if (producer >= capacity || consumer != dchid->ring_read ||
@@ -1306,11 +1261,11 @@ static void dchid_handle_packet(void *cookie, size_t avail)
 	size_t count;
 	int ret;
 
-	while (avail && !READ_ONCE(dchid->failed)) {
+	while (avail) {
 		count = min(avail, dchid->pkt_size - dchid->pkt_used);
 		ret = dockchannel_recv(dchid->dc, dchid->pkt_buf + dchid->pkt_used, count);
 		if (ret != count) {
-			dchid_fail(dchid, ret < 0 ? ret : -EIO);
+			dev_err(dchid->dev, "Read failed (packet): %d\n", ret);
 			return;
 		}
 		avail -= count;
@@ -1337,13 +1292,14 @@ static void dchid_handle_packet(void *cookie, size_t avail)
 	 * A producer notification arriving during draining stays in the FIFO.
 	 * Rearming its level/threshold IRQ observes it even if it preceded rearm.
 	 */
-	if (!READ_ONCE(dchid->failed))
-		dockchannel_await(dchid->dc, dchid_handle_packet, dchid,
-				  dchid->pkt_size - dchid->pkt_used);
+	dockchannel_await(dchid->dc, dchid_handle_packet, dchid,
+			  dchid->pkt_size - dchid->pkt_used);
 	return;
 failed:
 	dev_err(dchid->dev, "Receive transport failed: %d\n", ret);
-	dchid_fail(dchid, ret);
+	dchid->pkt_used = 0;
+	dchid->pkt_size = sizeof(struct dchid_hdr);
+	dockchannel_await(dchid->dc, dchid_handle_packet, dchid, sizeof(struct dchid_hdr));
 }
 
 static int dockchannel_hid_probe(struct platform_device *pdev)
@@ -1365,7 +1321,6 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 	}
 
 	dchid->dev = dev;
-	mutex_init(&dchid->tx_mutex);
 	mutex_init(&dchid->ring_mutex);
 	dchid->pkt_size = sizeof(struct dchid_hdr);
 	dchid->use_ring = of_device_is_compatible(dev->of_node, "apple,t8132-dockchannel-hid");

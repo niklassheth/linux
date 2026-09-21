@@ -157,7 +157,7 @@ struct dchid_iface {
 
 	int index;
 	const char *name;
-	struct device_node *of_node;
+	const struct device_node *of_node;
 
 	uint8_t tx_seq;
 	bool deferred;
@@ -524,10 +524,6 @@ static int dchid_request_gpio(struct dchid_iface *iface)
 {
 	char prop_name[MAX_GPIO_NAME + 16];
 
-	/*
-	 * The older cmd-3 GPIO pulse has not been established for the T8132
-	 * SMC reset keys. Do not substitute a guessed software pulse.
-	 */
 	if (iface->dchid->use_ring) {
 		dev_err_once(iface->dchid->dev, "T8132 SMC reset GPIO operation is not established\n");
 		return -EOPNOTSUPP;
@@ -683,9 +679,6 @@ static int dchid_raw_request(struct hid_device *hdev,
 {
 	struct dchid_iface *iface = hdev->driver_data;
 
-	if (!len)
-		return -EINVAL;
-
 	switch (reqtype) {
 	case HID_REQ_GET_REPORT:
 		buf[0] = reportnum;
@@ -790,13 +783,12 @@ static int dchid_create_interface(struct dchid_iface *iface)
 
 static void dchid_handle_descriptor(struct dchid_iface *iface, void *hid_desc, size_t desc_len)
 {
-	if (iface->hid || iface->creating) {
+	if (iface->hid) {
 		dev_warn(iface->dchid->dev, "Tried to initialize already started interface %s!\n",
 			 iface->name);
 		return;
 	}
 
-	devm_kfree(iface->dchid->dev, iface->hid_desc);
 	iface->hid_desc = devm_kmemdup(iface->dchid->dev, hid_desc, desc_len, GFP_KERNEL);
 	if (!iface->hid_desc)
 		return;
@@ -864,8 +856,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 	struct dchid_iface *iface;
 	struct dchid_init_block_hdr *blk;
 
-	if (length < sizeof(*hdr) || !memchr(hdr->name, 0, sizeof(hdr->name)) ||
-	    hdr->iface == IFACE_COMM)
+	if (length < sizeof(*hdr))
 		return;
 
 	iface = dchid_get_interface(dchid, hdr->iface, hdr->name);
@@ -881,21 +872,18 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 		length -= sizeof(*blk);
 
 		if (blk->length > length)
-			return;
+			break;
 
 		switch (blk->type) {
 		case INIT_HID_DESCRIPTOR:
-			if (!blk->length)
-				return;
 			dchid_handle_descriptor(iface, data, blk->length);
 			break;
 
 		case INIT_GPIO_REQUEST: {
 			struct dchid_gpio_request *req = data;
 
-			if (sizeof(*req) > blk->length ||
-			    !memchr(req->name, 0, sizeof(req->name)))
-				return;
+			if (sizeof(*req) > length)
+				break;
 
 			if (iface->gpio_id) {
 				dev_err(dchid->dev,
@@ -914,7 +902,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 		case INIT_PRODUCT_NAME: {
 			char *product = data;
 
-			if (!blk->length || product[blk->length - 1] != 0) {
+			if (product[blk->length - 1] != 0) {
 				dev_warn(dchid->dev, "Unterminated product name for %s\n",
 					 iface->name);
 			} else {
@@ -937,7 +925,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 			break;
 	}
 
-	if (hdr->more_packets || !iface->hid_desc)
+	if (hdr->more_packets || (dchid->use_ring && !iface->hid_desc))
 		return;
 
 	/* We need to enable STM first, since it'll give us the device IDs */
@@ -1006,9 +994,6 @@ err:
 static void dchid_handle_event(struct dockchannel_hid *dchid, void *data, size_t length)
 {
 	u8 *p = data;
-
-	if (!length)
-		return;
 	switch (*p) {
 	case EVENT_INIT:
 		dchid_handle_init(dchid, data, length);
@@ -1290,7 +1275,7 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct dockchannel_hid *dchid;
-	struct device_node *helper;
+	struct device_node *child, *helper;
 	struct platform_device *helper_pdev;
 	struct property *prop;
 	int ret;
@@ -1315,22 +1300,26 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 	 * it's too late to defer the probe.
 	 */
 
-	for_each_property_of_node(dev->of_node, prop) {
-		size_t len = strlen(prop->name);
-		struct gpio_desc *gpio;
-		char name[MAX_GPIO_NAME + 16];
+	for_each_child_of_node(dev->of_node, child) {
+		for_each_property_of_node(child, prop) {
+			size_t len = strlen(prop->name);
+			struct gpio_desc *gpio;
 
-		if (len < 12 || strncmp("apple,", prop->name, 6) ||
-		    strcmp("-gpios", prop->name + len - 6))
-			continue;
-		if (len - 6 >= sizeof(name))
-			return -EINVAL;
-		memcpy(name, prop->name, len - 6);
-		name[len - 6] = 0;
-		gpio = gpiod_get_index(dev, name, 0, GPIOD_ASIS);
-		if (IS_ERR(gpio))
-			return dev_err_probe(dev, PTR_ERR(gpio), "Failed to get %s\n", prop->name);
-		gpiod_put(gpio);
+			if (len < 12 || strncmp("apple,", prop->name, 6) ||
+			    strcmp("-gpios", prop->name + len - 6))
+				continue;
+
+			gpio = fwnode_gpiod_get_index(&child->fwnode, prop->name, 0, GPIOD_ASIS,
+						      prop->name);
+			if (IS_ERR_OR_NULL(gpio)) {
+				if (PTR_ERR(gpio) == -EPROBE_DEFER) {
+					of_node_put(child);
+					return -EPROBE_DEFER;
+				}
+			} else {
+				gpiod_put(gpio);
+			}
+		}
 	}
 
 	/*

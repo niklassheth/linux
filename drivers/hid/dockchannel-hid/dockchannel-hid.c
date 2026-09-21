@@ -203,8 +203,6 @@ struct dockchannel_hid {
 	struct dchid_iface *ifaces[MAX_INTERFACES];
 
 	u8 pkt_buf[MAX_PKT_SIZE];
-	size_t pkt_used;
-	size_t pkt_size;
 
 	/* Workqueue to asynchronously create HID devices */
 	struct workqueue_struct *new_iface_wq;
@@ -266,7 +264,7 @@ dchid_get_interface(struct dockchannel_hid *dchid, int index, const char *name)
 	return iface;
 }
 
-static u32 dchid_checksum(const void *p, size_t length)
+static u32 dchid_checksum(void *p, size_t length)
 {
 	u32 sum = 0;
 
@@ -1106,63 +1104,52 @@ static int dchid_frame_size(const struct dchid_hdr *hdr)
  * Both receive transports pass complete frames here. Header bytes 6/7 and
  * application padding are opaque, checksum-covered data, not required zeroes.
  */
-static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
-			  size_t size, bool fifo)
+static int dchid_dispatch(struct dockchannel_hid *dchid, struct dchid_hdr *hdr,
+			  void *data, bool fifo)
 {
-	struct dchid_hdr *hdr = (void *)packet;
-	const struct dchid_subhdr *shdr = packet + sizeof(*hdr);
 	struct dchid_iface *iface;
 	struct dchid_work *work;
-	size_t length, body;
-	int frame_size;
+	u32 checksum;
 
-	if (size < sizeof(*hdr))
-		return -EPROTO;
-	frame_size = dchid_frame_size(hdr);
-	if (frame_size < 0 || frame_size != size)
-		return -EPROTO;
-	if (dchid_checksum(packet, size) != U32_MAX)
-		return -EBADMSG;
-
-	body = hdr->length;
-	if (hdr->channel == DCHID_CHANNEL_NOTIFY) {
-		if (!fifo || body || hdr->iface != IFACE_COMM)
-			return -EPROTO;
-		/* Not an application ACK: bytes 6/7 are not a retcode. */
-		return 1;
-	}
-	if (hdr->channel != DCHID_CHANNEL_CMD && hdr->channel != DCHID_CHANNEL_REPORT) {
-		dev_warn_ratelimited(dchid->dev, "Unknown channel 0x%x\n", hdr->channel);
+	checksum = dchid_checksum(hdr, sizeof(*hdr));
+	checksum += dchid_checksum(data, hdr->length + 4);
+	if (checksum != U32_MAX) {
+		dev_err(dchid->dev, "Checksum mismatch (iface %d): 0x%08x\n",
+			hdr->iface, checksum);
 		return 0;
 	}
-	if (hdr->iface >= MAX_INTERFACES)
-		return -EPROTO;
+
+	if (dchid->use_ring && hdr->channel == DCHID_CHANNEL_NOTIFY) {
+		/* A FIFO notification has no application subheader or report ID. */
+		return fifo && !hdr->length && hdr->iface == IFACE_COMM;
+	}
+
+	if (hdr->iface >= MAX_INTERFACES || hdr->length < sizeof(struct dchid_subhdr))
+		return 0;
 	iface = dchid->ifaces[hdr->iface];
-	if (!iface)
-		return 0;
-	if (body < sizeof(*shdr)) {
-		/* A transport status without a report ID cannot satisfy a command. */
-		dev_warn_ratelimited(dchid->dev, "Short status on iface %u channel 0x%x\n",
-				    hdr->iface, hdr->channel);
+	if (!iface) {
+		dev_err(dchid->dev, "Received packet for uninitialized iface %d\n", hdr->iface);
 		return 0;
 	}
-	length = shdr->length;
-	if (round_up(length, 4) + sizeof(*shdr) != body)
-		return -EPROTO;
-	if (hdr->channel == DCHID_CHANNEL_CMD) {
-		dchid_handle_ack(iface, hdr, (void *)shdr);
-		return 0;
-	}
-	if (!length || FIELD_GET(FLAGS_GROUP, shdr->flags) != HID_INPUT_REPORT ||
-	    FIELD_GET(FLAGS_REQ, shdr->flags) || shdr->retcode)
-		return 0;
 
-	work = kmalloc(sizeof(*work) + sizeof(*shdr) + length, GFP_KERNEL);
+	switch (hdr->channel) {
+	case DCHID_CHANNEL_CMD:
+		dchid_handle_ack(iface, hdr, data);
+		return 0;
+	case DCHID_CHANNEL_REPORT:
+		break;
+	default:
+		dev_warn(dchid->dev, "Unknown channel 0x%x, treating as report...\n",
+			 hdr->channel);
+		break;
+	}
+
+	work = kzalloc(sizeof(*work) + hdr->length, GFP_KERNEL);
 	if (!work)
-		return -ENOMEM;
+		return 0;
 	work->hdr = *hdr;
 	work->iface = iface;
-	memcpy(work->data, shdr, sizeof(*shdr) + length);
+	memcpy(work->data, data, hdr->length);
 	INIT_WORK(&work->work, dchid_packet_work);
 	queue_work(iface->wq, &work->work);
 	return 0;
@@ -1184,7 +1171,7 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 	const u32 capacity = DCHID_RING_SIZE - DCHID_RING_HEADER_SIZE;
 	u32 *indices = dchid->ring;
 	u32 producer, consumer, available;
-	int size, ret;
+	int size;
 
 	if (!READ_ONCE(dchid->ring_registered))
 		return -EPROTO;
@@ -1209,9 +1196,8 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 		if (available < size)
 			return 0;
 		dchid_ring_copy(dchid, dchid->pkt_buf, consumer, size);
-		ret = dchid_dispatch(dchid, dchid->pkt_buf, size, false);
-		if (ret < 0)
-			return ret;
+		dchid_dispatch(dchid, (void *)dchid->pkt_buf,
+			       dchid->pkt_buf + sizeof(struct dchid_hdr), false);
 		consumer += size;
 		if (consumer >= capacity)
 			consumer -= capacity;
@@ -1227,47 +1213,29 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 static void dchid_handle_packet(void *cookie, size_t avail)
 {
 	struct dockchannel_hid *dchid = cookie;
-	size_t count;
+	struct dchid_hdr hdr;
 	int ret;
 
-	while (avail) {
-		count = min(avail, dchid->pkt_size - dchid->pkt_used);
-		ret = dockchannel_recv(dchid->dc, dchid->pkt_buf + dchid->pkt_used, count);
-		if (ret != count) {
-			dev_err(dchid->dev, "Read failed (packet): %d\n", ret);
-			return;
-		}
-		avail -= count;
-		dchid->pkt_used += count;
-		if (dchid->pkt_used != dchid->pkt_size)
-			continue;
-		if (dchid->pkt_size == sizeof(struct dchid_hdr)) {
-			ret = dchid_frame_size((void *)dchid->pkt_buf);
-			if (ret < 0)
-				goto failed;
-			dchid->pkt_size = ret;
-			continue;
-		}
-		ret = dchid_dispatch(dchid, dchid->pkt_buf, dchid->pkt_size, true);
-		if (ret == 1)
-			ret = dchid_drain_ring(dchid);
-		if (ret < 0)
-			goto failed;
-		dchid->pkt_used = 0;
-		dchid->pkt_size = sizeof(struct dchid_hdr);
+	if (dockchannel_recv(dchid->dc, &hdr, sizeof(hdr)) != sizeof(hdr)) {
+		dev_err(dchid->dev, "Read failed (header)\n");
+		return;
+	}
+	if (hdr.hdr_len != sizeof(hdr)) {
+		dev_err(dchid->dev, "Bad header length %d\n", hdr.hdr_len);
+		goto done;
+	}
+	if (dockchannel_recv(dchid->dc, dchid->pkt_buf, hdr.length + 4) != hdr.length + 4) {
+		dev_err(dchid->dev, "Read failed (body)\n");
+		goto done;
 	}
 
-	/*
-	 * A producer notification arriving during draining stays in the FIFO.
-	 * Rearming its level/threshold IRQ observes it even if it preceded rearm.
-	 */
-	dockchannel_await(dchid->dc, dchid_handle_packet, dchid,
-			  dchid->pkt_size - dchid->pkt_used);
-	return;
-failed:
-	dev_err(dchid->dev, "Receive transport failed: %d\n", ret);
-	dchid->pkt_used = 0;
-	dchid->pkt_size = sizeof(struct dchid_hdr);
+	if (dchid_dispatch(dchid, &hdr, dchid->pkt_buf, true)) {
+		ret = dchid_drain_ring(dchid);
+		if (ret < 0)
+			dev_err(dchid->dev, "Receive ring failed: %d\n", ret);
+	}
+
+done:
 	dockchannel_await(dchid->dc, dchid_handle_packet, dchid, sizeof(struct dchid_hdr));
 }
 
@@ -1291,7 +1259,6 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 
 	dchid->dev = dev;
 	mutex_init(&dchid->ring_mutex);
-	dchid->pkt_size = sizeof(struct dchid_hdr);
 	dchid->use_ring = of_device_is_compatible(dev->of_node, "apple,t8132-dockchannel-hid");
 
 	/*
@@ -1356,36 +1323,26 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 		return PTR_ERR(dchid->dc);
 	}
 	if (dchid->use_ring) {
-		dchid->ring = dma_alloc_coherent(dev, DCHID_RING_SIZE, &dchid->ring_dma,
-						 GFP_KERNEL);
+		dchid->ring = dmam_alloc_coherent(dev, DCHID_RING_SIZE, &dchid->ring_dma,
+						  GFP_KERNEL);
 		if (!dchid->ring)
 			return -ENOMEM;
 		memset(dchid->ring, 0, DCHID_RING_SIZE);
 	}
 	dchid->new_iface_wq = alloc_workqueue("dchid-new", WQ_MEM_RECLAIM, 0);
-	if (!dchid->new_iface_wq) {
-		ret = -ENOMEM;
-		goto free_ring;
-	}
+	if (!dchid->new_iface_wq)
+		return -ENOMEM;
 
 	dchid->comm = dchid_get_interface(dchid, IFACE_COMM, "comm");
 	if (!dchid->comm) {
 		dev_err(dchid->dev, "Failed to initialize comm interface");
-		ret = -ENOMEM;
-		goto destroy_wq;
+		return -EIO;
 	}
 
 	dev_info(dchid->dev, "Initialized, awaiting packets\n");
 	dockchannel_await(dchid->dc, dchid_handle_packet, dchid, sizeof(struct dchid_hdr));
 
 	return 0;
-
-destroy_wq:
-	destroy_workqueue(dchid->new_iface_wq);
-free_ring:
-	if (dchid->ring)
-		dma_free_coherent(dev, DCHID_RING_SIZE, dchid->ring, dchid->ring_dma);
-	return ret;
 }
 
 static void dockchannel_hid_remove(struct platform_device *pdev)

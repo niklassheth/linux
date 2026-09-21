@@ -40,10 +40,10 @@
 struct dchid_hdr {
 	u8 hdr_len;
 	u8 channel;
-	__le16 length;
+	u16 length;
 	u8 seq;
 	u8 iface;
-	__le16 pad;
+	u16 pad;
 } __packed;
 
 #define IFACE_COMM 0
@@ -57,8 +57,8 @@ struct dchid_hdr {
 struct dchid_subhdr {
 	u8 flags;
 	u8 unk;
-	__le16 length;
-	__le32 retcode;
+	u16 length;
+	u32 retcode;
 } __packed;
 
 #define EVENT_GPIO_CMD	0xa0
@@ -87,15 +87,15 @@ struct dchid_init_hdr {
 #define CMD_ACK_GPIO_CMD 0xa1
 
 struct dchid_init_block_hdr {
-	__le16 type;
-	__le16 length;
+	u16 type;
+	u16 length;
 } __packed;
 
 #define MAX_GPIO_NAME 32
 
 struct dchid_gpio_request {
-	__le16 unk;
-	__le16 id;
+	u16 unk;
+	u16 id;
 	char name[MAX_GPIO_NAME];
 } __packed;
 
@@ -109,7 +109,7 @@ struct dchid_gpio_cmd {
 
 struct dchid_gpio_ack {
 	u8 type;
-	__le32 retcode;
+	u32 retcode;
 	u8 cmd[];
 } __packed;
 
@@ -133,11 +133,11 @@ struct dchid_stm_id {
 #define FW_VER 1
 
 struct fw_header {
-	__le32 magic;
-	__le32 version;
-	__le32 hdr_length;
-	__le32 data_length;
-	__le32 iface_offset;
+	u32 magic;
+	u32 version;
+	u32 hdr_length;
+	u32 data_length;
+	u32 iface_offset;
 } __packed;
 
 struct dchid_work {
@@ -321,7 +321,6 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 {
 	struct dockchannel_hid *dchid = iface->dchid;
 	u32 checksum = 0xffffffff;
-	__le32 wire_checksum;
 	size_t wsize = round_down(size, 4);
 	size_t tsize = size - wsize;
 	int ret;
@@ -335,11 +334,11 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 
 	h.hdr.hdr_len = sizeof(h.hdr);
 	h.hdr.channel = DCHID_CHANNEL_CMD;
-	h.hdr.length = cpu_to_le16(round_up(size, 4) + sizeof(h.sub));
+	h.hdr.length = round_up(size, 4) + sizeof(h.sub);
 	h.hdr.seq = iface->tx_seq;
 	h.hdr.iface = iface->index;
 	h.sub.flags = flags;
-	h.sub.length = cpu_to_le16(size);
+	h.sub.length = size;
 
 	/* Interface locks do not serialize the shared byte stream. */
 	mutex_lock(&dchid->tx_mutex);
@@ -368,8 +367,7 @@ static int dchid_send(struct dchid_iface *iface, u32 flags, void *msg, size_t si
 		checksum -= dchid_checksum(tail, sizeof(tail));
 	}
 
-	wire_checksum = cpu_to_le32(checksum);
-	ret = dockchannel_send(dchid->dc, &wire_checksum, sizeof(wire_checksum));
+	ret = dockchannel_send(dchid->dc, &checksum, sizeof(checksum));
 	if (ret < 0)
 		goto failed;
 	ret = 0;
@@ -476,12 +474,12 @@ static int dchid_register_ring(struct dockchannel_hid *dchid)
 	struct {
 		u8 cmd;
 		u8 reserved[2];
-		__le64 addr;
-		__le32 size;
+		u64 addr;
+		u32 size;
 	} __packed msg = {
 		.cmd = CMD_REGISTER_RING,
-		.addr = cpu_to_le64(dchid->ring_dma),
-		.size = cpu_to_le32(DCHID_RING_SIZE),
+		.addr = dchid->ring_dma,
+		.size = DCHID_RING_SIZE,
 	};
 	/* Observed in both macOS and standalone T8132 bringup before 0x91. */
 	u8 prepare[] = { 0xc1, 0x02 };
@@ -516,14 +514,14 @@ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t
 		u8 unk1;
 		u8 unk2;
 		u8 iface;
-		__le64 addr;
-		__le32 size;
+		u64 addr;
+		u32 size;
 	} __packed msg = {
 		.cmd = CMD_SEND_FIRMWARE,
 		.unk1 = 2,
 		.unk2 = 0,
 		.iface = iface->index,
-		.size = cpu_to_le32(size),
+		.size = size,
 	};
 
 	if (iface->firmware)
@@ -533,7 +531,7 @@ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t
 	if (!iface->firmware)
 		return -ENOMEM;
 
-	msg.addr = cpu_to_le64(iface->firmware_dma);
+	msg.addr = iface->firmware_dma;
 	memcpy(iface->firmware, firmware, size);
 	dma_wmb();
 
@@ -546,7 +544,6 @@ static int dchid_get_firmware(struct dchid_iface *iface, void **firmware, size_t
 	const char *fw_name;
 	const struct firmware *fw;
 	const struct fw_header *hdr;
-	u32 hdr_length, data_length, iface_offset;
 	u8 *fw_data;
 
 	ret = of_property_read_string(iface->of_node, "firmware-name", &fw_name);
@@ -566,31 +563,28 @@ static int dchid_get_firmware(struct dchid_iface *iface, void **firmware, size_t
 		goto done;
 	}
 	hdr = (const struct fw_header *)fw->data;
-	hdr_length = le32_to_cpu(hdr->hdr_length);
-	data_length = le32_to_cpu(hdr->data_length);
-	iface_offset = le32_to_cpu(hdr->iface_offset);
 
-	if (le32_to_cpu(hdr->magic) != FW_MAGIC || le32_to_cpu(hdr->version) != FW_VER ||
-	    hdr_length < sizeof(*hdr) || hdr_length > fw->size ||
-	    data_length > fw->size - hdr_length || !data_length ||
-	    iface_offset >= data_length) {
+	if (hdr->magic != FW_MAGIC || hdr->version != FW_VER ||
+	    hdr->hdr_length < sizeof(*hdr) || hdr->hdr_length > fw->size ||
+	    hdr->data_length > fw->size - hdr->hdr_length || !hdr->data_length ||
+	    hdr->iface_offset >= hdr->data_length) {
 		dev_warn(iface->dchid->dev, "%s: invalid firmware header\n",
 			 fw_name);
 		ret = -EINVAL;
 		goto done;
 	}
 
-	fw_data = kmemdup(fw->data + hdr_length, data_length, GFP_KERNEL);
+	fw_data = kmemdup(fw->data + hdr->hdr_length, hdr->data_length, GFP_KERNEL);
 	if (!fw_data) {
 		ret = -ENOMEM;
 		goto done;
 	}
 
-	if (iface_offset)
-		fw_data[iface_offset] = iface->index;
+	if (hdr->iface_offset)
+		fw_data[hdr->iface_offset] = iface->index;
 
 	*firmware = fw_data;
-	*size = data_length;
+	*size = hdr->data_length;
 
 done:
 	release_firmware(fw);
@@ -956,7 +950,6 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 	struct dchid_init_hdr *hdr = data;
 	struct dchid_iface *iface;
 	struct dchid_init_block_hdr *blk;
-	u16 type, block_len;
 
 	if (length < sizeof(*hdr) || !memchr(hdr->name, 0, sizeof(hdr->name)) ||
 	    hdr->iface == IFACE_COMM)
@@ -974,22 +967,20 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 		data += sizeof(*blk);
 		length -= sizeof(*blk);
 
-		block_len = le16_to_cpu(blk->length);
-		type = le16_to_cpu(blk->type);
-		if (block_len > length)
+		if (blk->length > length)
 			return;
 
-		switch (type) {
+		switch (blk->type) {
 		case INIT_HID_DESCRIPTOR:
-			if (!block_len)
+			if (!blk->length)
 				return;
-			dchid_handle_descriptor(iface, data, block_len);
+			dchid_handle_descriptor(iface, data, blk->length);
 			break;
 
 		case INIT_GPIO_REQUEST: {
 			struct dchid_gpio_request *req = data;
 
-			if (sizeof(*req) > block_len ||
+			if (sizeof(*req) > blk->length ||
 			    !memchr(req->name, 0, sizeof(req->name)))
 				return;
 
@@ -1000,7 +991,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 			}
 
 			strscpy(iface->gpio_name, req->name, MAX_GPIO_NAME);
-			iface->gpio_id = le16_to_cpu(req->id);
+			iface->gpio_id = req->id;
 			break;
 		}
 
@@ -1010,7 +1001,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 		case INIT_PRODUCT_NAME: {
 			char *product = data;
 
-			if (!block_len || product[block_len - 1] != 0) {
+			if (!blk->length || product[blk->length - 1] != 0) {
 				dev_warn(dchid->dev, "Unterminated product name for %s\n",
 					 iface->name);
 			} else {
@@ -1022,14 +1013,14 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 
 		default:
 			dev_warn(dchid->dev, "Unknown init packet %d for %s\n",
-				 type, iface->name);
+				 blk->type, iface->name);
 			break;
 		}
 
-		data += block_len;
-		length -= block_len;
+		data += blk->length;
+		length -= blk->length;
 
-		if (type == INIT_TERMINATOR)
+		if (blk->type == INIT_TERMINATOR)
 			break;
 	}
 
@@ -1090,7 +1081,7 @@ err:
 		return;
 
 	ack->type = CMD_ACK_GPIO_CMD;
-	ack->retcode = cpu_to_le32(retcode);
+	ack->retcode = retcode;
 	memcpy(ack->cmd, data, length);
 
 	if (dchid_comm_cmd(dchid, ack, sizeof(*ack) + length) < 0)
@@ -1140,7 +1131,7 @@ static void dchid_packet_work(struct work_struct *ws)
 	struct dchid_subhdr *shdr = (void *)work->data;
 	struct dockchannel_hid *dchid = work->iface->dchid;
 	u8 *payload = work->data + sizeof(*shdr);
-	size_t length = le16_to_cpu(shdr->length);
+	size_t length = shdr->length;
 
 	if (!READ_ONCE(dchid->failed)) {
 		if (work->hdr.iface == IFACE_COMM)
@@ -1155,7 +1146,7 @@ static void dchid_handle_ack(struct dchid_iface *iface, const struct dchid_hdr *
 			     const struct dchid_subhdr *shdr)
 {
 	const u8 *payload = (const void *)(shdr + 1);
-	size_t length = le16_to_cpu(shdr->length);
+	size_t length = shdr->length;
 	unsigned long flags;
 
 	spin_lock_irqsave(&iface->out_lock, flags);
@@ -1170,7 +1161,7 @@ static void dchid_handle_ack(struct dchid_iface *iface, const struct dchid_hdr *
 	} else {
 		iface->resp_size = length;
 	}
-	iface->retcode = le32_to_cpu(shdr->retcode);
+	iface->retcode = shdr->retcode;
 	iface->out_pending = false;
 	complete(&iface->out_complete);
 done:
@@ -1180,11 +1171,11 @@ done:
 /* Return the complete frame size, or reject a lost framing boundary. */
 static int dchid_frame_size(const struct dchid_hdr *hdr)
 {
-	size_t length = le16_to_cpu(hdr->length);
+	size_t length = hdr->length;
 
 	if (hdr->hdr_len != sizeof(*hdr) || !IS_ALIGNED(length, 4))
 		return -EPROTO;
-	return sizeof(*hdr) + length + sizeof(__le32);
+	return sizeof(*hdr) + length + sizeof(u32);
 }
 
 /*
@@ -1209,7 +1200,7 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 	if (dchid_checksum(packet, size) != U32_MAX)
 		return -EBADMSG;
 
-	body = le16_to_cpu(hdr->length);
+	body = hdr->length;
 	if (hdr->channel == DCHID_CHANNEL_NOTIFY) {
 		if (!fifo || body || hdr->iface != IFACE_COMM)
 			return -EPROTO;
@@ -1231,7 +1222,7 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 				    hdr->iface, hdr->channel);
 		return 0;
 	}
-	length = le16_to_cpu(shdr->length);
+	length = shdr->length;
 	if (round_up(length, 4) + sizeof(*shdr) != body)
 		return -EPROTO;
 	if (hdr->channel == DCHID_CHANNEL_CMD) {
@@ -1239,7 +1230,7 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, const void *packet,
 		return 0;
 	}
 	if (!length || FIELD_GET(FLAGS_GROUP, shdr->flags) != HID_INPUT_REPORT ||
-	    FIELD_GET(FLAGS_REQ, shdr->flags) || le32_to_cpu(shdr->retcode))
+	    FIELD_GET(FLAGS_REQ, shdr->flags) || shdr->retcode)
 		return 0;
 
 	work = kmalloc(sizeof(*work) + sizeof(*shdr) + length, GFP_KERNEL);
@@ -1267,7 +1258,7 @@ static void dchid_ring_copy(struct dockchannel_hid *dchid, void *dst,
 static int dchid_drain_ring(struct dockchannel_hid *dchid)
 {
 	const u32 capacity = DCHID_RING_SIZE - DCHID_RING_HEADER_SIZE;
-	__le32 *indices = dchid->ring;
+	u32 *indices = dchid->ring;
 	u32 producer, consumer, available;
 	int size, ret;
 
@@ -1275,8 +1266,8 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 		return -EPROTO;
 
 	while (!READ_ONCE(dchid->failed)) {
-		producer = le32_to_cpu(READ_ONCE(indices[0]));
-		consumer = le32_to_cpu(READ_ONCE(indices[1]));
+		producer = READ_ONCE(indices[0]);
+		consumer = READ_ONCE(indices[1]);
 		if (producer >= capacity || consumer != dchid->ring_read ||
 		    !IS_ALIGNED(producer, 4))
 			return -EPROTO;
@@ -1303,7 +1294,7 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 		dchid->ring_read = consumer;
 		/* All frame reads must complete before the producer can reuse it. */
 		mb();
-		WRITE_ONCE(indices[1], cpu_to_le32(consumer));
+		WRITE_ONCE(indices[1], consumer);
 		cond_resched();
 	}
 	return 0;

@@ -181,10 +181,6 @@ struct dchid_iface {
 	struct completion out_complete;
 
 	u32 keyboard_layout_id;
-
-	/* A registration ACK does not relinquish coprocessor DMA ownership. */
-	void *firmware;
-	dma_addr_t firmware_dma;
 };
 
 struct dockchannel_hid {
@@ -461,17 +457,15 @@ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t
 		.iface = iface->index,
 		.size = size,
 	};
+	dma_addr_t addr;
+	void *buf = dmam_alloc_coherent(iface->dchid->dev, size, &addr, GFP_KERNEL);
 
-	if (iface->firmware)
-		return -EALREADY;
-	iface->firmware = dma_alloc_coherent(iface->dchid->dev, size,
-					    &iface->firmware_dma, GFP_KERNEL);
-	if (!iface->firmware)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(buf))
+		return buf ? PTR_ERR(buf) : -ENOMEM;
 
-	msg.addr = iface->firmware_dma;
-	memcpy(iface->firmware, firmware, size);
-	dma_wmb();
+	msg.addr = addr;
+	memcpy(buf, firmware, size);
+	wmb();
 
 	return dchid_comm_cmd(iface->dchid, &msg, sizeof(msg));
 }
@@ -481,7 +475,7 @@ static int dchid_get_firmware(struct dchid_iface *iface, void **firmware, size_t
 	int ret;
 	const char *fw_name;
 	const struct firmware *fw;
-	const struct fw_header *hdr;
+	struct fw_header *hdr;
 	u8 *fw_data;
 
 	ret = of_property_read_string(iface->of_node, "firmware-name", &fw_name);
@@ -496,23 +490,20 @@ static int dchid_get_firmware(struct dchid_iface *iface, void **firmware, size_t
 	if (ret)
 		return ret;
 
-	if (fw->size < sizeof(*hdr)) {
-		ret = -EINVAL;
-		goto done;
-	}
-	hdr = (const struct fw_header *)fw->data;
+	hdr = (struct fw_header *)fw->data;
 
 	if (hdr->magic != FW_MAGIC || hdr->version != FW_VER ||
-	    hdr->hdr_length < sizeof(*hdr) || hdr->hdr_length > fw->size ||
-	    hdr->data_length > fw->size - hdr->hdr_length || !hdr->data_length ||
-	    hdr->iface_offset >= hdr->data_length) {
+		hdr->hdr_length < sizeof(*hdr) || hdr->hdr_length > fw->size ||
+		(hdr->hdr_length + (size_t)hdr->data_length) > fw->size ||
+		hdr->iface_offset >= hdr->data_length) {
 		dev_warn(iface->dchid->dev, "%s: invalid firmware header\n",
 			 fw_name);
 		ret = -EINVAL;
 		goto done;
 	}
 
-	fw_data = kmemdup(fw->data + hdr->hdr_length, hdr->data_length, GFP_KERNEL);
+	fw_data = devm_kmemdup(iface->dchid->dev, fw->data + hdr->hdr_length,
+			       hdr->data_length, GFP_KERNEL);
 	if (!fw_data) {
 		ret = -ENOMEM;
 		goto done;
@@ -563,7 +554,7 @@ static int dchid_request_gpio(struct dchid_iface *iface)
 
 static int dchid_start_interface(struct dchid_iface *iface)
 {
-	void *fw = NULL;
+	void *fw;
 	size_t size;
 	int ret;
 
@@ -579,13 +570,12 @@ static int dchid_start_interface(struct dchid_iface *iface)
 	if (ret < 0)
 		goto err;
 
-
 	/* Look to see if we need firmware */
 	ret = dchid_get_firmware(iface, &fw, &size);
 	if (ret < 0)
 		goto err;
 
-	/* T8132's proven startup has no host GPIO operations. */
+	/* T8132 startup does not use the older host GPIO reset. */
 	if (!iface->dchid->use_ring && iface->gpio_id) {
 		ret = dchid_request_gpio(iface);
 		if (ret < 0)
@@ -599,25 +589,19 @@ static int dchid_start_interface(struct dchid_iface *iface)
 		dev_info(iface->dchid->dev, "Sending firmware for %s\n", iface->name);
 		ret = dchid_send_firmware(iface, fw, size);
 		if (ret < 0) {
-			dev_err(iface->dchid->dev, "Failed to send %s firmware\n", iface->name);
+			dev_err(iface->dchid->dev, "Failed to send %s firmwareS", iface->name);
 			goto err;
 		}
 
 		/* After loading firmware, multi-touch needs a reset */
 		dev_info(iface->dchid->dev, "Resetting %s\n", iface->name);
-		ret = dchid_reset_interface(iface, 0);
-		if (ret < 0)
-			goto err;
-		ret = dchid_reset_interface(iface, 2);
-		if (ret < 0)
-			goto err;
+		dchid_reset_interface(iface, 0);
+		dchid_reset_interface(iface, 2);
 	}
 
-	kfree(fw);
 	return 0;
 
 err:
-	kfree(fw);
 	iface->starting = false;
 	return ret;
 }

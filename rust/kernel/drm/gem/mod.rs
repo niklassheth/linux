@@ -109,6 +109,12 @@ pub trait DriverObject: Sync + Send + Sized {
     ) -> Result<DmaBuf<<Self::Driver as drm::Driver>::Object>> {
         unimplemented!()
     }
+
+    /// Optional arguments for the driver data of GEM objects imported from
+    /// other drivers' DMA-BUFs. Imports are supported if this is implemented.
+    fn import_args() -> Self::Args {
+        unimplemented!()
+    }
 }
 
 /// Trait that represents a GEM object subtype

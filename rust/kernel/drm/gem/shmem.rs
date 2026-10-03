@@ -162,6 +162,38 @@ impl<T: DriverObject> Object<T> {
         Ok(obj)
     }
 
+    /// Allocate an object for the C shmem helpers to initialize, as for
+    /// imported DMA-BUFs.
+    extern "C" fn create_object_callback(
+        raw_dev: *mut bindings::drm_device,
+        size: usize,
+    ) -> *mut bindings::drm_gem_object {
+        // SAFETY: DRM passes a valid device of this driver.
+        let dev = unsafe { device::Device::<T::Driver>::from_raw(raw_dev) };
+        let new: Result<Pin<KBox<Self>>> = KBox::try_pin_init(
+            try_pin_init!(Self {
+                obj <- Opaque::init_zeroed(),
+                parent_resv_obj: None,
+                inner <- T::new(dev, size, T::import_args()),
+            }),
+            GFP_KERNEL,
+        );
+        let new = match new {
+            Ok(new) => new,
+            Err(e) => return e.to_ptr(),
+        };
+
+        // SAFETY: `obj.as_raw()` is guaranteed to be valid by the initialization above.
+        unsafe { (*new.as_raw()).funcs = &Self::VTABLE };
+
+        // SAFETY: We never move out of `self`. `free_callback` recovers the box, once the C helper
+        // has initialized the object.
+        let new = KBox::into_raw(unsafe { Pin::into_inner_unchecked(new) });
+
+        // SAFETY: `new` is valid, and the shmem object embeds its GEM object.
+        unsafe { &raw mut (*(*new).obj.get()).base }
+    }
+
     /// Returns the `Device` that owns this GEM object.
     pub fn dev(&self) -> &device::Device<T::Driver> {
         // SAFETY: `dev` will have been initialized in `Self::new()` by `drm_gem_shmem_init()`.
@@ -332,13 +364,21 @@ impl<T: DriverObject> driver::AllocImpl for Object<T> {
     type Driver = T::Driver;
 
     const ALLOC_OPS: driver::AllocOps = driver::AllocOps {
-        gem_create_object: None,
+        // The generic C allocators do not initialize the Rust object payload.
+        // Drivers with import arguments allocate it for imported DMA-BUFs.
+        gem_create_object: if T::HAS_IMPORT_ARGS {
+            Some(Self::create_object_callback)
+        } else {
+            None
+        },
         prime_handle_to_fd: None,
         prime_fd_to_handle: None,
         gem_prime_import: None,
-        // The generic C allocators do not initialize the Rust object payload.
-        // Support native GEM allocation and export only.
-        gem_prime_import_sg_table: None,
+        gem_prime_import_sg_table: if T::HAS_IMPORT_ARGS {
+            Some(bindings::drm_gem_shmem_prime_import_sg_table)
+        } else {
+            None
+        },
         dumb_create: None,
         dumb_map_offset: None,
     };

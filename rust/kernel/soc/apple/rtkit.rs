@@ -39,7 +39,7 @@ pub trait Buffer {
 
     /// Returns a mutable byte slice of the buffer contents, or an
     /// error if unavailable.
-    fn buf(&mut self) -> Result<IoSysMap<'_, u8>>;
+    fn buf(&mut self) -> Result<IoSysMap<'_, [u8]>>;
 }
 
 /// Callback operations for an RTKit client.
@@ -169,7 +169,7 @@ unsafe extern "C" fn shmem_setup_callback<T: Operations>(
         }
 
         bfr_mut.iova = iova as u64;
-        bfr_mut.buffer = sysmem.as_ptr() as *mut _;
+        bfr_mut.buffer = sysmem.as_ptr().cast();
 
         // Now box the returned buffer type and stash it in the private pointer of the
         // `apple_rtkit_shmem` struct for safekeeping.

@@ -274,6 +274,16 @@ impl<T: DriverObject> Object<T> {
             return Err(EINVAL);
         }
 
+        // An imported object's table belongs to its dma-buf attachment: it is mapped for this
+        // device at import and released by `drm_prime_gem_destroy()`. Wrapping it in an
+        // `SGTableMap` would unmap and free it a second time when the object is freed.
+        // SAFETY: `self.as_raw()` is valid for the lifetime of `self`.
+        if !unsafe { (*self.as_raw()).import_attach }.is_null() {
+            // SAFETY: For an imported object `sgt` is set at import and stays valid until the
+            // object is released, which outlives the borrow of `self`.
+            return Ok(unsafe { scatterlist::SGTable::from_raw((*self.as_raw_shmem()).sgt) });
+        }
+
         let sgt_res = 'out: {
             // Fast path: sgt_res is already initialized
             if let Some(sgt_res) = self.sgt_res.as_ref() {

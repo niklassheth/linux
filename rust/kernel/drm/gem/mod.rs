@@ -118,6 +118,12 @@ pub trait DriverObject: Sync + Send + Sized + 'static {
     ) -> Result<DmaBuf<<Self::Driver as drm::Driver>::Object>> {
         unimplemented!()
     }
+
+    /// Arguments for the driver data of objects that the C GEM helpers allocate, such as imported
+    /// DMA-BUFs. Implement this to have those objects allocated with a full driver payload.
+    fn import_args() -> Self::Args {
+        unimplemented!()
+    }
 }
 
 /// Trait that represents a GEM object subtype

@@ -300,6 +300,40 @@ impl<T: DriverObject> Object<T> {
         Ok(sgt_res.access(dev)?)
     }
 
+    /// `gem_create_object` callback: allocates the full Rust object for objects that the C shmem
+    /// helpers create and then initialize themselves, such as imported DMA-BUFs.
+    extern "C" fn create_object_callback(
+        raw_dev: *mut bindings::drm_device,
+        size: usize,
+    ) -> *mut bindings::drm_gem_object {
+        // SAFETY: DRM passes a valid device of this driver.
+        let dev = unsafe { Device::<T::Driver>::from_raw(raw_dev) };
+        let new: Result<Pin<KBox<Self>>> = KBox::try_pin_init(
+            try_pin_init!(Self {
+                obj <- Opaque::init_zeroed(),
+                parent_resv_obj: None,
+                sgt_res: ManuallyDrop::new(SetOnce::new()),
+                sgt_lock <- new_mutex!(()),
+                inner <- T::new(dev, size, T::import_args()),
+            }),
+            GFP_KERNEL,
+        );
+        let new = match new {
+            Ok(new) => new,
+            Err(e) => return e.to_ptr(),
+        };
+
+        // SAFETY: `obj.as_raw()` is guaranteed to be valid by the initialization above.
+        unsafe { (*new.as_raw()).funcs = &Self::VTABLE };
+
+        // SAFETY: We never move out of `self`; `free_callback` recovers the box once the C helper
+        // has initialized and later released the object.
+        let new = KBox::into_raw(unsafe { Pin::into_inner_unchecked(new) });
+
+        // SAFETY: `new` is valid, and the shmem object embeds its GEM object.
+        unsafe { &raw mut (*(*new).obj.get()).base }
+    }
+
     /// Create a new shmem-backed DRM object of the given size.
     ///
     /// Additional config options can be specified using `config`.
@@ -393,7 +427,13 @@ impl<T: DriverObject> driver::AllocImpl for Object<T> {
     type Driver = T::Driver;
 
     const ALLOC_OPS: driver::AllocOps = driver::AllocOps {
-        gem_create_object: None,
+        // Without a driver payload for helper-created objects, the C helpers would allocate a bare
+        // `drm_gem_shmem_object` that the Rust side treats as an `Object<T>`.
+        gem_create_object: if T::HAS_IMPORT_ARGS {
+            Some(Self::create_object_callback)
+        } else {
+            None
+        },
         prime_handle_to_fd: None,
         prime_fd_to_handle: None,
         gem_prime_import: None,

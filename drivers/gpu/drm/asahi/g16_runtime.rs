@@ -1612,12 +1612,14 @@ impl Bootstrap {
         if existing.is_none() {
             let previous = self.context_roots[slot].map(|r| r.low);
             self.set_context(slot, Some(roots))?;
-            pr_info!(
-                "G16: context {} bound to root {:#x} (previous {:#x})\n",
-                slot,
-                roots.low,
-                previous.unwrap_or(0)
-            );
+            if crate::module_parameters::debug_ctx.value() != 0 {
+                pr_info!(
+                    "G16: context {} bound to root {:#x} (previous {:#x})\n",
+                    slot,
+                    roots.low,
+                    previous.unwrap_or(0)
+                );
+            }
         }
         self.context_users[slot] += 1;
         Ok(slot as u32)

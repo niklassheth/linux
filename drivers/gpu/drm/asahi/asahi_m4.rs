@@ -232,6 +232,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 gives compute queues the native preemptible profile (Metal uses it for compute; this driver forces compute non-preemptible)",
         },
+        debug_ctx: u32 {
+            default: 0,
+            description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+        },
         context_sticky: u32 {
             default: 0,
             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",

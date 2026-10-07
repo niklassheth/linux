@@ -160,6 +160,10 @@ kernel::module_platform_driver! {
             default: 10000,
             description: "Debug: kernel watchdog for Works without retirement progress, in ms",
         },
+        compute_save_slot: u32 {
+            default: 0,
+            description: "Debug: point compute Work +0x883 at a per-queue 0x40-byte firmware record per Work, as Metal does (likely a preemption save slot); 0 writes null",
+        },
         retire_poll_ms: u32 {
             default: 0,
             description: "Debug: if nonzero, poll retirement at least this often while Works are in flight instead of waiting for a firmware notification up to the watchdog",

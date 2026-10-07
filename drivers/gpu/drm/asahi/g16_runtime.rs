@@ -2226,6 +2226,11 @@ impl Bootstrap {
         a.queue = lane.queue;
         a.driver_stamp = work + 0x4000;
         a.firmware_stamp = lane.firmware_stamp();
+        if crate::module_parameters::compute_save_slot.value() != 0 {
+            // 64 zeroed 0x40-byte records after the lane's ring in its
+            // shared pointers block (ring: +0x4000..+0x6800).
+            a.save_slot = lane.pointers + 0x7000 + (ordinal % 64) * 0x40;
+        }
         a.event = queue.event(2)?;
         self._address_space.as_ref().ok_or(EIO)?.sync();
         fw.sync();

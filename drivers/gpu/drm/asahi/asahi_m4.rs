@@ -164,6 +164,10 @@ kernel::module_platform_driver! {
             default: 10000,
             description: "Debug: kernel watchdog for Works without retirement progress, in ms",
         },
+        compute_regs: u32 {
+            default: 0,
+            description: "Debug: compute Work register values as in Metal traces: 1 = 0x0a599 upper word 0x132 and 0x1a458 = 0x10c08860",
+        },
         timeout_policy: u32 {
             default: 0,
             description: "Debug: on a watchdog expiry 0 poisons the GPU (all clients fail); 1 only logs the hang state and keeps running; 2 fails and bans only the timed-out queue (its Works stay quarantined, never freed) and ignores the scheduler timeout; 3 is 2 plus destroying the banned queue's firmware context, as macOS does when the owning process dies, so the firmware stops the stuck Work",

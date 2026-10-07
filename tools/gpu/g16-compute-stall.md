@@ -113,3 +113,26 @@ The controller Mac is used only to compile the source; no GPU test is run there.
   owner's existing macOS build environment; this is not yet validated.
 - Mini remains with claude-driver for queue32, with claude-kernel waiting.
   No lease, SSH session to the mini, reset or change to its live state by Codex.
+
+## Linux diagnostic WIP
+
+Tools/report committed locally as `2362984ee2396` on
+`bits/213-g16-compute-timeslice` (based on 212 at `cb8f8582a8823`).
+`g16_runtime.rs` now adds timeout-only diagnostics for each compute flight:
+queue runtime +0x9c, priority fields, firmware context words, support/FList
+identity/slot/directory/cursors, save-area VA, optional record contents, and
+register/value pairs including any firmware-added resume state. The hang report
+also records control read/done/write cursors. This makes the next recovery test
+able to distinguish a submitted teardown from a consumed teardown. There is no
+scheduling or recovery-policy change, and no UAPI change.
+
+Reads of optional firmware pointers tolerate unmapped addresses and use
+saturating offset additions. GPU user addresses are printed without following
+them through the firmware mapping. Register dumps use fixed stack storage.
+A GCC in-tree `Image.gz dtbs` build is running in the private worktree with the
+212 test configuration (`kernel-config.log`, `kernel-build.log`). No boot yet.
+
+Source audit also eliminates the alleged microsequence +0x2c8/+0x2d0 byte
+difference: our encoder writes firmware Work pointers at +0x2c1/+0x2c9. Their
+high bytes at +0x2c8/+0x2d0 are already 0xff, matching Metal. Do not spend a
+hardware slot changing those bytes independently of their containing pointers.

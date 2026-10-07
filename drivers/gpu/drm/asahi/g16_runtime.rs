@@ -798,6 +798,54 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// Preserve compute scheduling data without interpreting the optional
+    /// record at Work +0x883 as a save buffer. Only firmware mappings are read;
+    /// GPU addresses in the support/save-area descriptors are logged as values.
+    fn dump_compute_state(&self, flight: &Flight) -> Result {
+        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+        let word = |address| fw.read_u32(address).unwrap_or(0xdead_beef);
+        let pointer = |address| fw.read_u64(address).unwrap_or(0xdead_beef_dead_beef);
+        let queue = flight.queues[0].0.saturating_sub(0x4000);
+        let context = pointer(queue + 0xa4);
+        let support = pointer(flight.id + 0x86a);
+        let slot = pointer(flight.id + 0x883);
+        dev_err!(self.dev.as_ref(),
+                 "G16: compute queue={:#x} priority={}/{} runtime={:#x} context_object={:#x} context_words={:#x}/{:#x}/{:#x}\n",
+                 queue, word(queue + 0x30), word(queue + 0x48), word(queue + 0x9c),
+                 context, word(context), word(context.saturating_add(4)), word(context.saturating_add(0x24)));
+        dev_err!(self.dev.as_ref(),
+                 "G16: compute support={:#x} identity={:#x} slot_id={} directory={:#x} capacity={} cursor={} pages={} state={:#x} save_area={:#x} record={:#x}\n",
+                 support, pointer(support), word(support.saturating_add(8)), pointer(support.saturating_add(0x14)),
+                 word(support.saturating_add(0x1c)), word(support.saturating_add(0x24)), word(support.saturating_add(0x2c)),
+                 pointer(support.saturating_add(0x4c)), pointer(flight.id + 0x798), slot);
+        if slot != 0 && slot != 0xdead_beef_dead_beef {
+            dev_err!(self.dev.as_ref(),
+                     "G16: compute record words {:#018x} {:#018x} {:#018x} {:#018x}\n",
+                     pointer(slot), pointer(slot.saturating_add(8)), pointer(slot.saturating_add(0x10)), pointer(slot.saturating_add(0x18)));
+        }
+        // Register/value pairs are data, not GPU instructions. A fixed array
+        // keeps the timeout diagnostic independent of a successful allocation.
+        let mut registers = [(0u32, 0u64); 6];
+        let mut used = 0;
+        for index in 0..128u64 {
+            let address = flight.id + 0x20 + index * 12;
+            let entry = (word(address), pointer(address + 4));
+            if entry == (0, 0) {
+                break;
+            }
+            registers[used] = entry;
+            used += 1;
+            if used == registers.len() {
+                dev_err!(self.dev.as_ref(), "G16: compute regs {:x?}\n", &registers[..used]);
+                used = 0;
+            }
+        }
+        if used != 0 {
+            dev_err!(self.dev.as_ref(), "G16: compute regs {:x?}\n", &registers[..used]);
+        }
+        Ok(())
+    }
+
     /// Preserve the event and unfinished queue identities before poisoning the
     /// device. Firmware timeout events name a stamp slot, which can be shared
     /// by several in-flight Works from the same userspace queue.
@@ -815,6 +863,10 @@ impl Bootstrap {
             let addr = read64(0xd8c8);
             dev_err!(self.dev.as_ref(), "G16: fault info d8c0={:#018x} d8c8={:#018x} 17030={:#018x}\n",
                      info, addr, read64(0x17030));
+            dev_err!(self.dev.as_ref(), "G16: control read={} done={} write={}\n",
+                     guard.try_read32(0xd640c0).unwrap_or(0xdead_beef),
+                     guard.try_read32(0xd640c8).unwrap_or(0xdead_beef),
+                     guard.try_read32(0xd60060).unwrap_or(0xdead_beef));
             // Field layout as on G14X (regs.rs get_fault_info); not yet
             // validated on G16 beyond the VM slot matching the hung context.
             if info & 1 != 0 {
@@ -875,6 +927,9 @@ impl Bootstrap {
                      flight.id, flight.context, flight.started.elapsed().as_millis(),
                      flight.render.is_some(), flight.blocked,
                      flight.notifier_count.map(|(addr, total)| (word(addr), total)));
+            if flight.render.is_none() {
+                let _ = self.dump_compute_state(flight);
+            }
             for (stage, stamp) in flight.stamps.iter().enumerate() {
                 if let Some(stamp) = stamp {
                     dev_err!(self.dev.as_ref(), "G16:   stage {} fw stamp {:#x}={:#x} want {:#x}\n",

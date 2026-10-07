@@ -160,6 +160,10 @@ kernel::module_platform_driver! {
             default: 10000,
             description: "Debug: kernel watchdog for Works without retirement progress, in ms",
         },
+        compute_tail: u32 {
+            default: 0,
+            description: "Debug: compute Work tail as in Metal traces, bits: 1 = +0x870 u16 0xffff, 2 = +0x874 0x19a40, 4 = +0x81c 0, 8 = microsequence +0x38 event generation",
+        },
         compute_save_slot: u32 {
             default: 0,
             description: "Debug: point compute Work +0x883 at a per-queue 0x40-byte firmware record per Work, as Metal does (likely a preemption save slot); 0 writes null",

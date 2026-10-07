@@ -1399,6 +1399,7 @@ impl Bootstrap {
             .ok_or(EBUSY)?;
         if existing.is_none() {
             self.set_context(slot, Some(roots))?;
+            pr_info!("G16: context {} bound to root {:#x}\n", slot, roots.low);
         }
         self.context_users[slot] += 1;
         Ok(slot as u32)

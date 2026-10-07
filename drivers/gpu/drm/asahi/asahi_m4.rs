@@ -169,7 +169,7 @@ kernel::module_platform_driver! {
             description: "Tiling Work notifier-stamp flush flag (macOS writes 0; this driver previously wrote 1)",
         },
         render_preempt: u32 {
-            default: 0,
+            default: 1,
             description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",
         },
         dependency_kind: u32 {

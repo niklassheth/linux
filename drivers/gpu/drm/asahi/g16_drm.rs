@@ -199,7 +199,7 @@ pub(crate) fn register<'a>(
         failed: AtomicBool::new(false),
         notifications: runtime.notifications.clone(),
         runtime <- kernel::new_mutex!(runtime),
-        engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }), });
+        engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new(), quarantine: KVec::new() }), });
     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
     let bound: &'a platform::Device<Bound> = pdev;
     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
@@ -1142,6 +1142,9 @@ struct Engine {
     cursor: usize,
     jobs: KVec<Running>,
     issued: KVec<Issued>,
+    /// timeout_policy=2: executions of banned queues. Their buffer mappings
+    /// must outlive any firmware access, so they are never dropped.
+    quarantine: KVec<Arc<Execution>>,
 }
 
 impl WorkItem for Execution {
@@ -1183,6 +1186,15 @@ impl WorkItem for Execution {
                         .ok_or(EIO)?;
                     job.pending -= 1;
                     if let Err(error) = result {
+                        if error == ETIMEDOUT {
+                            let execution = job.execution.clone();
+                            engine.quarantine.push(execution, GFP_KERNEL)?;
+                        }
+                        let job = engine
+                            .jobs
+                            .iter_mut()
+                            .find(|r| r.execution.id == issued.owner)
+                            .ok_or(EIO)?;
                         job.error = Some(error);
                     }
                     progress = true;
@@ -1393,6 +1405,12 @@ impl sched::JobImpl for SubmissionJob {
     }
 
     fn timed_out(job: &mut sched::Job<Self>) -> sched::Status {
+        if crate::module_parameters::timeout_policy.value() == 2 {
+            // The runtime watchdog fails and bans the stuck queue itself;
+            // a slow job elsewhere must not take the device down.
+            pr_warn!("G16: scheduler timeout ignored (timeout_policy=2)\n");
+            return sched::Status::Nominal;
+        }
         job.execution.device.failed.store(true, Ordering::Release);
         job.execution.device.notifications.notify(false);
         // Wake the worker to quarantine firmware mappings and fail the jobs.

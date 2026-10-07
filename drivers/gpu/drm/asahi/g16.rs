@@ -223,6 +223,11 @@ pub(crate) struct Bootstrap {
     free_queues: KVec<u64>,
     render_failed: bool,
     flights: KVec<render_runtime::Flight>,
+    /// timeout_policy=2: Works of banned queues. The firmware may still run
+    /// them, so their memory is never released.
+    quarantine: KVec<render_runtime::Flight>,
+    /// Ids of quarantined Works still to be reported as failed by retire().
+    banned_ids: KVec<u64>,
     /// Flights retired by the latest scan, returned one per retire() call.
     retired: KVec<(u64, bool)>,
     publications: KVec<render_runtime::Publication>,
@@ -693,6 +698,8 @@ impl Bootstrap {
             free_queues: KVec::new(),
             render_failed: false,
             flights: KVec::new(),
+            quarantine: KVec::new(),
+            banned_ids: KVec::new(),
             retired: KVec::new(),
             publications: KVec::new(),
             batch_works: 0,

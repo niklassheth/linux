@@ -160,6 +160,14 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
         },
+        watchdog_ms: u32 {
+            default: 10000,
+            description: "Debug: kernel watchdog for Works without retirement progress, in ms",
+        },
+        timeout_policy: u32 {
+            default: 0,
+            description: "Debug: on a watchdog expiry 0 poisons the GPU (all clients fail); 1 only logs the hang state and keeps running, to characterise what still progresses",
+        },
         completion_control: u32 {
             default: 4,
             description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention). work_layout bit 4 forces 3",

@@ -93,6 +93,9 @@ pub(crate) struct Addresses {
     pub(crate) context: u32,
     pub(crate) identity: u64,
     pub(crate) register_identity: u64,
+    /// Work +0x883: per-Work firmware record (Metal: per-process slots,
+    /// 0x40 apart). Zero leaves it null.
+    pub(crate) save_slot: u64,
     pub(crate) counter: u64,
     pub(crate) event_generation: u32,
     pub(crate) stamp: u32,
@@ -122,6 +125,7 @@ impl Addresses {
             context: 1,
             identity: (1u64 << 32) | u64::from(count as u32),
             register_identity: (1u64 << 32) + 1,
+            save_slot: 0,
             counter: count,
             event_generation: count as u32,
             stamp: crate::g16_stamp::value(ordinal, 0x100),
@@ -214,7 +218,7 @@ impl Parameters {
             (0x834, a.timestamp_start),
             (0x83c, a.timestamp_end),
             (0x86a, a.support),
-            (0x883, 0),
+            (0x883, a.save_slot),
         ] {
             u64_at(&mut out, off, value);
         }

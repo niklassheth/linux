@@ -1200,11 +1200,13 @@ impl Bootstrap {
             let (id, limited) = self.retired.pop().ok_or(EIO)?;
             return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
         }
-        if let Some(flight) = self
+        let watchdog = i64::from(*crate::module_parameters::watchdog_ms.value()).max(100);
+        if let Some(index) = self
             .flights
             .iter()
-            .find(|f| f.started.elapsed().as_millis() >= 10000)
+            .position(|f| f.started.elapsed().as_millis() >= watchdog)
         {
+            let flight = &self.flights[index];
             dev_err!(
                 self.dev.as_ref(),
                 "G16: async Work {:#x} context {} timeout without retirement progress\n",
@@ -1212,6 +1214,13 @@ impl Bootstrap {
                 flight.context
             );
             let _ = self.dump_hang_state();
+            if *crate::module_parameters::timeout_policy.value() == 1 {
+                // Debug: keep running so other clients' progress, and any
+                // firmware timeout event, can be observed. Re-report after
+                // another watchdog period.
+                self.flights[index].started = Instant::now();
+                return Ok(None);
+            }
             self.render_failed = true;
             return Err(ETIMEDOUT);
         }
@@ -1223,9 +1232,12 @@ impl Bootstrap {
     pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
         self.flights
             .iter()
-            .map(|flight| (10000 - flight.started.elapsed().as_millis()).clamp(1, 10000) as u32)
+            .map(|flight| {
+                let watchdog = i64::from(*crate::module_parameters::watchdog_ms.value()).max(100);
+                (watchdog - flight.started.elapsed().as_millis()).clamp(1, watchdog) as u32
+            })
             .min()
-            .unwrap_or(10000)
+            .unwrap_or(*crate::module_parameters::watchdog_ms.value())
     }
 }
 

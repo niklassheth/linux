@@ -228,6 +228,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Work fields as macOS (debug): 1=no TVB growth request or fragment flags 0xba8/0xbdc, 2=render index rings, 4=completion control 3, 8=fragment gate 0xb5 after each 40-render cycle start",
         },
+        completion_control: u32 {
+            default: 4,
+            description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention). work_layout bit 4 forces 3",
+        },
         micro_layout: u32 {
             default: 0,
             description: "Microsequence scene and Work counter fields: 0=original, 1=as macOS (scene slot, per-Work counters)",

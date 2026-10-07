@@ -1200,7 +1200,7 @@ impl Bootstrap {
             let (id, limited) = self.retired.pop().ok_or(EIO)?;
             return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
         }
-        let watchdog = i64::from(*crate::module_parameters::watchdog_ms.value()).max(100);
+        let watchdog = i64::from(crate::module_parameters::watchdog_ms.value()).max(100);
         if let Some(index) = self
             .flights
             .iter()
@@ -1214,7 +1214,7 @@ impl Bootstrap {
                 flight.context
             );
             let _ = self.dump_hang_state();
-            if *crate::module_parameters::timeout_policy.value() == 1 {
+            if crate::module_parameters::timeout_policy.value() == 1 {
                 // Debug: keep running so other clients' progress, and any
                 // firmware timeout event, can be observed. Re-report after
                 // another watchdog period.
@@ -1233,11 +1233,11 @@ impl Bootstrap {
         self.flights
             .iter()
             .map(|flight| {
-                let watchdog = i64::from(*crate::module_parameters::watchdog_ms.value()).max(100);
+                let watchdog = i64::from(crate::module_parameters::watchdog_ms.value()).max(100);
                 (watchdog - flight.started.elapsed().as_millis()).clamp(1, watchdog) as u32
             })
             .min()
-            .unwrap_or(*crate::module_parameters::watchdog_ms.value())
+            .unwrap_or(crate::module_parameters::watchdog_ms.value())
     }
 }
 

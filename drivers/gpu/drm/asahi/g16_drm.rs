@@ -1165,7 +1165,9 @@ impl WorkItem for Execution {
                     // stamps. Retirement's watchdog reports a real hang; a
                     // lost notification simply retires the finished work.
                     Err(e) if e == ETIMEDOUT => {
-                        pr_warn!("G16: notification wait timed out; polling retirement\n");
+                        if crate::module_parameters::retire_poll_ms.value() == 0 {
+                            pr_warn!("G16: notification wait timed out; polling retirement\n");
+                        }
                     }
                     other => other?,
                 }
@@ -1334,7 +1336,11 @@ impl WorkItem for Execution {
                 engine.running = false;
                 return;
             }
-            let timeout_ms = runtime.watchdog_remaining_ms();
+            let mut timeout_ms = runtime.watchdog_remaining_ms();
+            let poll = crate::module_parameters::retire_poll_ms.value();
+            if poll != 0 {
+                timeout_ms = timeout_ms.min(poll);
+            }
             drop(runtime);
             drop(engine);
             if !result.unwrap_or(false) {

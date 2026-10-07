@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Run on the leased mini after a read-only boot. All writes go to tmpfs.
 set -euo pipefail
+unset ASAHI_MESA_DEBUG VK_DRIVER_FILES VK_ICD_FILENAMES LD_LIBRARY_PATH LD_PRELOAD
 : "${G16_OBSERVATION_DIR:?set a directory under /tmp}"
 case "$G16_OBSERVATION_DIR" in /tmp/codex-dota-*) ;; *) exit 64 ;; esac
 observe=$G16_OBSERVATION_DIR
@@ -35,6 +36,8 @@ for compositor in $(pgrep -x kwin_wayland); do
     awk '/lib(EGL|GL|vulkan_asahi)/ {print}' "/proc/$compositor/maps" >> "$observe/kwin-maps.txt"
 done
 HK_EXPERIMENTAL_APPLE9=1 vulkaninfo --summary > "$observe/vulkaninfo.txt" 2>&1
+grep -q 'deviceName.*Apple M4' "$observe/vulkaninfo.txt"
+grep -q 'driverName.*Honeykrisp' "$observe/vulkaninfo.txt"
 
 companion_pid= fault_pid=
 cleanup() {

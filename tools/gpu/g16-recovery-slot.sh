@@ -3,15 +3,24 @@
 # Host-side lease, read-only observation, production restore. No Mesa changes.
 set -euo pipefail
 workspace=/home/nsheth/Projects/asahi
-: "${G16_KERNEL_BUILD:?set the absolute private kernel build tree}"
-[ -s "$G16_KERNEL_BUILD/arch/arm64/boot/Image.gz" ]
-[ -s "$G16_KERNEL_BUILD/arch/arm64/boot/dts/apple/t8132-j773g.dtb" ]
+if [ -n "${G16_KERNEL_ARTIFACT:-}" ]; then
+    kernel_image=$G16_KERNEL_ARTIFACT/Image.gz
+    kernel_dtb=$G16_KERNEL_ARTIFACT/t8132-j773g.dtb
+    kernel_uts=$G16_KERNEL_ARTIFACT/utsversion.h
+else
+    : "${G16_KERNEL_BUILD:?set a private build tree or immutable G16_KERNEL_ARTIFACT}"
+    kernel_image=$G16_KERNEL_BUILD/arch/arm64/boot/Image.gz
+    kernel_dtb=$G16_KERNEL_BUILD/arch/arm64/boot/dts/apple/t8132-j773g.dtb
+    kernel_uts=$G16_KERNEL_BUILD/include/generated/utsversion.h
+fi
+[ -s "$kernel_image" ] && [ -s "$kernel_dtb" ] && [ -s "$kernel_uts" ]
 lease=$workspace/tools/lease/lease.sh
 owner=codex-dota
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$workspace/artifacts/dota-compute-stall-20261007/observe-$stamp
 remote_output=/tmp/codex-dota-$stamp
 mkdir -p "$local_output"
+sha256sum "$kernel_image" "$kernel_dtb" > "$local_output/boot-inputs.sha256"
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=5)
 mini=root@192.168.50.2
 wait_ssh() {
@@ -21,7 +30,7 @@ wait_ssh() {
     done
     return 1
 }
-"$lease" wait mini "$owner" 25 'compute teardown with native priority; diagnostic kernel; RO root'
+"$lease" wait mini "$owner" 15 'compute teardown with native priority; diagnostic kernel; RO root'
 boot_attempted=0
 cleanup() {
     rc=$?
@@ -32,12 +41,17 @@ cleanup() {
     fi
     if [ "$boot_attempted" = 1 ]; then
         scp "${ssh_options[@]}" -q -r "$mini:$remote_output" "$local_output/" 2>/dev/null || true
-        "$lease" renew mini "$owner" 15
-        if ! env -u IMAGE -u DTB -u KERNEL_BUILD EXTRA_ARGS=asahi_m4.dependency_kind=0 "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/production-boot.log" 2>&1; then
-            echo 'production restore boot failed' >&2
-            rc=1
-        elif ! wait_ssh || ! ssh "${ssh_options[@]}" "$mini" 'm4-post-boot; systemctl is-active input-forward-server m4-kwin claude-headless' > "$local_output/production-services.log" 2>&1; then
-            echo 'production post-boot verification failed' >&2
+        restored=0
+        for restore_attempt in 1 2 3; do
+            [ "$("$lease" holder mini)" = "$owner" ] || break
+            "$lease" renew mini "$owner" 15
+            if timeout 240 env -u IMAGE -u DTB -u KERNEL_BUILD EXTRA_ARGS=asahi_m4.dependency_kind=0 "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/production-boot-$restore_attempt.log" 2>&1 && wait_ssh && ssh "${ssh_options[@]}" "$mini" 'm4-post-boot; systemctl is-active input-forward-server m4-kwin claude-headless' > "$local_output/production-services-$restore_attempt.log" 2>&1; then
+                restored=1
+                break
+            fi
+        done
+        if [ "$restored" != 1 ]; then
+            echo 'production restoration failed after retries; inspect logs' >&2
             rc=1
         fi
     fi
@@ -51,12 +65,16 @@ readonly_args='ro systemd.mask=systemd-remount-fs.service systemd.mask=home.moun
 # priority enables teardown even when it has not enabled compute time-slicing.
 experiment_args="asahi_m4.dependency_kind=0 asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1 $readonly_args"
 boot_attempted=1
-env -u IMAGE -u DTB KERNEL_BUILD="$G16_KERNEL_BUILD" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
+timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
 wait_ssh
-expected_uts=$(sed -n 's/^#define UTS_VERSION "\(.*\)"$/\1/p' "$G16_KERNEL_BUILD/include/generated/utsversion.h")
+expected_uts=$(sed -n 's/^#define UTS_VERSION "\(.*\)"$/\1/p' "$kernel_uts")
 loaded_uts=$(ssh "${ssh_options[@]}" "$mini" 'uname -v')
 [ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted' >&2; exit 1; }
-ssh "${ssh_options[@]}" "$mini" 'test "$(cat /sys/module/asahi_m4/parameters/timeout_policy)" = 3 && test "$(cat /sys/module/asahi_m4/parameters/compute_preempt)" = 1'
+loaded_cmdline=$(ssh "${ssh_options[@]}" "$mini" 'cat /proc/cmdline')
+for required_argument in asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1; do
+    case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
+done
+printf '%s\n' "$loaded_uts" "$loaded_cmdline" > "$local_output/loaded-kernel.txt"
 # /tmp must be tmpfs before staging sources or running any GPU program.
 ssh "${ssh_options[@]}" "$mini" "test \"\$(findmnt -no FSTYPE /tmp)\" = tmpfs && mkdir -p '$remote_output'"
 lab=$workspace/tmp/cs2-memory-lab-20261005/lab

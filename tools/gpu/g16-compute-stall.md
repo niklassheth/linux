@@ -4,11 +4,11 @@ Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-dri
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (19:30 local)
+## Status / manager handoff (19:56 local)
 
 Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
-README, recovery README and timeout capture README. Auditing source and raw
-capture 4 before choosing a hardware experiment. No Apple binaries inspected.
+README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. Preparing the queued
+policy-3 + native-priority observation; Dota gfxr and capture 5 are not available yet. No Apple binaries inspected.
 
 **Request through manager to claude-compiler for capture 5:** capture op-0x20's
 firmware descriptor at +0x14 and user mappings at +0x1c/+0x24, plus the Work
@@ -42,6 +42,9 @@ packed pointer/status value; low bits must be retained in the capture.
 | C1 | Summarize captures 1–4 from raw JSONL | Captures 3/4 both use 256 distinct slots; process-registration correlation unproven |
 | C2 | Recheck cslice-184641 logs and cmdline | Combined tail/slot/register/native-priority fields negative; no rerun |
 | C3 | Prepare matched Metal spin with finite output controls | CPU LCG checks pass; Objective-C build unavailable on controller; mini execution pending capture-owner lease |
+| C4 | GCC build of integrated diagnostics + quarantined-lane follow-up | Pass; Image.gz/dtbs; no boot yet |
+| C5 | Streaming gfxr parser lifecycle fixture + local converter build | Pass; Dota capture pending |
+| C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | Prepared; waiting for shared hardware |
 
 ## Next
 
@@ -136,3 +139,103 @@ Source audit also eliminates the alleged microsequence +0x2c8/+0x2d0 byte
 difference: our encoder writes firmware Work pointers at +0x2c1/+0x2c9. Their
 high bytes at +0x2c8/+0x2d0 are already 0xff, matching Metal. Do not spend a
 hardware slot changing those bytes independently of their containing pointers.
+
+Build note (19:39): building the bit branch alone fails before the driver with
+missing `bindings::apple_rtkit_set_early_crashlog`: 212's base lacks the matching
+C header addition carried by the integration. Preserved initial build output
+as `kernel-build-bit-only.log`. Created `test/m4-7.3-213` in the same private
+worktree, based on the exact 212 test integration `1e2a1cd7c92c6`, then merged
+`bits/213-g16-compute-timeslice` (diagnostics commit `341adb26aed30`). Header
+now contains the required declaration; the in-tree GCC build is restarted.
+No changes to any other agent's branch or checkout.
+
+## Prepared Linux observation (not run)
+
+Prior `kwin-1744-timeout_policy=3` cmdline has **compute_preempt=0** (default).
+The native-priority tests use policy 1 (log-only), so the combination of
+native priority with actual context teardown is not covered by those negatives.
+Prepared `tools/gpu/g16-recovery-slot.sh` and `g16-recovery-observe.sh` for one
+new observation: policy 3 + compute_preempt=1, with the new diagnostics. This
+asks whether native priority enables teardown even if it does not enable
+compute time-slicing. No other Metal-field knobs are changed.
+
+Host wrapper requires the candidate Image/DTB, takes and renews the mini lease,
+verifies the booted UTS version and both boot argument tokens, stages source only
+into tmpfs, and restores production + m4-post-boot + service verification on
+exit. Remote wrapper rejects writable root/home, creates desktop tmpfs overlays,
+records renderer and KWin mappings, starts a companion before the existing
+forced-hang reproducer, and checks a new vkcube before/during/after teardown.
+Results remain **pending**; shell syntax checks pass. The supplied command is:
+
+    G16_KERNEL_ARTIFACT=$PWD/artifacts/m4-linux/bits-7.3-213-fcf0513 bash tmp/g16-compute-timeslice/tools/gpu/g16-recovery-slot.sh
+
+Do not run this while another owner holds the mini except through its lease
+wait; do not claim KWin is compositing just because its systemd unit is active.
+Fresh vkcube completion and continuing companion frames are required evidence.
+
+## Gfxrecon analysis path (prepared; Dota file pending)
+
+Built native x86-64 `gfxrecon-convert` from the existing source/build under
+`artifacts/mixed-pages/gfxrecon-muvm-build/` (6 build steps, success; help and
+build output saved here). The parser `tools/gpu/g16-gfxr-compute-summary.py`
+reads JSONL as a stream, follows command-buffer recordings and secondary
+execution into actual queue submissions, groups repeated dispatch patterns,
+and records first/last submit waits/fences. It reports direct dispatches by
+workgroup count, indirect dispatches with unknown dimensions, image-to-buffer
+copies and query resolves. Compute pipeline creation metadata links explicit
+compute operations to module handles / specialization. Image/query copies can
+be driver-internal compute, so they are included even without vkCmdDispatch.
+
+Validation fixture exercises secondary execution, command-buffer pool reset,
+Submit and Submit2 timeline waits, explicit/indirect dispatches, and a WAIT
+query resolve. Expected six submitted operations and two executions of the
+128-workgroup dispatch are checked. Fixture and result saved here. This is
+parser validation, **not Dota evidence**. `artifacts/dota-gfxrecon-20261007/`
+is empty as of 19:46; queue32 has not reached the capture step.
+
+Example once the Dota file arrives (streaming avoids a large intermediate JSON
+file; preserve pipefail and constrain host memory):
+
+    set -o pipefail
+    artifacts/mixed-pages/gfxrecon-muvm-build/tools/convert/gfxrecon-convert --format jsonl --output stdout artifacts/dota-gfxrecon-20261007/dota.gfxr | systemd-run --user --scope -p MemoryMax=2G python tmp/g16-compute-timeslice/tools/gpu/g16-gfxr-compute-summary.py > artifacts/dota-compute-stall-20261007/dota-compute-summary.json
+
+Workgroup count is **not duration**; indirect buffer contents and shader cost
+remain unresolved. Only four preceding sync commands are retained per operation;
+the summary cannot prove a wait was satisfied or identify the GPU hang alone.
+
+## Build success / final diagnostic addition (19:49)
+
+Private test integration `dbab7b4e3b541` completed GCC `Image.gz dtbs` with
+exit 0, including `RUSTC drivers/gpu/drm/asahi/asahi_m4.o`. Artifact initially
+staged at `artifacts/m4-linux/bits-7.3-213-341adb/`, UTS #1. No boot yet.
+Adding one follow-up diagnostic before the hardware observation: also sample
+up to four quarantined compute flights on subsequent hang reports. That lets
+us compare the **same** lane's runtime/context after a destroy has been
+published, alongside the control-ring acknowledgement cursors. Quarantine
+already retains all backing, so these reads do not alter lifetimes.
+
+Additional untested capture observation: capture 4 has one control op 0x1b,
+64-byte record `{u32 opcode=0x1b, +4=2, +8=2, remaining=0}`, ring index 79,
+before the first observed op-0x20 records. Capture 3's monitored window does
+not contain it. Our G16 source sends no op 0x1b. **Meaning unknown**; no kernel
+command injection planned from this single sample. Please include it and any
+other global setup commands when capturing process/pool registration in capture 5.
+The capture summarizer now preserves all observed control slots, not just op 0x20.
+
+## Latest state (19:56)
+
+Final diagnostic addition compiled and linked with exit 0, including Asahi
+Rust compilation: `kernel-build-quarantine.log`. Final image/DTB:
+`artifacts/m4-linux/bits-7.3-213-fcf0513/` (UTS #3, source integration
+`4e3176459a4ce`, diagnostic topic `fcf05134b5c35`). The initial `341adb` artifact
+lacks the quarantined-lane follow-up; use the **fcf0513** artifact for tests.
+Shell guards have been corrected for Rust module parameters' `perm: 0` (these
+parameters do not appear in sysfs); they verify cmdline tokens, while the kernel
+diagnostic verifies actual lane-priority data. Remote setup requires the Apple
+M4/Honeykrisp renderer and records the version. Restoration has bounded boot
+attempts and retries. No hardware result or recovery fix is claimed yet.
+
+
+The prepared slot uses the immutable artifact (Image/DTB/UTS header), records
+input hashes before waiting, and requests a 15-minute lease. It cannot silently
+boot a later rebuild of the worktree while queued.

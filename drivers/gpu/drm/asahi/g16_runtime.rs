@@ -956,6 +956,14 @@ impl Bootstrap {
                 }
             }
         }
+        // Quarantine retains all backing while teardown is unproven. Observe
+        // the same compute lane after publication of its destroy command so
+        // later timeouts can show whether its runtime counter stopped.
+        for flight in self.quarantine.iter().filter(|flight| flight.render.is_none()).take(4) {
+            dev_err!(self.dev.as_ref(), "G16: quarantined compute Work={:#x} context={}\n",
+                     flight.id, flight.context);
+            let _ = self.dump_compute_state(flight);
+        }
         // Newest firmware trace-ring entries (512 x 0x48 at 0xe5c40).
         let write = fw.read_u32(0xffff_fc20_0003_f3c0 + 0x20)?;
         for back in 1..=6u32 {

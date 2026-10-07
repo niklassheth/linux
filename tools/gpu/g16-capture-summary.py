@@ -43,6 +43,7 @@ def summarize(path):
     counts = collections.Counter()
     lanes = {}
     registrations = {}
+    controls = {}
     snapshot_slots = collections.Counter()
     errors = []
     with records(path) as stream:
@@ -54,7 +55,14 @@ def summarize(path):
             if kind == 'control_dump':
                 for slot in record['slots']:
                     raw = bytes.fromhex(slot['bytes'])
-                    if len(raw) < 0x38 or u32(raw, 0) != 0x20:
+                    if len(raw) < 0x38:
+                        continue
+                    control_key = (slot['index'], raw.hex())
+                    controls.setdefault(control_key, {'ring_index': slot['index'],
+                        'first_host_time': record['host_time'],
+                        'opcode': hex(u32(raw, 0)),
+                        'words': list(struct.unpack('<16I', raw[:0x40]))})
+                    if u32(raw, 0) != 0x20:
                         continue
                     fields = {name: u32(raw, offset) for name, offset in (
                         ('context_field', 4), ('mask', 8), ('uuid', 12),
@@ -113,6 +121,7 @@ def summarize(path):
     return {'path': str(path), 'record_counts': dict(counts),
             'compute_lanes': output_lanes,
             'op20_registrations': list(registrations.values()),
+            'control_slot_samples': list(controls.values()),
             'slot_snapshot_changes': dict(snapshot_slots), 'errors': errors,
             'limits': ['Slot span and reuse are observations, not an ABI capacity claim.',
                        'op20 context_field is not assumed to be a Work ASID.',

@@ -1221,12 +1221,36 @@ impl Bootstrap {
                 flight.context
             );
             let _ = self.dump_hang_state();
-            if crate::module_parameters::timeout_policy.value() == 2 {
+            if crate::module_parameters::timeout_policy.value() >= 2 {
                 // Fail and ban only this queue. Its Works may still be
                 // running in firmware, so they move to the quarantine and
                 // keep their Work, scratch and context-slot references.
                 let owner = self.flights[index].owner.clone();
                 owner.lock().banned = true;
+                if crate::module_parameters::timeout_policy.value() == 3 {
+                    // Destroy the banned queue's firmware context now, as
+                    // macOS does at process death; the firmware then stops
+                    // the stuck Work. The storage stays leaked: quarantined
+                    // Works still reference its rings and stamps.
+                    let storage = owner.lock().storage.take();
+                    if let Some(storage) = storage {
+                        let base = storage.base;
+                        core::mem::forget(storage);
+                        match self.destroy_queue_context(base)? {
+                            Some(target) => dev_err!(
+                                self.dev.as_ref(),
+                                "G16: destroying banned queue context {:#x} (control target {})\n",
+                                base,
+                                target
+                            ),
+                            None => dev_err!(
+                                self.dev.as_ref(),
+                                "G16: control ring full; banned queue context {:#x} kept\n",
+                                base
+                            ),
+                        }
+                    }
+                }
                 let mut i = 0;
                 while i < self.flights.len() {
                     if Arc::ptr_eq(&self.flights[i].owner, &owner) {

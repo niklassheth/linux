@@ -166,7 +166,7 @@ kernel::module_platform_driver! {
         },
         timeout_policy: u32 {
             default: 0,
-            description: "Debug: on a watchdog expiry 0 poisons the GPU (all clients fail); 1 only logs the hang state and keeps running; 2 fails and bans only the timed-out queue (its Works stay quarantined, never freed) and ignores the scheduler timeout",
+            description: "Debug: on a watchdog expiry 0 poisons the GPU (all clients fail); 1 only logs the hang state and keeps running; 2 fails and bans only the timed-out queue (its Works stay quarantined, never freed) and ignores the scheduler timeout; 3 is 2 plus destroying the banned queue's firmware context, as macOS does when the owning process dies, so the firmware stops the stuck Work",
         },
         completion_control: u32 {
             default: 4,

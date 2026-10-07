@@ -228,6 +228,8 @@ pub(crate) struct Bootstrap {
     quarantine: KVec<render_runtime::Flight>,
     /// Ids of quarantined Works still to be reported as failed by retire().
     banned_ids: KVec<u64>,
+    /// compute_identity=1: device-wide counter for the low identity half.
+    identity_counter: u32,
     /// Flights retired by the latest scan, returned one per retire() call.
     retired: KVec<(u64, bool)>,
     publications: KVec<render_runtime::Publication>,
@@ -700,6 +702,7 @@ impl Bootstrap {
             flights: KVec::new(),
             quarantine: KVec::new(),
             banned_ids: KVec::new(),
+            identity_counter: 0,
             retired: KVec::new(),
             publications: KVec::new(),
             batch_works: 0,

@@ -249,6 +249,17 @@ impl Parameters {
         }
         out[0x872] = 1;
         out[0x88b] = 1;
+        let tail = crate::module_parameters::compute_tail.value();
+        if tail & 1 != 0 {
+            out[0x870] = 0xff;
+            out[0x871] = 0xff;
+        }
+        if tail & 2 != 0 {
+            u32_at(&mut out, 0x874, 0x19a40);
+        }
+        if tail & 4 != 0 {
+            u32_at(&mut out, 0x81c, 0);
+        }
         Some(out)
     }
 
@@ -259,6 +270,10 @@ impl Parameters {
             (0x2c, a.context),
             (0x30, 1),
             (0x34, a.event_generation),
+            (
+                0x38,
+                if crate::module_parameters::compute_tail.value() & 8 != 0 { a.event_generation } else { 0 },
+            ),
             (0x50, a.identity as u32),
             (0x1b0, a.counter as u32),
             (0x1b8, a.event),

@@ -160,6 +160,10 @@ kernel::module_platform_driver! {
             default: 10000,
             description: "Debug: kernel watchdog for Works without retirement progress, in ms",
         },
+        retire_poll_ms: u32 {
+            default: 0,
+            description: "Debug: if nonzero, poll retirement at least this often while Works are in flight instead of waiting for a firmware notification up to the watchdog",
+        },
         compute_identity: u32 {
             default: 0,
             description: "Debug: per-Work compute register identity (0x1a540/0x014a9/0x0a351) as in Metal traces, [tag|queue counter x2]:[0x08|device counter], instead of the constant (context<<32)|1",

@@ -2234,7 +2234,18 @@ impl Bootstrap {
         self.invalidate_client(client);
         a.context = self.acquire_context(space, 1)?;
         a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
-        a.register_identity = (u64::from(a.context) << 32) | 1;
+        a.register_identity = if crate::module_parameters::compute_identity.value() != 0 {
+            // Metal: two [8-bit tag | 24-bit counter] halves; the high half
+            // steps by two per Work of the queue, the low half follows a
+            // device-wide submission counter. Never constant.
+            self.identity_counter = self.identity_counter.wrapping_add(1);
+            let tag = 0x06u64 + 2 * u64::from(a.context & 1);
+            let high = (tag << 24) | ((queue.compute_count.wrapping_mul(2)) & 0xff_ffff);
+            let low = (0x08u64 << 24) | u64::from(self.identity_counter & 0xff_ffff);
+            (high << 32) | low
+        } else {
+            (u64::from(a.context) << 32) | 1
+        };
         self.render_failed = true;
         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
         let work = params.work(&a).ok_or(EINVAL)?;

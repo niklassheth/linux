@@ -160,6 +160,10 @@ kernel::module_platform_driver! {
             default: 10000,
             description: "Debug: kernel watchdog for Works without retirement progress, in ms",
         },
+        compute_identity: u32 {
+            default: 0,
+            description: "Debug: per-Work compute register identity (0x1a540/0x014a9/0x0a351) as in Metal traces, [tag|queue counter x2]:[0x08|device counter], instead of the constant (context<<32)|1",
+        },
         compute_regs: u32 {
             default: 0,
             description: "Debug: compute Work register values as in Metal traces: 1 = 0x0a599 upper word 0x132 and 0x1a458 = 0x10c08860",

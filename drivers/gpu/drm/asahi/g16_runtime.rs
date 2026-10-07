@@ -29,6 +29,9 @@ pub(crate) struct FirmwareQueues {
     /// Render Works counted into the queue's shared notifier (two per render).
     notified_works: u32,
     pub(crate) last: [Option<Stamp>; 2],
+    /// timeout_policy=2: a Work of this queue exceeded the watchdog. New
+    /// submissions fail; the client sees device loss.
+    pub(crate) banned: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +117,7 @@ impl FirmwareQueues {
             compute_count: crate::module_parameters::fw_counter_start.value(),
             notified_works: 0,
             last: [None; 2],
+            banned: false,
         }
     }
 
@@ -1031,6 +1035,9 @@ impl Bootstrap {
     }
 
     pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+        if let Some(id) = self.banned_ids.pop() {
+            return Ok(Some((id, Err(ETIMEDOUT))));
+        }
         if self.render_failed {
             return Err(EIO);
         }
@@ -1214,6 +1221,34 @@ impl Bootstrap {
                 flight.context
             );
             let _ = self.dump_hang_state();
+            if crate::module_parameters::timeout_policy.value() == 2 {
+                // Fail and ban only this queue. Its Works may still be
+                // running in firmware, so they move to the quarantine and
+                // keep their Work, scratch and context-slot references.
+                let owner = self.flights[index].owner.clone();
+                owner.lock().banned = true;
+                let mut i = 0;
+                while i < self.flights.len() {
+                    if Arc::ptr_eq(&self.flights[i].owner, &owner) {
+                        let flight = self.flights.remove(i).map_err(|_| EIO)?;
+                        self.banned_ids.push(flight.id, GFP_KERNEL)?;
+                        self.quarantine.push(flight, GFP_KERNEL)?;
+                    } else {
+                        i += 1;
+                    }
+                }
+                dev_err!(
+                    self.dev.as_ref(),
+                    "G16: banned the timed-out queue; {} Works quarantined ({} total)\n",
+                    self.banned_ids.len(),
+                    self.quarantine.len()
+                );
+                let now = Instant::now();
+                for pending in &mut self.flights {
+                    pending.started = now;
+                }
+                return Ok(self.banned_ids.pop().map(|id| (id, Err(ETIMEDOUT))));
+            }
             if crate::module_parameters::timeout_policy.value() == 1 {
                 // Debug: keep running so other clients' progress, and any
                 // firmware timeout event, can be observed. Re-report after
@@ -1543,6 +1578,9 @@ impl Bootstrap {
         dependencies: &[Option<Stamp>; 2],
     ) -> Result<Receipt> {
         let mut queue = queues.lock();
+        if queue.banned {
+            return Err(EIO);
+        }
         let root = owner.lock().roots().low;
         let initbm = !self
             .tvb_pools
@@ -2097,6 +2135,9 @@ impl Bootstrap {
         dependencies: &[Option<Stamp>; 2],
     ) -> Result<Receipt> {
         let mut queue = queues.lock();
+        if queue.banned {
+            return Err(EIO);
+        }
         let mut client = owner.lock();
         self.reserve_flight(
             &queue,

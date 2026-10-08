@@ -469,7 +469,6 @@ impl Bootstrap {
             0xffff_fc20_0011_8000,
             0xffff_fc20_0012_0000,
             0xffff_fc20_0012_8000,
-            0xffff_fc20_0013_0000,
             0xffff_fc20_0015_0000,
             0xffff_fc20_0014_0000,
             0xffff_fc20_001b_0000,
@@ -485,6 +484,8 @@ impl Bootstrap {
                 crate::pgtable::prot::PROT_FW_SHARED_RW,
             )?;
         }
+        let (region2_gpu, region2_fw, region2_size) = crate::g16_fw::region2();
+        firmware_space.alloc(region2_fw, region2_size, crate::pgtable::prot::PROT_FW_SHARED_RW)?;
         firmware_space.alloc(
             0xffff_fc20_001b_8000,
             PAGE_SIZE as usize,
@@ -507,10 +508,14 @@ impl Bootstrap {
         ] {
             address_space.alloc_low(va, size, crate::pgtable::prot::PROT_GPU_SHARED_RO)?;
         }
-        for (low, high) in [
-            (0x70_0027_8000, 0xffff_fc20_0012_8000),
-            (0x70_0028_0000, 0xffff_fc20_0013_0000),
-        ] {
+        let mut aliases = KVec::new();
+        aliases.push((0x70_0027_8000u64, 0xffff_fc20_0012_8000u64), GFP_KERNEL)?;
+        let mut offset = 0u64;
+        while offset < region2_size as u64 {
+            aliases.push((region2_gpu + offset, region2_fw + offset), GFP_KERNEL)?;
+            offset += PAGE_SIZE as u64;
+        }
+        for &(low, high) in aliases.iter() {
             let pa = firmware_space.physical(high)?;
             address_space.low.map_pages(
                 low..low + PAGE_SIZE,

@@ -16,6 +16,20 @@ pub(crate) const MAIN_OFFSET: usize = 0x1da40;
 pub(crate) const MAIN_SIZE: usize = 0x500;
 pub(crate) const CONTROL_DATA: u64 = 0xffff_fc20_c052_8000;
 pub(crate) const CONTROL_AUX: u64 = 0xffff_fc20_0014_8000;
+/// The firmware's selector-2 region: (GPU alias, firmware VA, size). The 3D
+/// Work's third and fourth (offset, descriptor) pairs address it, and Metal
+/// gives each render its own offsets in it. Experiment (pair_source 4/5):
+/// relocate it to a zeroed 8 MiB area so those offsets are mapped; by default
+/// it is the single page the firmware bootstrap has always used, which the
+/// fixed offsets lie outside of.
+pub(crate) fn region2() -> (u64, u64, usize) {
+    if crate::module_parameters::pair_source.value() >= 4 {
+        (0x70_4000_0000, 0xffff_fc21_0000_0000, 0x80_0000)
+    } else {
+        (0x70_0028_0000, 0xffff_fc20_0013_0000, 0x4000)
+    }
+}
+
 pub(crate) const OPERAND_TABLE: u64 = 0x70_0040_8000;
 pub(crate) const TIMESTAMP_BASE: u64 = 0xffff_fc21_8140_0000;
 pub(crate) const TIMESTAMP_SIZE: u64 = 0x400_0000;
@@ -171,8 +185,8 @@ impl MainConfig {
                 0xffff_fc20_c051_8000,
                 0x70_0027_8000,
                 0xffff_fc20_0012_8000,
-                0x70_0028_0000,
-                0xffff_fc20_0013_0000,
+                region2().0,
+                region2().1,
                 0,
             ],
             unaligned: bundle + 0x5380,

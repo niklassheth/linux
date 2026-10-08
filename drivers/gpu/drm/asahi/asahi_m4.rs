@@ -124,6 +124,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
         },
+        pair_source: u32 {
+            default: 0,
+            description: "Experiment: the firmware's selector-2 region and the 3D Work pairs 3/4 in it. 0: one page with fixed offsets outside it (as before); 5: an 8 MiB zeroed region, same fixed offsets now mapped; 4: the 8 MiB region with per-render offsets (64 slots)",
+        },
         ta3d_item: u32 {
             default: 0,
             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",

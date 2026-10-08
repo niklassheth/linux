@@ -403,6 +403,8 @@ pub(crate) struct Addresses {
     pub(crate) empty_buffer: u64,
     pub(crate) event_control: u64,
     pub(crate) fragment_counter: u64,
+    /// Device-wide render publication slot for the selector-2 pairs.
+    pub(crate) pair_slot: u64,
     pub(crate) fragment_driver_stamp: u64,
     pub(crate) fragment_register_alias: u64,
     pub(crate) fragment_shared_tail: u64,
@@ -758,8 +760,19 @@ impl Parameters {
         out[0x80..0x680].copy_from_slice(&registers);
         u64_at(&mut out, 0x680, 0x8c020001dddc00);
         u64_at(&mut out, 0x688, 0xa0001de1800);
-        u64_at(&mut out, 0x690, 0x8c020200029800);
-        u64_at(&mut out, 0x698, 0x220200039520);
+        // Pairs 3/4 address the firmware's selector-2 region (see
+        // g16_fw::region2). pair_source=4 gives every render in flight its own
+        // offsets (64 slots, 0x20000 apart, the fourth pair 0x10300 after the
+        // third as in Metal) in the relocated region; 0 and 5 keep the fixed
+        // offsets, which only the relocated region (5) actually maps.
+        let (pair3, pair4) = if crate::module_parameters::pair_source.value() == 4 {
+            let slot = a.pair_slot * 0x20000;
+            (slot, slot + 0x10300)
+        } else {
+            (0x29800, 0x39520)
+        };
+        u64_at(&mut out, 0x690, (0x8c0202 << 32) | pair3);
+        u64_at(&mut out, 0x698, (0x2202 << 32) | pair4);
         u64_at(&mut out, 0x780, a.fragment_register_alias);
         out[0x788..0x78a].copy_from_slice(&(0x51u16).to_le_bytes());
         out[0x78a..0x78c].copy_from_slice(&((0x51 * 0xc) as u16).to_le_bytes());
@@ -1009,6 +1022,7 @@ impl Addresses {
             event_control: 0xfffffc20c0588100,
             event_count_array: 0xfffffc20001b0000,
             fragment_counter: 0x0,
+            pair_slot: 0,
             fragment_driver_stamp: 0xfffffc2000118044,
             fragment_event: 0x11,
             fragment_firmware_stamp: 0xfffffc20c0510044,
@@ -1143,6 +1157,7 @@ impl Addresses {
         let mut a = *self;
         a.tiling_counter = a.tiling_counter.wrapping_add(ordinal.wrapping_mul(2));
         a.fragment_counter = a.fragment_counter.wrapping_add(ordinal.wrapping_mul(2));
+        a.pair_slot = ordinal % 64;
         a.tiling_stamp = u64::from(crate::g16_stamp::value(ordinal, self.tiling_stamp as u32));
         a.fragment_stamp = u64::from(crate::g16_stamp::value(ordinal, self.fragment_stamp as u32));
         a.buffer_thing = (self.buffer_thing & !0x3fff) + ((ordinal % 80 + 1) % 80) * 0x80;

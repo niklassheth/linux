@@ -299,6 +299,41 @@ BURST
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;
+    replay-loop|replay-loop-x86)
+        # Exposure loop (A4 is ~40% per live run): the full gfxr trace (116 frames, ~27 s) replayed back to back,
+        # -m rebind --sfa, native trace driver (replay-loop) or x86 in m4-muvm (replay-loop-x86), up to 12 times,
+        # stopping at a G16 hang.
+        mkdir -p "$observe/driver-trace"
+        cp "$observe/extra/libvulkan_asahi.quar.so" "$observe/driver-trace/libvulkan_asahi.so"
+        printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$observe/driver-trace/icd.json"
+        chmod -R a+rX "$observe/driver-trace"; chmod 755 "$observe/extra/gfxrecon-replay.a64"; chmod a+rx "$observe" "$observe/extra"
+        trace=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
+        if [ "$t" = replay-loop ]; then
+            cat > /home/nsheth/.cache/$t.sh <<RL
+#!/bin/bash
+for i in \$(seq 1 12); do
+    echo "== replay \$i \$(date +%T)"
+    env VK_DRIVER_FILES="$observe/driver-trace/icd.json" VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
+        "$observe/extra/gfxrecon-replay.a64" --wsi xcb -m rebind --sfa "$trace" > /home/nsheth/.cache/$t-last.log 2>&1
+    echo "rc=\$? \$(grep -oE 'Frame: [0-9]+' /home/nsheth/.cache/$t-last.log | tail -1)"
+done
+RL
+            chown nsheth:nsheth /home/nsheth/.cache/$t.sh; chmod 755 /home/nsheth/.cache/$t.sh
+            run_user $t 420 /home/nsheth/.cache/$t.sh
+        else
+            cat > /home/nsheth/.cache/$t.sh <<RL
+#!/bin/bash
+for i in \$(seq 1 8); do
+    echo "== replay \$i \$(date +%T)"
+    /opt/mesa-apple9-x86/gfxrecon-replay --wsi xcb -m rebind --sfa "$trace" > /home/nsheth/.cache/$t-last.log 2>&1
+    echo "rc=\$? \$(grep -oE 'Frame: [0-9]+' /home/nsheth/.cache/$t-last.log | tail -1)"
+done
+RL
+            chown nsheth:nsheth /home/nsheth/.cache/$t.sh; chmod 755 /home/nsheth/.cache/$t.sh; rm -f /home/nsheth/.cache/$t-guest.log
+            run_user $t 420 m4-muvm /bin/bash -c "/home/nsheth/.cache/$t.sh > /home/nsheth/.cache/$t-guest.log 2>&1"
+            cp /home/nsheth/.cache/$t-guest.log "$observe/$t-guest.log" 2>/dev/null; cat "$observe/$t-guest.log" >> "$observe/$t.log" 2>/dev/null
+        fi
+        echo "$t: replays=$(grep -c '^== replay' "$observe/$t.log") ok=$(grep -c '^rc=0 Frame: 116' "$observe/$t.log") results=$(grep '^rc=' "$observe/$t.log" | sort | uniq -c | tr '\n' ' ')" >> "$observe/verdicts.txt" ;;
     replay-rb|replay-rb-x86|replay-sfa)
         # Content-exact replay toward Dota's loading-end burst (manager (a), 2026-10-08). Earlier replays died at
         # API call 113517 (vkCreateBuffer OUT_OF_DEVICE_MEMORY) still in frame 1, so they never reached the burst.

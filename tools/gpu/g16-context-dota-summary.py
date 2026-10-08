@@ -26,6 +26,10 @@ def summarize(run):
     setup = read(run / 'setup.log')
     arm = re.search(r'asahi_m4.context_sticky=([01])', setup)
     report = {'run': run.name, 'sticky': int(arm[1]) if arm else None}
+    preempt = re.search(r'asahi_m4.render_preempt=([01])', setup)
+    report['render_preempt'] = int(preempt[1]) if preempt else 1
+    report['nocompress'] = any('ASAHI_MESA_DEBUG=nocompress' in read(p)
+                               for p in result.glob('ring-snapshots/*/relevant-environment.txt'))
     verdict = result / 'safe-to-stop.json'
     report['watcher'] = json.loads(verdict.read_text()) if verdict.exists() else None
     inputs = read(run / 'harness-driver-inputs.txt').splitlines()

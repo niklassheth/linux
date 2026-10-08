@@ -4,7 +4,7 @@ Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-dri
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (20:12 local)
+## Status / manager handoff (20:20 local)
 
 Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
 README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. First boot was invalid
@@ -320,3 +320,47 @@ and actual UTS/cmdline **before** comparing them, so a future invalid boot will
 retain that evidence. These are host-script changes only; no kernel rebuild
 needed. Please keep all other restore paths inside their own lease. This retry
 will also restore production and verify services before release.
+
+
+## Dota capture ownership / local smoke (20:20)
+
+Manager confirms the watcher reset caused the first invalid boot; watcher fixed.
+The recovery retry remains lease-waiting behind claude-kernel (now until 21:09).
+I also own fixing the Dota capture path from this point onward.
+
+New verified queue32 results on production #10, render_barrier=2, correct
+`driver-fb-a64`: fb0 3/3 clean ~301 s; fb1 1/3 hang at 39 s (127 G16 errors),
+2/3 clean. **No causal A/B conclusion**: measured fb0 control rate here is 0/3,
+so more reproducing controls are needed. This does not meet the success criteria.
+
+The gfxr run's true failure is an application SIGSEGV (exit 139) at 3.2 s,
+before the +45 s loaded-driver probe. WRONG-DRIVER is a follow-on guard result,
+not evidence that the wrong driver ran. Layer initialization is recorded at
+1.0.5/header 1.4.363. Unknown Vulkan-function warnings also occur in clean runs.
+Logs are now locally readable in `artifacts/dota-hang-20261006/queue32/gfxr-v1/`;
+no `.gfxr` file was produced. The prior converter worker will time out if no
+successful capture appears; it performs no device access.
+
+Prepared `tools/gpu/g16-capture-probe.c`, an own workload with flushed markers
+around instance/device/buffer/map setup and a 64 KiB memory write. **No shaders
+or queue submissions**. It builds x86-64 with GCC C11 -Wall -Wextra -Werror.
+Three local native-host runs pass: no layer, gfxrecon `unassisted`, gfxrecon
+`page_guard`. Both layer runs emit convertible small traces (5008/4927 bytes),
+with one vkMapMemory and zero submits. Logs/captures:
+`host-capture-probe/`. These use the host NVIDIA renderer; they validate the
+probe/capture tool, not FEX, Honeykrisp, or the mini's recovery.
+
+Next capture isolation within a lease: same probe under native aarch64 and
+x86 FEX Vulkan thunks, with no layer / aarch64 gfxrecon unassisted / page_guard.
+Use the existing FEX config and driver paths, verify loaded architecture, and
+collect first failing marker. This tests a specific hypothesis: default
+page_guard uses a native SIGSEGV handler and guarded mapped memory, which can
+conflict with emulation/crash handling. Source/usage documentation establishes
+that mechanism, **not that it caused this Dota crash**. If unassisted boots the
+real game, use a short trimmed frame window to bound memory/disk capture cost.
+Header matching and the no-thunks x86 layer path remain alternatives after
+this isolation, rather than changes to combine blindly.
+
+I read the local FEX source as reference; its AGENTS.md forbids AI-generated
+contributions to that project. No FEX source edits are being made. Our standalone
+probe and launch/capture fixes live on our own topic, not in FEX's checkout.

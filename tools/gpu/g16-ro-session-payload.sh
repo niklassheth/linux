@@ -213,6 +213,21 @@ FB
         kill $partner 2>/dev/null; wait $partner 2>/dev/null
         grep -E "PASS|STALL|resizes=" "$observe/$t.log" | tail -1 | sed "s/^/$t: /" >> "$observe/verdicts.txt"
         grep -E "PASS|STALL|resizes=" "$observe/$t-partner.log" | tail -1 | sed "s/^/$t partner: /" >> "$observe/verdicts.txt" ;;
+    rp-mstorm|rp-mstorm-rc)
+        # Resize storm through Dota's path (manager): x86 render_present under FEX in m4-muvm (virtgpu native
+        # context + muvm X11 bridge), heavier frames, IMMEDIATE like Dota; host aarch64 partner keeps KWin busy.
+        rc_flag=; [ "$t" = rp-mstorm-rc ] && rc_flag=--recreate
+        install -o nsheth -g nsheth -m 755 "$observe/extra/render_present.x86" /home/nsheth/.cache/render_present.x86
+        printf '#!/bin/bash\n/home/nsheth/.cache/render_present.x86 --passes 3 --offscreen 6 --work 16 --inflight 3 --mode immediate --seconds 240 --timeout-ms 8000 --resize-ms 700 %s > /home/nsheth/.cache/%s.log 2>&1\necho "rc=$?" >> /home/nsheth/.cache/%s.log\n' "$rc_flag" "$t" "$t" > /home/nsheth/.cache/$t.sh
+        chown nsheth:nsheth /home/nsheth/.cache/$t.sh; chmod 755 /home/nsheth/.cache/$t.sh; rm -f /home/nsheth/.cache/$t.log
+        runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; export HK_EXPERIMENTAL_APPLE9=1; exec "$0" --passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 280' "$rp" > "$observe/$t-partner.log" 2>&1 &
+        partner=$!
+        sleep 3
+        run_user $t 300 m4-muvm /bin/bash /home/nsheth/.cache/$t.sh
+        kill $partner 2>/dev/null; wait $partner 2>/dev/null
+        cp /home/nsheth/.cache/$t.log "$observe/$t-guest.log" 2>/dev/null
+        grep -E "PASS|STALL|resizes=|rc=" "$observe/$t-guest.log" | tail -2 | tr '\n' ' ' | sed "s/^/$t guest: /" >> "$observe/verdicts.txt"; echo >> "$observe/verdicts.txt"
+        grep -E "PASS|STALL|resizes=" "$observe/$t-partner.log" | tail -1 | sed "s/^/$t partner: /" >> "$observe/verdicts.txt" ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;

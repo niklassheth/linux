@@ -1175,7 +1175,9 @@ impl Addresses {
         // different value there) and uses a per-command uuid with the context
         // id in the high byte.
         let form = crate::module_parameters::ta3d_item.value();
-        let self_value = if form >= 1 { self.tiling_stamp } else { self.fragment_stamp };
+        // Form 3 numbers fragment stamps like tiling stamps, so the
+        // render's own stamp already equals the awaited one.
+        let self_value = if form == 1 || form == 2 { self.tiling_stamp } else { self.fragment_stamp };
         let uuid = if form >= 2 {
             (self.context_id << 24) | ((self.fragment_counter >> 1) & 0xff_ffff)
         } else {

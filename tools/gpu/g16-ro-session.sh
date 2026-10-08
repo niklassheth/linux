@@ -53,6 +53,7 @@ printf 'expected=%s\nloaded=%s\n' "$G16_EXPECT_UTS" "$loaded" > "$local_output/l
 ssh "${ssh_options[@]}" "$mini" "mkdir -p '$remote_output'"
 scp "${ssh_options[@]}" -q "$here/payload.sh" "$mini:$remote_output/payload.sh"
 scp "${ssh_options[@]}" -q "$here/../copy-burst/copy_burst.c" "$mini:$remote_output/copy_burst.c"
+[ -d "$here/extra" ] && scp "${ssh_options[@]}" -q -r "$here/extra" "$mini:$remote_output/"
 scp "${ssh_options[@]}" -q "$here/../render-burst/render_burst.c" "$here/../render-burst/render_present.c" "$here/../render-burst/spirv.h" "$mini:$remote_output/"
 "$lease" renew mini codex-dota 30
 timeout 900 ssh "${ssh_options[@]}" "$mini" "G16_OVERLAY_BASE='${G16_OVERLAY_BASE:-}' bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true

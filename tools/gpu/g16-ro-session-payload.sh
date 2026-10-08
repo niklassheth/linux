@@ -96,7 +96,17 @@ for t in $tests; do
     cb-flight-q2) run_user cb-flight-q2 120 $cb --split --interleave --queues 2 --inflight 16 --images 128 --mips 2 --size 64 --format bc7 --submits 400 ;;
     dota|dota-*) R=/home/nsheth/g16-games/dota-shader-identity-20261006
           variant=mode0; [ "$t" = dota ] || variant=${t#dota-}
-          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          if [ "$variant" = vatrace ]; then
+              # claude-driver's apple9/va-trace 7b38f696d25 (c0828f3 + HK_VA_TRACE logging).
+              # Installed and wired into dota-inner.sh inside the overlay only.
+              mkdir -p "$R/driver-vatrace"
+              cp "$observe/extra/libvulkan_asahi.vatrace.so" "$R/driver-vatrace/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-vatrace/icd.json"
+              grep -qF 'vatrace)' "$R/dota-inner.sh" || sed -i 's|case "\$variant" in |case "$variant" in vatrace) export VK_DRIVER_FILES="$root/driver-vatrace/icd.json" HK_APPLE9_DUMP_MODE=0 HK_VA_TRACE=1;; |' "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-vatrace" "$R/dota-inner.sh"
+              grep -o 'vatrace)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
+          fi
+          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"

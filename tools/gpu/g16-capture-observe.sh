@@ -34,13 +34,13 @@ mount -t overlay overlay -o "lowerdir=$external,upperdir=/run/codex-dota-externa
 test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
-sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
+sed -e 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' -e 's/^runuser -u /timeout 15 runuser -u /' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
 bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 systemctl is-active m4-kwin claude-headless input-forward-server > "$observe/services-before.txt"
 uname -a > "$observe/kernel.txt"
 cat /proc/cmdline >> "$observe/kernel.txt"
 findmnt -R /mnt/g16-external > "$observe/external-mount.txt"
-rg --files /usr/share/vulkan /home/nsheth/.local/share/vulkan /usr/local/share/vulkan > "$observe/vulkan-manifests.txt" 2>&1 || true
+find /usr/share/vulkan /home/nsheth/.local/share/vulkan /usr/local/share/vulkan -type f -name "*.json" > "$observe/vulkan-manifests.txt" 2>&1 || true
 findmnt -no TARGET,FSTYPE,OPTIONS -T / >> "$observe/kernel.txt"
 findmnt -no TARGET,FSTYPE,OPTIONS -T /home >> "$observe/kernel.txt"
 findmnt -t btrfs -no TARGET,OPTIONS >> "$observe/kernel.txt"

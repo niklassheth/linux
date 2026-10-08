@@ -41,7 +41,7 @@ int main(int argc, char **argv)
    if (strcmp(mode, "baseline") && strcmp(mode, "unassisted") && strcmp(mode, "page_guard"))
       return 64;
    const char *layer = "VK_LAYER_LUNARG_gfxreconstruct";
-   const char *variables[] = {"VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "VK_DRIVER_FILES",
+   const char *variables[] = {"VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_DRIVER_FILES",
       "GFXRECON_MEMORY_TRACKING_MODE", "GFXRECON_CAPTURE_FILE", "GFXRECON_LOG_FILE"};
    printf("probe mode=%s pointer_bits=%zu\n", mode, sizeof(void *) * 8);
    for (unsigned i = 0; i < sizeof(variables) / sizeof(variables[0]); ++i) {

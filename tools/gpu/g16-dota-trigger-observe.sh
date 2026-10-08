@@ -15,21 +15,21 @@ if ! mountpoint -q /home; then
 fi
 case ",$(findmnt -no OPTIONS /home)," in *,ro,*) ;; *) exit 1 ;; esac
 for desktop_dir in .config .local .cache; do
-    overlay_dir=/run/codex-dota-overlay/$desktop_dir
+    overlay_dir=/tmp/codex-dota-overlay-storage-overlay/$desktop_dir
     mkdir -p "$overlay_dir/upper" "$overlay_dir/work"
     mount -t overlay overlay -o "lowerdir=/home/nsheth/$desktop_dir,upperdir=$overlay_dir/upper,workdir=$overlay_dir/work" "/home/nsheth/$desktop_dir"
 done
 games=/home/nsheth/g16-games
-mkdir -p /run/codex-dota-games/upper /run/codex-dota-games/work
-mount -t overlay overlay -o "lowerdir=$games,upperdir=/run/codex-dota-games/upper,workdir=/run/codex-dota-games/work" "$games"
+mkdir -p /tmp/codex-dota-overlay-storage-games/upper /tmp/codex-dota-overlay-storage-games/work
+mount -t overlay overlay -o "lowerdir=$games,upperdir=/tmp/codex-dota-overlay-storage-games/upper,workdir=/tmp/codex-dota-overlay-storage-games/work" "$games"
 # The RO boot does not automatically provide the external game volume.
 # Mount its backing read-only before starting muvm, then use a tmpfs upper
 # for runtime locks, game logs and Steam metadata.
 external=/mnt/g16-external
 mountpoint -q "$external" || mount -o ro /dev/disk/by-label/USB4-TEST "$external"
 case ",$(findmnt -no OPTIONS "$external")," in *,ro,*) ;; *) exit 1 ;; esac
-mkdir -p /run/codex-dota-external/upper /run/codex-dota-external/work
-mount -t overlay overlay -o "lowerdir=$external,upperdir=/run/codex-dota-external/upper,workdir=/run/codex-dota-external/work" "$external"
+mkdir -p /tmp/codex-dota-overlay-storage-external/upper /tmp/codex-dota-overlay-storage-external/work
+mount -t overlay overlay -o "lowerdir=$external,upperdir=/tmp/codex-dota-overlay-storage-external/upper,workdir=/tmp/codex-dota-overlay-storage-external/work" "$external"
 test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"

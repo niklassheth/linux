@@ -19,6 +19,7 @@ with (out/'host-memory.jsonl').open('w') as memory:
   if re.search(r'G16:.*(?:async Work .*timeout|failed Event kind=|fault addr=)',kernel):
    reason='GPU timeout/fault'; m=re.search(r'G16: fault addr=(0x[0-9a-f]+)',kernel); fault=int(m.group(1),16) if m else None
   elif info["MemAvailable"]<int(__import__("os").environ.get("WATCH_MIN_KB","2097152")):reason="Host available memory below guard"
+  elif (out/'runtime-exit-status').exists() and not (out/'guest-game.pid').exists():reason='Runtime exited before game'
   elif (out/'exit-status').exists():reason='Game exited'
   elif elapsed>float(__import__("os").environ.get("WATCH_LIMIT","300")):reason="Observation limit"
   if reason:break

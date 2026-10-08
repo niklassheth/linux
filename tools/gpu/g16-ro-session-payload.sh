@@ -143,6 +143,7 @@ PY
           EXPECT_DRIVER=$drv/libvulkan_asahi.so WATCH_LIMIT=300 WATCH_MIN_KB=2097152 \
               timeout 600 bash $R/run-variant.sh "$label" "$variant" > "$observe/dota-harness.log" 2>&1
           echo "dota variant=$variant rc=$?" >> "$observe/verdicts.txt"
+          echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"
           sleep 5; dmesg | grep "G16: queue deps" > "$observe/dep-stats.txt" 2>/dev/null
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
           mkdir -p "$observe/steam-logs"

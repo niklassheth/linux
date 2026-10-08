@@ -684,3 +684,27 @@ Compiler holds the lease for it now. Follow-ups are Steam lifetime/exact gamepla
 then later capture with actual compute/driver-meta association, and the new
 op1b forced-stall experiment after release/requeue. Neither time-slicing nor
 isolated DEVICE_LOST recovery is fixed; no 3x5-minute success claim.
+
+
+## Waiting checkpoint (22:26)
+
+The queued op1b runner79319 has not acquired the mini. It remains a single
+waiter, behind claude-driver's Lethal block; no concurrent Codex runner/reset.
+Independent parser extension now reproducibly ranks executed transfers with
+recording/submit indices, preceding synchronization and submission waits.
+`dota-sized-transfer-summary.json` reproduces all six frame submits,2049
+buffer copies,500 uploads and five blits with zero unobserved CBs; largest
+buffer transfer2249100 bytes at recording143886 / submit146063. WIP ea16e65.
+Source association is `hk_cmd_copy` → libagx copy kernels →
+`hk_dispatch_precomp` → `hk_apple9_dispatch`; no application dispatch needed.
+
+Next Dota observer now also gives the **initial Steam host launcher** epollable
+stdin using a pipe held open for the bounded observer. The previous fix only
+covered joining probe/Dota launchers. The original g16-steam unit was started
+with systemd's /dev/null, a plausible EPERM/early-exit source. This is a
+hypothesis until the preserved initial Steam journal confirms it, not a proven
+explanation of the30s prior exit. Installed Steam/FEX scripts are unchanged;
+the original Steam host script is copied into artifacts for exact review.
+Bash syntax passes; WIP f9c2e37. Dota retains liveness gate and frames1800-1804.
+Conditional initialization request after a negative op1b:
+`capture7-initialization-request.md`; no request to displace the current lease.

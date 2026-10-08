@@ -888,3 +888,45 @@ retirement (at mostonce/sec, firstfour flights); no new polling, watchdog
 extension, firmware writes or changed retirement conditions. Frozen values
 still cannot distinguish continuous execution from an unscheduled lane.
 Current rw runner25381 is queued/running; no verdict yet.
+
+
+## Valid rw hang and shader join (23:38)
+
+rw-20261007_233021 / dota-trigger-rw-20261007_233021 is a VALID hang at
+39.8s watcher time on production20+213 UTS#4 (9a87be0c0c26b), all behavior
+settings at defaults and the unchanged original harness. Loaded driver is
+pinned a8c33e3, SHA c5842bf746f4e60e1880380be113271eef3f101ef373ec8f78c7c3b2cbbd4c7d.
+Both KWin services were active. Original collector/game host units printed
+muVM EPERM after requesting launch, but guest Dota DID run: application,
+loaded-driver, live shader ring and GPU Work evidence all exist. The earlier
+commentary interpretation of the host failure as a failed launch was wrong.
+Do not change the harness or add the proposed FIFO; preserve it as-is.
+
+First stuck Work0xfffffc220098c000/context9 is RENDER, stream0x1006f40000.
+TA stamp0x1c700 reached; fragment0x1bb00 wants0x1bc00. Incoming render0x1bb00
+and compute0x14400 waits both satisfied. Four Dota renders and two KWin
+context2 renders pending, no compute Work in the report. Thus this run
+cannot answer executing-vs-unscheduled for a stuck compute Work. No sampled
+compute counters, and no MMU fault registered. Last context9 rebind to Dota
+root0x1025751c000 at153.657723s; watchdog163.655810s. Steam root0x1001a568000
+shared/rebound the same slot earlier; correlation only.
+
+The new stream field joins the terminal ring successfully: Dota DRMqueue1,
+timeline11, first draw (uses1), VS hash0x7f829920/980B, FS0x0a00d1f7/1848B.
+Exact same pair and submission as historical A4. Following renders also
+join; KWin streams are absent from Dota's ring, as expected. JSON joins in
+ring-snapshots/terminal/*.commands.json. The copy helper0x523683d8 was
+compiled/dumped and its launch log gives normal direct geometry1920x1088x1
+threads, local16x16x1, derived120x68x1 groups. These are preceding copies,
+not the pending Work; do not call them a stuck or longest dispatch.
+`rw-control1-launch-summary.json` preserves all launch arguments.
+
+The handler and original watcher completed naturally (the later stop request
+found the mini already rebooting and changed nothing). All logs copied;
+production20 and all desktop/input services verified, lease released.
+Reacquired immediately for rw repeat24747 on assembly2758ebcf444fd/UTS#5,
+which additionally reads the existing Work+0x2000 save backing and context
+bytes+0xe/+0x2f without enabling record storage or changing firmware inputs.
+GCC build PASS; artifact m4-linux/bits-7.3-213-prod20-2758ebc. This diagnostic
+limit now selects up to four COMPUTE flights, rather than the firstfour
+flights of any type. No valid verdict yet for the repeat.

@@ -159,7 +159,16 @@ PY
               chown -R nsheth:nsheth "$R/driver-quar" "$R/dota-inner.sh"
               grep -o "quar$qms)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
           esac
-          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          case "$variant" in stats)
+              # claude-compiler's variant-stats build (8825824 + HK_APPLE9_VARIANT_STATS), not an A4 arm.
+              mkdir -p "$R/driver-stats"
+              cp "$observe/extra/libvulkan_asahi.stats.so" "$R/driver-stats/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-stats/icd.json"
+              grep -qF "stats) " "$R/dota-inner.sh" || sed -i "s|case \"\\\$variant\" in |case \"\$variant\" in stats) export VK_DRIVER_FILES=\"\$root/driver-stats/icd.json\" HK_APPLE9_DUMP_MODE=0 HK_APPLE9_VARIANT_STATS=1;; |" "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-stats" "$R/dota-inner.sh"
+              grep -o "stats)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
+          esac
+          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; stats) drv=$R/driver-stats ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"
@@ -171,6 +180,7 @@ PY
           echo "dota variant=$variant rc=$?" >> "$observe/verdicts.txt"
           echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"
           sleep 5; dmesg | grep "G16: queue deps" > "$observe/dep-stats.txt" 2>/dev/null
+          grep -h "HK_APPLE9_VARIANT_STATS" "$R/results/$label/application.log" 2>/dev/null | tail -1 | sed 's/^/variant-stats-last: /' >> "$observe/verdicts.txt"
           grep -c "hk-va-quarantine pressure" "$R/results/$label/application.log" 2>/dev/null | sed 's/^/quarantine-pressure-lines=/' >> "$observe/verdicts.txt"
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
           cp "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/console.log" "$observe/dota-console.log" 2>/dev/null

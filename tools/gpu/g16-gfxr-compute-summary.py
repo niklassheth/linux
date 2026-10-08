@@ -47,6 +47,31 @@ def commands_of(submit):
     return array(submit.get('pCommandBuffers'))
 
 
+def transfer_size(operation):
+    args = operation['arguments']
+    # Core 1.3 and KHR aliases wrap the legacy fields in a single info struct.
+    for key, value in args.items():
+        if key.endswith('Info') and isinstance(value, dict):
+            args = value
+            break
+    name = operation['name']
+    regions = array(args.get('pRegions'))
+    if name in ('vkCmdCopyBuffer', 'vkCmdCopyBuffer2', 'vkCmdCopyBuffer2KHR'):
+        return {'bytes': sum(r['size'] for r in regions)}
+    if name in ('vkCmdUpdateBuffer', 'vkCmdFillBuffer'):
+        size = args.get('dataSize', args.get('size'))
+        # VK_WHOLE_SIZE needs the live buffer allocation; don't rank the sentinel.
+        if isinstance(size, int) and size != 0xffffffffffffffff:
+            return {'bytes': size}
+    if name.startswith(('vkCmdCopyBufferToImage', 'vkCmdCopyImageToBuffer',
+                        'vkCmdCopyImage', 'vkCmdResolveImage')):
+        return {'texels': sum(math.prod(r.get('imageExtent', r.get('extent'))[axis]
+                                       for axis in ('width', 'height', 'depth')) *
+                              r.get('imageSubresource', r.get('srcSubresource', {})).get('layerCount', 1)
+                              for r in regions)}
+    return {}
+
+
 class Inspector:
     def __init__(self, limit):
         self.limit = limit
@@ -176,6 +201,11 @@ class Inspector:
         direct.sort(key=lambda p: p['operation']['workgroups'], reverse=True)
         indirect = [p for p in patterns if p['operation']['name'].startswith('vkCmdDispatchIndirect')]
         copies = [p for p in patterns if p['operation']['name'] in COPIES]
+        sized = [{'transfer_size': transfer_size(p['operation']), **p} for p in copies]
+        byte_copies = sorted((p for p in sized if 'bytes' in p['transfer_size']),
+                             key=lambda p: p['transfer_size']['bytes'], reverse=True)
+        image_copies = sorted((p for p in sized if 'texels' in p['transfer_size']),
+                              key=lambda p: p['transfer_size']['texels'], reverse=True)
         return {'api_counts': dict(self.counts),
                 'state_reconstruction_api_counts': dict(self.state_counts),
                 'captured_frame_api_counts': dict(self.frame_counts),
@@ -189,10 +219,14 @@ class Inspector:
                 'largest_direct_dispatches_by_workgroups': direct[:self.limit],
                 'indirect_dispatch_samples': indirect[:self.limit],
                 'copy_and_query_resolve_samples': copies[:self.limit],
+                'largest_buffer_transfers_by_bytes': byte_copies[:self.limit],
+                'largest_image_transfers_by_texels': image_copies[:self.limit],
                 'limits': ['Workgroup count is not GPU duration.',
                            'Indirect sizes require buffer contents at execution.',
                            'API waits are recorded, not proven satisfied.',
                            'Transfers may invoke driver-internal compute.',
+                           'Transfer bytes/texels are not GPU duration or a firmware Work identity.',
+                           'Image texels include all recorded regions/layers, not encoded byte size.',
                            'Deferred-trim initialization may contain synthesized setup calls.',
                            'Only four preceding sync commands are retained per operation.']}
 

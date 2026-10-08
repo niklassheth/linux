@@ -124,6 +124,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
         },
+        ta3d_item: u32 {
+            default: 0,
+            description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte)",
+        },
         render_deps: u32 {
             default: 0,
             description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",

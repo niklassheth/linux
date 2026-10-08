@@ -24,7 +24,7 @@ for desktop_dir in .config .local .cache; do
 done
 mkdir -p "$observe"
 chmod 1777 "$observe"
-sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
+sed -e 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' -e 's/^runuser -u /timeout 15 runuser -u /' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
 bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 sleep 8
 systemctl is-active m4-kwin claude-headless input-forward-server

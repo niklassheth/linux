@@ -17,6 +17,8 @@ fi
 lease=$workspace/tools/lease/lease.sh
 owner=codex-dota
 mode=${G16_SLOT_MODE:-recovery}
+control_1b=${G16_CONTROL_1B:-0}
+case "$control_1b" in 0|1) ;; *) exit 64 ;; esac
 case "$mode" in recovery|capture|dota) ;; *) exit 64 ;; esac
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$workspace/artifacts/dota-compute-stall-20261007/observe-$stamp
@@ -69,6 +71,11 @@ readonly_args='ro systemd.mask=systemd-remount-fs.service systemd.mask=home.moun
 experiment_args="asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1 $readonly_args"
 if [ "$mode" = recovery ]; then
     experiment_args="$experiment_args asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1"
+    if [ "$control_1b" = 1 ]; then
+        # Valid zeroed record storage is paired with the new global setup,
+        # matching the captured firmware-output record rather than a null VA.
+        experiment_args="$experiment_args asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1"
+    fi
 fi
 boot_attempted=1
 timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
@@ -80,6 +87,7 @@ printf 'expected: %s\nloaded: %s\ncmdline: %s\n' "$expected_uts" "$loaded_uts" "
 [ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted; see loaded-kernel.txt' >&2; exit 1; }
 required_arguments=(asahi_m4.debug_ctx=1)
 if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1); fi
+if [ "$control_1b" = 1 ]; then required_arguments+=(asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1); fi
 for required_argument in "${required_arguments[@]}"; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done

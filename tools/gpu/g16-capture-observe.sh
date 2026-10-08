@@ -18,9 +18,10 @@ for desktop_dir in .config .local .cache; do
     mkdir -p "$overlay_dir/upper" "$overlay_dir/work"
     mount -t overlay overlay -o "lowerdir=/home/nsheth/$desktop_dir,upperdir=$overlay_dir/upper,workdir=$overlay_dir/work" "/home/nsheth/$desktop_dir"
 done
-results=/home/nsheth/g16-games/dota-shader-identity-20261006/results
-mkdir -p /run/codex-dota-results/upper /run/codex-dota-results/work
-mount -t overlay overlay -o "lowerdir=$results,upperdir=/run/codex-dota-results/upper,workdir=/run/codex-dota-results/work" "$results"
+games=/home/nsheth/g16-games
+mkdir -p /run/codex-dota-games/upper /run/codex-dota-games/work
+mount -t overlay overlay -o "lowerdir=$games,upperdir=/run/codex-dota-games/upper,workdir=/run/codex-dota-games/work" "$games"
+results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
 sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
 bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
@@ -29,6 +30,7 @@ uname -a > "$observe/kernel.txt"
 cat /proc/cmdline >> "$observe/kernel.txt"
 findmnt -no TARGET,FSTYPE,OPTIONS -T / >> "$observe/kernel.txt"
 findmnt -no TARGET,FSTYPE,OPTIONS -T /home >> "$observe/kernel.txt"
+findmnt -t btrfs -no TARGET,OPTIONS >> "$observe/kernel.txt"
 stage=/home/nsheth/.cache/codex-dota-capture-$(date +%Y%m%d_%H%M%S)
 mkdir -p "$stage"
 cp "$observe"/g16-capture-probe-{x64,a64,inner.sh,guest.sh} "$stage/"

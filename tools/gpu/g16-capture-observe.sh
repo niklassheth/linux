@@ -23,6 +23,15 @@ done
 games=/home/nsheth/g16-games
 mkdir -p /run/codex-dota-games/upper /run/codex-dota-games/work
 mount -t overlay overlay -o "lowerdir=$games,upperdir=/run/codex-dota-games/upper,workdir=/run/codex-dota-games/work" "$games"
+# The RO boot does not automatically provide the external game volume.
+# Mount its backing read-only before starting muvm, then use a tmpfs upper
+# for runtime locks, game logs and Steam metadata.
+external=/mnt/g16-external
+mountpoint -q "$external" || mount -o ro /dev/disk/by-label/USB4-TEST "$external"
+case ",$(findmnt -no OPTIONS "$external")," in *,ro,*) ;; *) exit 1 ;; esac
+mkdir -p /run/codex-dota-external/upper /run/codex-dota-external/work
+mount -t overlay overlay -o "lowerdir=$external,upperdir=/run/codex-dota-external/upper,workdir=/run/codex-dota-external/work" "$external"
+test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
 sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
@@ -30,6 +39,8 @@ bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 systemctl is-active m4-kwin claude-headless input-forward-server > "$observe/services-before.txt"
 uname -a > "$observe/kernel.txt"
 cat /proc/cmdline >> "$observe/kernel.txt"
+findmnt -R /mnt/g16-external > "$observe/external-mount.txt"
+rg --files /usr/share/vulkan /home/nsheth/.local/share/vulkan /usr/local/share/vulkan > "$observe/vulkan-manifests.txt" 2>&1 || true
 findmnt -no TARGET,FSTYPE,OPTIONS -T / >> "$observe/kernel.txt"
 findmnt -no TARGET,FSTYPE,OPTIONS -T /home >> "$observe/kernel.txt"
 findmnt -t btrfs -no TARGET,OPTIONS >> "$observe/kernel.txt"
@@ -58,7 +69,7 @@ cat > "$stage/probe-host.sh" <<'HOST'
 set -euo pipefail
 source /home/nsheth/.local/state/m4/session.env
 export M4_MUVM_MEM=6144 M4_MUVM_VRAM=2048 M4_MUVM_FEX_OVERLAY=/var/tmp/g16-steam-mesa.erofs
-exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-capture-probe-guest.sh" "$1"
+exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-capture-probe-guest.sh" "$1" > "$1/probe-launch.log" 2>&1
 HOST
 chown nsheth:nsheth "$stage/probe-host.sh"
 systemd-run --unit=codex-dota-probe --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=120 /bin/bash "$stage/probe-host.sh" "$stage"

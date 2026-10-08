@@ -276,6 +276,23 @@ BURST
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;
+    replay-rb|replay-rb-x86)
+        # Content-exact replay toward Dota's loading-end burst (manager (a), 2026-10-08). Earlier replays died at
+        # API call 113517 (vkCreateBuffer OUT_OF_DEVICE_MEMORY) still in frame 1, so they never reached the burst.
+        # -m rebind --sfa remaps capture-time memory; the trace driver (5567bc4) logs 1280x720 passes (HK_PASS_TRACE).
+        # replay-rb-x86: the x86 gfxrecon-replay under FEX inside m4-muvm (Dota's path).
+        mkdir -p "$observe/driver-trace"
+        cp "$observe/extra/libvulkan_asahi.quar.so" "$observe/driver-trace/libvulkan_asahi.so"
+        printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$observe/driver-trace/icd.json"
+        chmod -R a+rX "$observe/driver-trace"; chmod 755 "$observe/extra/gfxrecon-replay.a64"; chmod a+rx "$observe" "$observe/extra"
+        trace=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
+        if [ "$t" = replay-rb ]; then
+            run_user $t 600 env VK_DRIVER_FILES="$observe/driver-trace/icd.json" VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch HK_PASS_TRACE=1280x720 HK_WSI_TRACE=1 \
+                "$observe/extra/gfxrecon-replay.a64" --wsi xcb -m rebind --sfa "$trace"
+        else
+            run_user $t 600 m4-muvm /opt/mesa-apple9-x86/gfxrecon-replay --wsi xcb -m rebind --sfa "$trace"
+        fi
+        echo "$t: last-frame=$(grep -oE 'Frame: [0-9]+' "$observe/$t.log" | tail -1) fatal=$(grep -m1 -oE 'API call at index: [0-9]+.*' "$observe/$t.log" | cut -c1-140) pass1280=$(grep -c 'hk-pass' "$observe/$t.log")" >> "$observe/verdicts.txt" ;;
     replay) run_user replay 240 env HK_DEBUG=perf VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/icd.json VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
             /home/nsheth/g16-games/codex-dota-replay-20261008/gfxrecon-replay --wsi xcb /mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr ;;
     *) echo "unknown test $t" >> "$observe/verdicts.txt" ;;

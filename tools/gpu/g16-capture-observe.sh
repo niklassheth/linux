@@ -51,6 +51,9 @@ cp "$observe"/g16-dota-capture-{inner.sh,guest.sh} "$stage/"
 chown -R nsheth:nsheth "$stage"
 cleanup() {
     rc=$?; trap - EXIT
+    journalctl -b -u g16-steam --no-pager -o short-precise > "$observe/steam-service.log"
+    cp "$games/steam.log" "$observe/steam-startup.log" 2>/dev/null || true
+    cp "$games/steam-shutdown.log" "$observe/steam-guest-shutdown.log" 2>/dev/null || true
     m4-steam-shutdown 45 > "$observe/steam-shutdown.log" 2>&1 || true
     systemctl stop codex-dota-probe codex-dota-capture g16-steam 2>/dev/null || true
     cp -a "$stage" "$observe/probe-results"
@@ -62,6 +65,11 @@ m4-steam-shutdown 45
 systemctl stop g16-steam 2>/dev/null || true
 systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash /home/nsheth/g16-games/dota-shader-identity-20261006/steam-host.sh
 sleep 75
+systemctl show g16-steam -p ActiveState -p SubState -p MainPID > "$observe/steam-vm-before-launch.txt"
+if ! systemctl is-active --quiet g16-steam; then
+    printf 'INVALID: original Steam VM exited before launch\n' > "$observe/launch-path-verdict.txt"
+    exit 2
+fi
 # Joining the running Steam VM is part of the reproduction path.
 if [ "$capture_stage" = capture ]; then
 cat > "$stage/probe-host.sh" <<'HOST'

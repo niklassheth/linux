@@ -182,6 +182,9 @@ class Inspector:
                 'state_reconstruction_submit_calls': self.state_submit_count,
                 'queue_submit_calls': self.submit_count,
                 'submitted_compute_or_transfer_operations': self.submitted_operations,
+                'submitted_operation_api_counts': dict(collections.Counter({
+                    name: sum(p['executions'] for p in patterns if p['operation']['name'] == name)
+                    for name in {p['operation']['name'] for p in patterns}})),
                 'distinct_patterns': len(patterns), 'unknowns': dict(self.unknown),
                 'largest_direct_dispatches_by_workgroups': direct[:self.limit],
                 'indirect_dispatch_samples': indirect[:self.limit],

@@ -17,8 +17,22 @@ fi
 overlay=${G16_OVERLAY_BASE:-/tmp/codex-dota-home}
 case "$overlay" in /tmp/codex-dota-*|/mnt/g16-external/codex-dota-overlay/*) ;; *) exit 64 ;; esac
 case "$overlay" in /mnt/g16-external/*)
-    # Only the external USB ext4 (not the NVMe btrfs) becomes writable.
-    mount -o remount,rw /mnt/g16-external || { echo "external remount failed" >> "$observe/verdicts.txt"; exit 1; }
+    # The external ext4 has few inodes (122k, nearly all used), so the overlay
+    # upper lives in a sparse ext4 image file there (one inode), loop-mounted.
+    # Only our own codex-dota-overlay directory is touched.
+    ext=/dev/disk/by-uuid/c6a44aa2-0d3d-47ad-86e7-a31a70250e75
+    for i in $(seq 1 60); do [ -b "$ext" ] && break; sleep 1; done
+    if mountpoint -q /mnt/g16-external; then mount -o remount,rw /mnt/g16-external
+    else mount -o rw "$ext" /mnt/g16-external; fi || { echo "external rw mount failed" >> "$observe/verdicts.txt"; dmesg | tail -20 >> "$observe/verdicts.txt"; exit 1; }
+    df -i /mnt/g16-external > "$observe/df-inodes-start.txt" 2>&1
+    rm -rf /mnt/g16-external/codex-dota-overlay
+    mkdir -p /mnt/g16-external/codex-dota-overlay
+    img=/mnt/g16-external/codex-dota-overlay/home.img
+    truncate -s 40G "$img" && mkfs.ext4 -q -F "$img" || { echo "image mkfs failed" >> "$observe/verdicts.txt"; exit 1; }
+    mkdir -p /tmp/codex-dota-loop
+    mount -o loop "$img" /tmp/codex-dota-loop || { echo "loop mount failed" >> "$observe/verdicts.txt"; exit 1; }
+    overlay=/tmp/codex-dota-loop/ov
+    df -i /mnt/g16-external /tmp/codex-dota-loop >> "$observe/df-inodes-start.txt" 2>&1
     findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/g16-external >> "$observe/verdicts.txt" ;;
 esac
 mkdir -p "$overlay/lower" "$overlay/upper" "$overlay/work"
@@ -71,11 +85,20 @@ for t in $tests; do
     cb-flight-inter) run_user cb-flight-inter 120 $cb --split --interleave --inflight 8 --images 128 --mips 1 --size 64 --format bc3 --submits 400 ;;
     cb-flight-q2) run_user cb-flight-q2 120 $cb --split --interleave --queues 2 --inflight 16 --images 128 --mips 2 --size 64 --format bc7 --submits 400 ;;
     dota) R=/home/nsheth/g16-games/dota-shader-identity-20261006
+          # run-variant.sh chowns the whole results tree; over an overlay that
+          # copies up thousands of old files (ENOSPC). Give it a fresh tree.
+          mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"
+          mount --bind "$overlay/results-fresh" "$R/results" || { echo "results bind failed" >> "$observe/verdicts.txt"; exit 1; }
+          df -i /mnt/g16-external > "$observe/df-inodes-before.txt" 2>&1
           label=dota-ro-$(basename "$observe")
           EXPECT_DRIVER=$R/driver/libvulkan_asahi.so WATCH_LIMIT=300 WATCH_MIN_KB=2097152 \
               timeout 600 bash $R/run-variant.sh "$label" mode0 > "$observe/dota-harness.log" 2>&1
           echo "dota rc=$?" >> "$observe/verdicts.txt"
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
+          mkdir -p "$observe/steam-logs"
+          cp -a /home/nsheth/.local/share/Steam/logs/{stderr.txt,console_log.txt,connection_log.txt,bootstrap_log.txt} "$observe/steam-logs/" 2>/dev/null
+          journalctl -b -u g16-steam -u dota-game -u dota-watch -u dota-collector --no-pager > "$observe/steam-logs/units.log" 2>&1
+          df -i /mnt/g16-external /tmp/codex-dota-loop > "$observe/df-inodes-end.txt" 2>&1
           df -h /mnt/g16-external /tmp > "$observe/df.txt"
           stalled && finish_stall dota ;;
     replay) run_user replay 240 env HK_DEBUG=perf VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/icd.json VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \

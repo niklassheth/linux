@@ -7,6 +7,8 @@ here=$workspace/artifacts/dota-compute-stall-20261007/ro-session
 : "${G16_KERNEL_ARTIFACT:?}" "${G16_EXPECT_UTS:?}" "${G16_TESTS:?}"
 tag=${G16_TAG:-x}
 lease=$workspace/tools/lease/lease.sh
+# boot.sh (gravity-bootloader 492f011) refuses unless LEASE_OWNER holds the lease.
+export LEASE_OWNER=codex-dota
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$here/$tag-$stamp
 remote_output=/tmp/codex-dota-$tag-$stamp

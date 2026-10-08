@@ -34,9 +34,20 @@ static void mappings(const char *stage)
    fclose(source);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
+   const char *mode = argc > 1 ? argv[1] : "baseline";
+   if (strcmp(mode, "baseline") && strcmp(mode, "unassisted") && strcmp(mode, "page_guard"))
+      return 64;
+   const char *layer = "VK_LAYER_LUNARG_gfxreconstruct";
+   const char *variables[] = {"VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "VK_DRIVER_FILES",
+      "GFXRECON_MEMORY_TRACKING_MODE", "GFXRECON_CAPTURE_FILE", "GFXRECON_LOG_FILE"};
+   printf("probe mode=%s pointer_bits=%zu\n", mode, sizeof(void *) * 8);
+   for (unsigned i = 0; i < sizeof(variables) / sizeof(variables[0]); ++i) {
+      const char *value = getenv(variables[i]);
+      printf("environment %s=%s\n", variables[i], value ? value : "<unset>");
+   }
    VkApplicationInfo application = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = "g16-capture-probe", .apiVersion = VK_API_VERSION_1_2,
@@ -44,6 +55,8 @@ int main(void)
    VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &application,
+      .enabledLayerCount = strcmp(mode, "baseline") ? 1 : 0,
+      .ppEnabledLayerNames = &layer,
    };
    VkInstance instance;
    CALL(vkCreateInstance(&instance_info, NULL, &instance));

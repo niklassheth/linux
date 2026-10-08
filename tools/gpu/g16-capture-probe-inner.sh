@@ -21,7 +21,7 @@ if [ "$mode" != baseline ]; then
     export GFXRECON_LOG_FILE="$stage/fex-$mode-gfxrecon.log" GFXRECON_LOG_LEVEL=debug
 fi
 printf 'probe_path=muvm/SteamVM/FEX/Sniper/thunks mode=%s icd=%s config=%s\n' "$mode" "$VK_DRIVER_FILES" "$FEX_APP_CONFIG"
-"$stage/g16-capture-probe-x64"
+"$stage/g16-capture-probe-x64" "$mode"
 rc=$?
 printf 'probe rc=%s\n' "$rc"
 exit "$rc"

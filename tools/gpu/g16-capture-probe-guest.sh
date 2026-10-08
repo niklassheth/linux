@@ -28,7 +28,7 @@ for mode in baseline unassisted page_guard; do
             export GFXRECON_LOG_FILE="$stage/native-$mode-gfxrecon.log" GFXRECON_LOG_LEVEL=debug
         fi
         env | sort | grep -E '^(FEX_|VK_|GFXRECON_|HOME=|LD_LIBRARY_PATH=)'
-        "$stage/g16-capture-probe-a64"
+        "$stage/g16-capture-probe-a64" "$mode"
     ) > "$stage/native-$mode.log" 2>&1
     printf 'native-%s rc=%s\n' "$mode" "$?" >> "$stage/probe-verdicts.txt"
 done

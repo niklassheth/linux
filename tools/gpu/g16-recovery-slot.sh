@@ -16,6 +16,8 @@ fi
 [ -s "$kernel_image" ] && [ -s "$kernel_dtb" ] && [ -s "$kernel_uts" ]
 lease=$workspace/tools/lease/lease.sh
 owner=codex-dota
+mode=${G16_SLOT_MODE:-recovery}
+case "$mode" in recovery|capture) ;; *) exit 64 ;; esac
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$workspace/artifacts/dota-compute-stall-20261007/observe-$stamp
 remote_output=/tmp/codex-dota-$stamp
@@ -30,7 +32,7 @@ wait_ssh() {
     done
     return 1
 }
-"$lease" wait mini "$owner" 15 'compute teardown with native priority; diagnostic kernel; RO root'
+"$lease" wait mini "$owner" 15 "$mode: production17 plus rebased213; RO root"
 boot_attempted=0
 cleanup() {
     rc=$?
@@ -40,7 +42,8 @@ cleanup() {
         exit 1
     fi
     if [ "$boot_attempted" = 1 ]; then
-        scp "${ssh_options[@]}" -q -r "$mini:$remote_output" "$local_output/" 2>/dev/null || true
+        "$lease" renew mini "$owner" 15
+        timeout 120 scp "${ssh_options[@]}" -q -r "$mini:$remote_output" "$local_output/" 2>/dev/null || true
         restored=0
         for restore_attempt in 1 2 3; do
             [ "$("$lease" holder mini)" = "$owner" ] || break
@@ -63,7 +66,10 @@ trap cleanup EXIT
 readonly_args='ro systemd.mask=systemd-remount-fs.service systemd.mask=home.mount systemd.mask=boot.mount systemd.mask=boot-efi.mount systemd.mask=var-swap-swapfile.swap systemd.mask=systemd-growfs-root.service'
 # Prior policy-3 capture used compute_preempt=0. This arm asks whether native
 # priority enables teardown even when it has not enabled compute time-slicing.
-experiment_args="asahi_m4.dependency_kind=0 asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1 $readonly_args"
+experiment_args="asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1 $readonly_args"
+if [ "$mode" = recovery ]; then
+    experiment_args="$experiment_args asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1"
+fi
 boot_attempted=1
 timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
 wait_ssh
@@ -72,11 +78,19 @@ loaded_uts=$(ssh "${ssh_options[@]}" "$mini" 'uname -v')
 loaded_cmdline=$(ssh "${ssh_options[@]}" "$mini" 'cat /proc/cmdline')
 printf 'expected: %s\nloaded: %s\ncmdline: %s\n' "$expected_uts" "$loaded_uts" "$loaded_cmdline" > "$local_output/loaded-kernel.txt"
 [ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted; see loaded-kernel.txt' >&2; exit 1; }
-for required_argument in asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1; do
+required_arguments=(asahi_m4.debug_ctx=1)
+if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1); fi
+for required_argument in "${required_arguments[@]}"; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done
 # /tmp must be tmpfs before staging sources or running any GPU program.
 ssh "${ssh_options[@]}" "$mini" "test \"\$(findmnt -no FSTYPE /tmp)\" = tmpfs && mkdir -p '$remote_output'"
 lab=$workspace/tmp/cs2-memory-lab-20261005/lab
-scp "${ssh_options[@]}" -q "$lab/gpu-contend/gpu_contend.c" "$lab/gpu-contend/spirv.h" "$lab/gpu-fault-test/gpu_fault_test.c" "$lab/gpu-fault-test/fault.spv.inc" "$(dirname "$0")/g16-recovery-observe.sh" "$mini:$remote_output/"
-ssh "${ssh_options[@]}" "$mini" "G16_OBSERVATION_DIR='$remote_output' bash '$remote_output/g16-recovery-observe.sh'" > "$local_output/observation.log" 2>&1
+if [ "$mode" = recovery ]; then
+    scp "${ssh_options[@]}" -q "$lab/gpu-contend/gpu_contend.c" "$lab/gpu-contend/spirv.h" "$lab/gpu-fault-test/gpu_fault_test.c" "$lab/gpu-fault-test/fault.spv.inc" "$(dirname "$0")/g16-recovery-observe.sh" "$mini:$remote_output/"
+else
+    scp "${ssh_options[@]}" -q "$(dirname "$0")"/g16-capture-probe-{a64,x64,guest.sh,inner.sh} "$(dirname "$0")"/g16-dota-capture-{guest.sh,inner.sh} "$(dirname "$0")/g16-capture-observe.sh" "$mini:$remote_output/"
+fi
+observe_script=g16-recovery-observe.sh
+if [ "$mode" = capture ]; then observe_script=g16-capture-observe.sh; fi
+timeout 600 ssh "${ssh_options[@]}" "$mini" "G16_OBSERVATION_DIR='$remote_output' bash '$remote_output/$observe_script'" > "$local_output/observation.log" 2>&1

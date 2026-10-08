@@ -14,6 +14,26 @@
    if (result != VK_SUCCESS) return 2; \
 } while (0)
 
+static void mappings(const char *stage)
+{
+   const char *path = getenv("G16_PROBE_MAPS");
+   if (!path) return;
+   FILE *source = fopen("/proc/self/maps", "r");
+   FILE *output = fopen(path, "a");
+   if (!source || !output) {
+      if (source) fclose(source);
+      if (output) fclose(output);
+      return;
+   }
+   fprintf(output, "stage=%s\n", stage);
+   char line[4096];
+   while (fgets(line, sizeof(line), source))
+      if (strstr(line, "libvulkan") || strstr(line, "libVkLayer") || strstr(line, "FEX"))
+         fputs(line, output);
+   fclose(output);
+   fclose(source);
+}
+
 int main(void)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -27,6 +47,7 @@ int main(void)
    };
    VkInstance instance;
    CALL(vkCreateInstance(&instance_info, NULL, &instance));
+   mappings("instance");
    uint32_t count = 0;
    CALL(vkEnumeratePhysicalDevices(instance, &count, NULL));
    if (!count) return 2;
@@ -68,6 +89,7 @@ int main(void)
    };
    VkDevice device;
    CALL(vkCreateDevice(physical, &device_info, NULL, &device));
+   mappings("device");
    VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536,
       .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,

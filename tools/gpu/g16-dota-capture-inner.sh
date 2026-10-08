@@ -3,6 +3,7 @@
 # Derived from our lab's Dota launch path, retaining muvm/FEX Vulkan thunks.
 # Run inside the Steam runtime, not directly on the host. No reset here.
 set -uo pipefail
+ulimit -c 0
 label=${1:?capture label required}
 mode=${2:-unassisted}
 case "$label" in dota-gfxr-codex-*) ;; *) exit 64 ;; esac

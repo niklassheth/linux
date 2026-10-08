@@ -804,7 +804,23 @@ impl Bootstrap {
     fn dump_compute_state(&self, flight: &Flight) -> Result {
         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
         let word = |address| fw.read_u32(address).unwrap_or(0xdead_beef);
-        let pointer = |address| fw.read_u64(address).unwrap_or(0xdead_beef_dead_beef);
+        // Work's pointers at +0x86a/+0x883 are packed. read_u64 requires
+        // four-byte alignment, so assemble these from aligned status words.
+        let pointer = |address: u64| {
+            let base = address & !3;
+            let shift = (address & 3) * 8;
+            let result = (|| -> Result<u64> {
+                let value = u64::from(fw.read_u32(base)?)
+                    | (u64::from(fw.read_u32(base.saturating_add(4))?) << 32);
+                if shift == 0 {
+                    Ok(value)
+                } else {
+                    let extra = u64::from(fw.read_u32(base.saturating_add(8))?);
+                    Ok((value >> shift) | (extra << (64 - shift)))
+                }
+            })();
+            result.unwrap_or(0xdead_beef_dead_beef)
+        };
         let queue = flight.queues[0].0.saturating_sub(0x4000);
         let context = pointer(queue + 0xa4);
         let support = pointer(flight.id + 0x86a);

@@ -238,6 +238,41 @@ FB
         cp /home/nsheth/.cache/$t.log "$observe/$t-guest.log" 2>/dev/null
         grep -E "PASS|STALL|resizes=|rc=" "$observe/$t-guest.log" | tail -2 | tr '\n' ' ' | sed "s/^/$t guest: /" >> "$observe/verdicts.txt"; echo >> "$observe/verdicts.txt"
         grep -E "PASS|STALL|resizes=" "$observe/$t-partner.log" | tail -1 | sed "s/^/$t partner: /" >> "$observe/verdicts.txt" ;;
+    rp-burst|rp-mburst)
+        # Burst synthetic (manager, 2026-10-08): A4 = firmware-wide wedge right after Dota's loading-end burst
+        # (3x 1280x720 LOAD renders + its first-ever 1920x1080 render within ~100 us, after a COPY switch).
+        # 45 fresh processes, 1920x1080 swapchain, 30 small warmup frames, then the burst. i%3==0: 1280x720 window
+        # (COPY throughout); 1/2: 1920x1080 window (FLIP) resized to 1280x720 400/50 ms before the burst (FLIP->COPY,
+        # Dota's sequence; claude-driver: COPY makes a Dota<->Xwayland fence ping-pong on the same image). A host partner renders throughout.
+        # rp-mburst runs the attempts as x86 under FEX inside one m4-muvm (Dota's path).
+        cat > /home/nsheth/.cache/$t.sh <<BURST
+#!/bin/bash
+bin=\$1
+for i in \$(seq 1 45); do
+    case \$((i % 3)) in
+    0) extra= ;;
+    1) extra="--win-w 1920 --win-h 1080 --resize-w 1280 --resize-h 720 --burst-resize-ms 400" ;;
+    2) extra="--win-w 1920 --win-h 1080 --resize-w 1280 --resize-h 720 --burst-resize-ms 50" ;;
+    esac
+    echo "== attempt \$i \$extra"
+    "\$bin" --width 1280 --height 720 --swap-w 1920 --swap-h 1080 --warmup-small 30 --offscreen 3 --passes 1 --inflight 2 --mode immediate --seconds 4 --timeout-ms 4000 \$extra || echo "attempt \$i rc=\$?"
+done
+echo "burst loop done"
+BURST
+        chown nsheth:nsheth /home/nsheth/.cache/$t.sh; chmod 755 /home/nsheth/.cache/$t.sh
+        install -o nsheth -g nsheth -m 755 "$observe/extra/render_present.x86" /home/nsheth/.cache/render_present.x86
+        runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; export HK_EXPERIMENTAL_APPLE9=1; exec "$0" --passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 600' "$rp" > "$observe/$t-partner.log" 2>&1 &
+        partner=$!
+        sleep 3
+        if [ "$t" = rp-burst ]; then
+            run_user $t 400 /home/nsheth/.cache/$t.sh "$rp"
+        else
+            run_user $t 500 m4-muvm /bin/bash -c "/home/nsheth/.cache/$t.sh /home/nsheth/.cache/render_present.x86 > /home/nsheth/.cache/$t-guest.log 2>&1"
+            cp /home/nsheth/.cache/$t-guest.log "$observe/$t-guest.log" 2>/dev/null
+        fi
+        kill $partner 2>/dev/null; wait $partner 2>/dev/null
+        f="$observe/$t.log"; [ "$t" = rp-mburst ] && f="$observe/$t-guest.log"
+        echo "$t: attempts=$(grep -c '^== attempt' "$f" 2>/dev/null) pass=$(grep -c '^PASS' "$f" 2>/dev/null) stall=$(grep -c '^STALL' "$f" 2>/dev/null) fail=$(grep -c 'rc=' "$f" 2>/dev/null) first-big=$(grep -m1 -o 'first swapchain pass.*' "$f")" >> "$observe/verdicts.txt" ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;

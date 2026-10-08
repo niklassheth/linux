@@ -14,6 +14,13 @@
  *   (default 1920x1080) through Xwayland/the compositor, like KWin growing Dota's borderless
  *   window; offscreen WxH passes continue. --recreate: rebuild the swapchain at the surface's
  *   current extent after SUBOPTIMAL (OUT_OF_DATE always rebuilds).
+ * --swap-w/--swap-h: swapchain extent independent of the window (Dota: 1920x1080 swapchain,
+ *   1280x720 window). --burst-resize-ms D: right before the first non-warmup frame, resize the
+ *   window to --resize-w x --resize-h and wait D ms, then render the burst frame (offscreen WxH
+ *   LOAD passes + the first-ever swapchain-size passes), like Dota's loading-end burst.
+ * --win-w/--win-h: initial window size (default WxH); e.g. a 1920x1080 window on a 1920x1080
+ *   swapchain presents by FLIP, and --burst-resize-ms with --resize-w 1280 --resize-h 720 then
+ *   switches Xwayland to COPY right before the burst (Dota's FLIP->COPY sequence).
  * --warmup-small N: for the first N frames render only small offscreen passes
  * (112x170 .. 298x452, as Dota's early frames) and present the swapchain image
  * untouched; the first swapchain LOAD pass then comes on frame N, in a context
@@ -126,6 +133,9 @@ int main(int argc, char **argv)
    unsigned seconds = 60, timeout_ms = 5000, work = 0, warmup = 0;
    unsigned resize_ms = 0, resize_w = 1920, resize_h = 1080;
    bool recreate = false;
+   unsigned swap_w = 0, swap_h = 0;
+   int burst_resize_ms = -1;
+   unsigned win_w = 0, win_h = 0;
    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -141,6 +151,11 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--resize-w") && i + 1 < argc) resize_w = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--resize-h") && i + 1 < argc) resize_h = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--recreate")) recreate = true;
+      else if (!strcmp(argv[i], "--swap-w") && i + 1 < argc) swap_w = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--win-w") && i + 1 < argc) win_w = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--win-h") && i + 1 < argc) win_h = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--swap-h") && i + 1 < argc) swap_h = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--burst-resize-ms") && i + 1 < argc) burst_resize_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
          const char *m = argv[++i];
          mode = !strcmp(m, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR :
@@ -157,7 +172,7 @@ int main(int argc, char **argv)
    xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(conn));
    for (int s = 0; s < screen_num; ++s) xcb_screen_next(&it);
    xcb_window_t win = xcb_generate_id(conn);
-   xcb_create_window(conn, XCB_COPY_FROM_PARENT, win, it.data->root, 0, 0, width, height, 0,
+   xcb_create_window(conn, XCB_COPY_FROM_PARENT, win, it.data->root, 0, 0, win_w ? win_w : width, win_h ? win_h : height, 0,
                      XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual, 0, NULL);
    xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, 14, "render_present");
    xcb_map_window(conn, win);
@@ -205,7 +220,7 @@ int main(int argc, char **argv)
       .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
       .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE };
    VkSwapchainKHR swc = VK_NULL_HANDLE;
-   uint32_t sn = 0, sw_w = width, sw_h = height;
+   uint32_t sn = 0, sw_w = swap_w ? swap_w : width, sw_h = swap_h ? swap_h : height;
    VkImage simg[16]; VkImageView sview[16]; bool first_use[16]; VkSemaphore done[16];
    VkSemaphoreCreateInfo semci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
    unsigned recreates = 0;
@@ -334,7 +349,14 @@ int main(int argc, char **argv)
          first_use[idx] = false;
          goto submit;
       }
-      if (k == warmup && warmup) { printf("first swapchain pass at frame %u t=%.3f\n", k, now() - t0); fflush(stdout); }
+      if (k == warmup && warmup && burst_resize_ms >= 0) {
+         uint32_t wh[2] = { resize_w, resize_h };
+         xcb_configure_window(conn, win, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, wh);
+         xcb_flush(conn);
+         struct timespec ts = { burst_resize_ms / 1000, (burst_resize_ms % 1000) * 1000000L };
+         nanosleep(&ts, NULL);
+      }
+      if (k == warmup && warmup) { printf("first swapchain pass at frame %u t=%.3f (%ux%u)\n", k, now() - t0, sw_w, sw_h); fflush(stdout); }
       for (unsigned p = 0; p < offscreen; ++p) {
          barrier(cb, off, off_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,

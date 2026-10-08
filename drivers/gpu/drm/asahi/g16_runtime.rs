@@ -1865,6 +1865,22 @@ impl Bootstrap {
         a.fragment_user_timestamp_end = timestamps[3];
         // From here any publication failure quarantines the roots.
         self.render_failed = true;
+        if crate::module_parameters::lifecycle.value() != 0 {
+            // Metal never repeats these: each render takes the next value of
+            // two device-wide counters, keeping the tag in the top byte. Our
+            // original constants gave every render of every client the same
+            // identity.
+            let n = self.render_publication as u32;
+            let high = 0x0800_0000 | (0x9f52u32.wrapping_add(n) & 0xffff);
+            let low = 0x0900_0000 | (0xa6bau32.wrapping_add(n.wrapping_mul(2)) & 0xfffe);
+            params.fragment_lifecycle = (u64::from(high) << 32) | u64::from(low);
+            params.tiling_lifecycle = (u64::from(high) << 32) | u64::from(low + 1);
+            a.fragment_uuid = u64::from(low);
+            a.tiling_uuid = u64::from(low + 1);
+        }
+        if crate::module_parameters::cc_pattern.value() != 0 {
+            params.completion_control = if queue_ordinal % 5 == 1 { 0 } else { 3 };
+        }
         let mut ta = params.tiling_work(&a).ok_or(EINVAL)?;
         let mut frag = params.fragment_work(&a).ok_or(EINVAL)?;
         // Keep firmware's internal profiling destinations distinct from the

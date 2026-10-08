@@ -124,6 +124,14 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
         },
+        lifecycle: u32 {
+            default: 0,
+            description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
+        },
+        cc_pattern: u32 {
+            default: 0,
+            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 0: completion_control as configured",
+        },
         ta3d_item: u32 {
             default: 0,
             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",

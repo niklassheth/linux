@@ -176,6 +176,19 @@ PY
     rb-small) run_user rb-small 90 $rb --passes 8 --inflight 4 --width 64 --height 64 --seconds 60 ;;
     rb-ovf) run_user rb-ovf 90 $rb --passes 4 --inflight 3 --instances 4000 --seconds 60 ;;
     rb-ovf2) run_user rb-ovf2 90 $rb --passes 1 --inflight 6 --instances 20000 --seconds 60 ;;
+    rp-firstbig)
+        # Partner renders a 1280x720 swapchain throughout (like KWin/Xwayland drawing that shape); 20 fresh
+        # processes each draw 60 small-only frames, then their first 1280x720 swapchain LOAD+blend pass.
+        runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; export HK_EXPERIMENTAL_APPLE9=1; exec "$0" --passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 400' "$rp" > "$observe/rp-partner.log" 2>&1 &
+        partner=$!
+        sleep 3
+        cat > "$observe/rp-firstbig.sh" <<FB
+#!/bin/bash
+for i in \$(seq 1 20); do echo "== attempt \$i"; "$rp" --warmup-small 60 --passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 6 --timeout-ms 4000 || echo "attempt \$i rc=\$?"; done
+FB
+        chmod 755 "$observe/rp-firstbig.sh"
+        run_user rp-firstbig 300 "$observe/rp-firstbig.sh"
+        kill $partner 2>/dev/null ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;

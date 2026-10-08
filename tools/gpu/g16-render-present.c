@@ -9,7 +9,11 @@
  *
  *   render_present [--passes N] [--offscreen M] [--width W --height H]
  *                  [--inflight K] [--mode fifo|mailbox|immediate]
- *                  [--seconds S] [--timeout-ms T] [--work R]
+ *                  [--seconds S] [--timeout-ms T] [--work R] [--warmup-small N]
+ * --warmup-small N: for the first N frames render only small offscreen passes
+ * (112x170 .. 298x452, as Dota's early frames) and present the swapchain image
+ * untouched; the first swapchain LOAD pass then comes on frame N, in a context
+ * that has only seen small renders (Dota's A4 ordering).
  */
 #include <xcb/xcb.h>
 #include <vulkan/vulkan.h>
@@ -115,7 +119,7 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
 int main(int argc, char **argv)
 {
    unsigned passes = 3, offscreen = 4, width = 1280, height = 720, inflight = 2;
-   unsigned seconds = 60, timeout_ms = 5000, work = 0;
+   unsigned seconds = 60, timeout_ms = 5000, work = 0, warmup = 0;
    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -126,6 +130,7 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--warmup-small") && i + 1 < argc) warmup = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
          const char *m = argv[++i];
          mode = !strcmp(m, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR :
@@ -215,6 +220,18 @@ int main(int argc, char **argv)
       .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
    VkImageView offview; CHECK(vkCreateImageView(dev, &ovci, NULL, &offview));
 
+   /* Small offscreen target for --warmup-small (largest of Dota's early sizes). */
+   const unsigned small_w[4] = { 112, 224, 246, 298 }, small_h[4] = { 170, 339, 372, 452 };
+   VkImageCreateInfo sii = ii; sii.extent = (VkExtent3D){ 298, 452, 1 };
+   VkImage smallimg; CHECK(vkCreateImage(dev, &sii, NULL, &smallimg));
+   VkMemoryRequirements smr; vkGetImageMemoryRequirements(dev, smallimg, &smr);
+   VkMemoryAllocateInfo smai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = smr.size,
+      .memoryTypeIndex = mem_type(smr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+   VkDeviceMemory smallmem; CHECK(vkAllocateMemory(dev, &smai, NULL, &smallmem)); CHECK(vkBindImageMemory(dev, smallimg, smallmem, 0));
+   VkImageViewCreateInfo svci = ovci; svci.image = smallimg;
+   VkImageView smallview; CHECK(vkCreateImageView(dev, &svci, NULL, &smallview));
+   bool small_first = true;
+
    VkShaderModuleCreateInfo smv = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof(spv_fs_vert), .pCode = spv_fs_vert };
    VkShaderModuleCreateInfo smf = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof(spv_a_frag), .pCode = spv_a_frag };
    VkShaderModule vs, fs; CHECK(vkCreateShaderModule(dev, &smv, NULL, &vs)); CHECK(vkCreateShaderModule(dev, &smf, NULL, &fs));
@@ -259,6 +276,21 @@ int main(int argc, char **argv)
       VkCommandBuffer cb = cbs[slot];
       VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
       CHECK(vkBeginCommandBuffer(cb, &bi));
+      if (k < warmup) {
+         /* Dota-like early frames: only small offscreen passes; swapchain image untouched. */
+         for (unsigned p = 0; p < 4; ++p) {
+            barrier(cb, smallimg, small_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            small_first = false;
+            pass(cb, smallview, p == 0 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, small_w[p], small_h[p], pipe_off, layout, (struct pc){ p, work, k });
+         }
+         barrier(cb, simg[idx], first_use[idx] ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+         first_use[idx] = false;
+         goto submit;
+      }
+      if (k == warmup && warmup) { printf("first swapchain pass at frame %u t=%.3f\n", k, now() - t0); fflush(stdout); }
       for (unsigned p = 0; p < offscreen; ++p) {
          barrier(cb, off, off_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -281,6 +313,7 @@ int main(int argc, char **argv)
       barrier(cb, simg[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
               VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+   submit:
       CHECK(vkEndCommandBuffer(cb));
       VkPipelineStageFlags ws = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
       VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &acq[slot],

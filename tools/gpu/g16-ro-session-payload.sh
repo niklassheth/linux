@@ -200,6 +200,19 @@ FB
         chmod 755 "$observe/rp-firstbig.sh"
         run_user rp-firstbig 300 "$observe/rp-firstbig.sh"
         kill $partner 2>/dev/null ;;
+    rp-storm|rp-storm-rc)
+        # Resize storm (manager, 2026-10-08): A4 in k51-q2000-1 was submitted within ~1 s of Dota's SUBOPTIMAL
+        # (KWin growing the borderless window). Toggle a 1280x720 render_present window to 1920x1080 every
+        # 700 ms while it keeps rendering 1280x720 offscreen + swapchain LOAD passes; a plain partner keeps
+        # another client busy. rp-storm-rc also recreates the swapchain after SUBOPTIMAL (as Dota does).
+        rc_flag=; [ "$t" = rp-storm-rc ] && rc_flag=--recreate
+        runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; export HK_EXPERIMENTAL_APPLE9=1; exec "$0" --passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 270' "$rp" > "$observe/$t-partner.log" 2>&1 &
+        partner=$!
+        sleep 3
+        run_user $t 270 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 240 --resize-ms 700 $rc_flag
+        kill $partner 2>/dev/null; wait $partner 2>/dev/null
+        grep -E "PASS|STALL|resizes=" "$observe/$t.log" | tail -1 | sed "s/^/$t: /" >> "$observe/verdicts.txt"
+        grep -E "PASS|STALL|resizes=" "$observe/$t-partner.log" | tail -1 | sed "s/^/$t partner: /" >> "$observe/verdicts.txt" ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;

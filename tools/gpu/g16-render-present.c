@@ -10,6 +10,10 @@
  *   render_present [--passes N] [--offscreen M] [--width W --height H]
  *                  [--inflight K] [--mode fifo|mailbox|immediate]
  *                  [--seconds S] [--timeout-ms T] [--work R] [--warmup-small N]
+ * --resize-ms M: every M ms toggle the X window between WxH and --resize-w x --resize-h
+ *   (default 1920x1080) through Xwayland/the compositor, like KWin growing Dota's borderless
+ *   window; offscreen WxH passes continue. --recreate: rebuild the swapchain at the surface's
+ *   current extent after SUBOPTIMAL (OUT_OF_DATE always rebuilds).
  * --warmup-small N: for the first N frames render only small offscreen passes
  * (112x170 .. 298x452, as Dota's early frames) and present the swapchain image
  * untouched; the first swapchain LOAD pass then comes on frame N, in a context
@@ -120,6 +124,8 @@ int main(int argc, char **argv)
 {
    unsigned passes = 3, offscreen = 4, width = 1280, height = 720, inflight = 2;
    unsigned seconds = 60, timeout_ms = 5000, work = 0, warmup = 0;
+   unsigned resize_ms = 0, resize_w = 1920, resize_h = 1080;
+   bool recreate = false;
    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -131,6 +137,10 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--warmup-small") && i + 1 < argc) warmup = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--resize-ms") && i + 1 < argc) resize_ms = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--resize-w") && i + 1 < argc) resize_w = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--resize-h") && i + 1 < argc) resize_h = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--recreate")) recreate = true;
       else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
          const char *m = argv[++i];
          mode = !strcmp(m, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR :
@@ -194,17 +204,34 @@ int main(int argc, char **argv)
       .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
       .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
       .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE };
-   VkSwapchainKHR swc; CHECK(vkCreateSwapchainKHR(dev, &swci, NULL, &swc));
-   uint32_t sn = 0; vkGetSwapchainImagesKHR(dev, swc, &sn, NULL);
-   VkImage simg[16]; if (sn > 16) sn = 16; vkGetSwapchainImagesKHR(dev, swc, &sn, simg);
-   VkImageView sview[16];
-   bool first_use[16];
-   for (uint32_t i = 0; i < sn; ++i) {
-      VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = simg[i],
-         .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = sf.format, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
-      CHECK(vkCreateImageView(dev, &vci, NULL, &sview[i]));
-      first_use[i] = true;
-   }
+   VkSwapchainKHR swc = VK_NULL_HANDLE;
+   uint32_t sn = 0, sw_w = width, sw_h = height;
+   VkImage simg[16]; VkImageView sview[16]; bool first_use[16]; VkSemaphore done[16];
+   VkSemaphoreCreateInfo semci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+   unsigned recreates = 0;
+#define BUILD_SWAPCHAIN() do { \
+      VkSwapchainKHR old = swc; \
+      if (old) { \
+         vkQueueWaitIdle(q); \
+         for (uint32_t i = 0; i < sn; ++i) { vkDestroyImageView(dev, sview[i], NULL); vkDestroySemaphore(dev, done[i], NULL); } \
+         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surf, &caps); \
+         if (caps.currentExtent.width != 0xffffffffu && caps.currentExtent.width) { sw_w = caps.currentExtent.width; sw_h = caps.currentExtent.height; } \
+      } \
+      swci.imageExtent = (VkExtent2D){ sw_w, sw_h }; swci.oldSwapchain = old; \
+      CHECK(vkCreateSwapchainKHR(dev, &swci, NULL, &swc)); \
+      if (old) vkDestroySwapchainKHR(dev, old, NULL); \
+      sn = 0; vkGetSwapchainImagesKHR(dev, swc, &sn, NULL); \
+      if (sn > 16) sn = 16; \
+      vkGetSwapchainImagesKHR(dev, swc, &sn, simg); \
+      for (uint32_t i = 0; i < sn; ++i) { \
+         VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = simg[i], \
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = sf.format, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } }; \
+         CHECK(vkCreateImageView(dev, &vci, NULL, &sview[i])); \
+         CHECK(vkCreateSemaphore(dev, &semci, NULL, &done[i])); \
+         first_use[i] = true; \
+      } \
+   } while (0)
+   BUILD_SWAPCHAIN();
 
    /* Offscreen compressed RGBA8 target. */
    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -248,11 +275,9 @@ int main(int argc, char **argv)
    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = inflight };
    CHECK(vkAllocateCommandBuffers(dev, &cai, cbs));
-   VkFence fences[8]; VkSemaphore acq[8], done[16];
+   VkFence fences[8]; VkSemaphore acq[8];
    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-   VkSemaphoreCreateInfo semci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
    for (unsigned f = 0; f < inflight; ++f) { CHECK(vkCreateFence(dev, &fci, NULL, &fences[f])); CHECK(vkCreateSemaphore(dev, &semci, NULL, &acq[f])); }
-   for (unsigned i = 0; i < sn; ++i) CHECK(vkCreateSemaphore(dev, &semci, NULL, &done[i]));
 
    printf("swapchain format=%d images=%u mode=%d passes=%u offscreen=%u size=%ux%u inflight=%u seconds=%u\n",
           sf.format, sn, mode, passes, offscreen, width, height, inflight, seconds);
@@ -260,8 +285,25 @@ int main(int argc, char **argv)
    double t0 = now(), last = t0;
    bool off_first = true;
    unsigned long frames = 0;
+   double next_resize = t0 + resize_ms / 1000.0;
+   bool big = false;
+   unsigned resizes = 0, suboptimal = 0;
+   bool need_recreate = false;
    for (unsigned k = 0; now() - t0 < seconds; ++k) {
       unsigned slot = k % inflight;
+      if (resize_ms && now() >= next_resize) {
+         big = !big;
+         uint32_t wh[2] = { big ? resize_w : width, big ? resize_h : height };
+         xcb_configure_window(conn, win, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, wh);
+         xcb_flush(conn);
+         resizes++;
+         next_resize = now() + resize_ms / 1000.0;
+      }
+      if (need_recreate) {
+         BUILD_SWAPCHAIN();
+         recreates++;
+         need_recreate = false;
+      }
       VkResult wr = vkWaitForFences(dev, 1, &fences[slot], VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
       if (wr != VK_SUCCESS) {
          printf("STALL waiting frame %u (slot %u) result=%d t=%.3f frames=%lu\n", k, slot, wr, now() - t0, frames);
@@ -271,7 +313,9 @@ int main(int argc, char **argv)
       uint32_t idx;
       VkResult ar = vkAcquireNextImageKHR(dev, swc, (uint64_t)timeout_ms * 1000000ull, acq[slot], VK_NULL_HANDLE, &idx);
       if (ar == VK_TIMEOUT || ar == VK_NOT_READY) { printf("STALL acquire result=%d t=%.3f frames=%lu\n", ar, now() - t0, frames); fflush(stdout); return 1; }
+      if (ar == VK_ERROR_OUT_OF_DATE_KHR) { need_recreate = true; --k; continue; }
       if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) { fprintf(stderr, "acquire %d\n", ar); return 2; }
+      if (ar == VK_SUBOPTIMAL_KHR) { suboptimal++; if (recreate) need_recreate = true; }
       CHECK(vkResetFences(dev, 1, &fences[slot]));
       VkCommandBuffer cb = cbs[slot];
       VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -308,7 +352,7 @@ int main(int argc, char **argv)
             barrier(cb, simg[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-         pass(cb, sview[idx], VK_ATTACHMENT_LOAD_OP_LOAD, width, height, pipe_sw, layout, (struct pc){ 100 + p, work, k });
+         pass(cb, sview[idx], VK_ATTACHMENT_LOAD_OP_LOAD, sw_w, sw_h, pipe_sw, layout, (struct pc){ 100 + p, work, k });
       }
       barrier(cb, simg[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -323,12 +367,14 @@ int main(int argc, char **argv)
       VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done[idx],
          .swapchainCount = 1, .pSwapchains = &swc, .pImageIndices = &idx };
       VkResult pr = vkQueuePresentKHR(q, &pi);
-      if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) { fprintf(stderr, "present %d t=%.3f\n", pr, now() - t0); return 2; }
+      if (pr == VK_ERROR_OUT_OF_DATE_KHR) need_recreate = true;
+      else if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) { fprintf(stderr, "present %d t=%.3f\n", pr, now() - t0); return 2; }
+      else if (pr == VK_SUBOPTIMAL_KHR && recreate) need_recreate = true;
       frames++;
-      if (now() - last > 5) { last = now(); printf("t=%.1f frames=%lu (%.0f fps)\n", last - t0, frames, frames / (last - t0)); fflush(stdout); }
+      if (now() - last > 5) { last = now(); printf("t=%.1f frames=%lu (%.0f fps) resizes=%u suboptimal=%u recreates=%u\n", last - t0, frames, frames / (last - t0), resizes, suboptimal, recreates); fflush(stdout); }
    }
    VkResult fr = vkWaitForFences(dev, inflight, fences, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
    if (fr != VK_SUCCESS) { printf("STALL draining result=%d\n", fr); return 1; }
-   printf("PASS frames=%lu in %.1f s\n", frames, now() - t0);
+   printf("PASS frames=%lu in %.1f s resizes=%u suboptimal=%u recreates=%u\n", frames, now() - t0, resizes, suboptimal, recreates);
    return 0;
 }

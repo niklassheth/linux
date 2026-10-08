@@ -8,7 +8,9 @@ label=${1:?capture label required}
 mode=${2:-unassisted}
 case "$label" in dota-gfxr-codex-*) ;; *) exit 64 ;; esac
 case "$mode" in unassisted|page_guard) ;; *) exit 64 ;; esac
-frames=${G16_CAPTURE_FRAMES:-300-304}
+# Begin at frame one so setup calls survive a crash before first present.
+# A later trimmed run also exercises gfxrecon's distinct state-tracking path.
+frames=${G16_CAPTURE_FRAMES:-1-5}
 [[ "$frames" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]] || exit 64
 frame_start=${BASH_REMATCH[1]}
 frame_end=${BASH_REMATCH[2]}

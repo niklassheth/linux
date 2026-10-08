@@ -2224,6 +2224,36 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// Experiment (compute_deps): which firmware dependency items a compute
+    /// Work carries. 1 keeps all (default). 0 drops all, which is unsafe and
+    /// for diagnosis only. 2 drops items on this queue's own compute lane,
+    /// which runs in order anyway. 3 drops items whose stamp the CPU already
+    /// sees reached at submit time.
+    fn filter_compute_dependencies(
+        &self,
+        queue: &FirmwareQueues,
+        dependencies: &[Option<Stamp>; 2],
+    ) -> Result<[Option<Stamp>; 2]> {
+        let mode = crate::module_parameters::compute_deps.value();
+        let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
+        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+        let mut kept = [None; 2];
+        let mut next = 0;
+        for dep in dependencies.iter().flatten() {
+            let drop = match mode {
+                0 => true,
+                2 => own_lane == Some(dep.address),
+                3 => g16_stamp::reached(fw.read_u32(dep.address)?, dep.value),
+                _ => false,
+            };
+            if !drop {
+                kept[next] = Some(*dep);
+                next += 1;
+            }
+        }
+        Ok(kept)
+    }
+
     pub(crate) fn submit_compute(
         &mut self,
         queues: Arc<Mutex<FirmwareQueues>>,
@@ -2234,6 +2264,8 @@ impl Bootstrap {
     ) -> Result<Receipt> {
         let mut queue = queues.lock();
         let mut client = owner.lock();
+        let filtered = self.filter_compute_dependencies(&queue, dependencies)?;
+        let dependencies = &filtered;
         self.reserve_flight(
             &queue,
             false,

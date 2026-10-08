@@ -955,3 +955,24 @@ build is in progress. This diagnostic driver is for a separate export run,
 not the unchanged control. Original ring contains identities/addresses only;
 it has no SPIR-V or shader binary payload. Existing compiler cache audit had
 no matched ring shaders, so unverified cache candidates will not be relabelled.
+
+
+## Pinned rw control3 and export readiness (00:22 local)
+
+`rw-20261008_001334` reached244.965s with no GPU timeout/fault and correct
+pinned a8c33e3 mapped. Watcher stopped on the2GiB available-host-memory
+guard; **shortened valid observation, not a five-minute clean result**.
+Terminal ring contains5103 valid owners. The harness finished normally.
+I edited the runner file while its shell still ran; after the harness returned
+that shell encountered an added script fragment and exited1. Original exit
+trap copied results and is restoring production. Future invocations use
+frozen wrapper copies; do not treat that orchestration error as a GPU fault.
+
+Native and aarch64 export-driver builds pass (source topic af3ac8a6180).
+Partial package `hang-draw-0a00d1f7/` joins original helper identities:
+EOT/partialEOT0xab89e07b92B; BG/partialBG0x1dfad39e484B. Manager reports
+compiler's full retained-ring audit rules out entry reuse:87 allocations
+at87 distinct offsets, no freed/reused code entries, current launch records
+written immediately before submit. The superseded request for launch lifetime
+collection is dropped. Exported full program hashes, sizes and instruction
+bytes will be validated against original ring identities.

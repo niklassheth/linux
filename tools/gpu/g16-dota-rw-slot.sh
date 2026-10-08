@@ -7,6 +7,10 @@ workspace=/home/nsheth/Projects/asahi
 : "${G16_KERNEL_ARTIFACT:?set frozen production20+213 diagnostic image}"
 variant=${G16_TRIGGER_VARIANT:-mode0}
 case "$variant" in mode0|fb1|inst|nocompress|export) ;; *) exit 64 ;; esac
+sticky=${G16_CONTEXT_STICKY:-0}
+case "$sticky" in 0) ;; 1) [ "${G16_STICKY_RW_APPROVED:-0}" = 1 ] || { echo 'sticky behavior experiment needs explicit rw authorization'; exit 64; } ;; *) exit 64 ;; esac
+boot_args='asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1'
+[ "$sticky" = 0 ] || boot_args="$boot_args asahi_m4.context_sticky=1"
 lease=$workspace/tools/lease/lease.sh
 stamp=$(date +%Y%m%d_%H%M%S)
 label=dota-trigger-rw-$stamp
@@ -52,7 +56,7 @@ cleanup() {
 trap cleanup EXIT
 sha256sum "$G16_KERNEL_ARTIFACT/Image.gz" "$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" > "$local_output/boot-inputs.sha256"
 boot_attempted=1
-timeout 240 env -u KERNEL_BUILD IMAGE="$G16_KERNEL_ARTIFACT/Image.gz" DTB="$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" EXTRA_ARGS='asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1' "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
+timeout 240 env -u KERNEL_BUILD IMAGE="$G16_KERNEL_ARTIFACT/Image.gz" DTB="$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" EXTRA_ARGS="$boot_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
 wait_ssh
 expected=$(sed -n 's/^#define UTS_VERSION "\(.*\)"$/\1/p' "$G16_KERNEL_ARTIFACT/utsversion.h")
 loaded=$(ssh "${ssh_options[@]}" "$mini" 'uname -v')
@@ -60,6 +64,9 @@ printf 'expected=%s\nloaded=%s\n' "$expected" "$loaded" > "$local_output/loaded-
 [ "$loaded" = "$expected" ]
 ssh "${ssh_options[@]}" "$mini" "mkdir -p '$remote_output'; m4-post-boot; uname -a; cat /proc/cmdline; findmnt -no TARGET,FSTYPE,OPTIONS -T /; systemctl is-active m4-kwin claude-headless input-forward-server" > "$local_output/setup.log" 2>&1
 ssh "${ssh_options[@]}" "$mini" 'case ",$(findmnt -no OPTIONS /)," in *,rw,*) ;; *) exit 1 ;; esac; ! grep -Eq "asahi_m4\.(timeout_policy|compute_preempt|compute_save_slot|compute_private_pool|control_1b|render_barrier|render_preempt|retire_poll_ms)=" /proc/cmdline'
+if [ "$sticky" = 1 ]; then
+    ssh "${ssh_options[@]}" "$mini" 'grep -qw asahi_m4.context_sticky=1 /proc/cmdline'
+fi
 expected_driver=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/libvulkan_asahi.so
 if [ "$variant" = fb1 ]; then expected_driver=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-fb-a64/libvulkan_asahi.so; fi
 if [ "$variant" = inst ]; then expected_driver=/usr/lib64/libvulkan_asahi.so; fi

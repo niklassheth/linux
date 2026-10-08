@@ -784,3 +784,25 @@ without UAPI changes or submission behavior changes. A separate in-tree
 GCC build is running; its private-pool knob will stay explicitly disabled
 for trigger controls. Frozen runtime or save records do not alone prove
 non-execution: capture6 indicates runtime updates at lane switches.
+
+
+## Trigger retry queued (23:10)
+
+Candidate stream diagnostics built PASS and frozen at
+`artifacts/m4-linux/bits-7.3-213-prod17-db5f0fe/` (UTS#2 23:06:10).
+The current mode0 retry observe-20261007_230805 uses timeout_policy=1,
+compute_preempt=0, record storage1, render_preempt1, render_barrier2,
+control1b0 and explicit private_pool0. Its /tmp overlays have7.7GiB
+capacity; /run remains small and is no longer the overlay backing.
+At23:10 there is no valid run verdict yet; Steam is active and the
+collector is launching. Keep this pending, not counted as clean.
+The trigger watcher now detects runtime failure before Dota exists.
+
+The op1b experiment is complete and negative. Private-pool containment
+is built but remains unbooted: defer it until multiple actual Dota
+controls and an origin/progress diagnostic have received equal effort.
+Capture7 initialization request remains available for a later compiler
+window; no immediate need for another teardown soak. The later gfxr
+window1800 is too late for the reproduced~54s launch failure. After
+identity controls, try an earlier window600-604 with the proven Steam
+liveness guard and larger overlay backing, rather than reusing1800.

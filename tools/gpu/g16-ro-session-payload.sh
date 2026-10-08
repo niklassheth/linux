@@ -122,7 +122,18 @@ PY
               chown nsheth:nsheth "$R/dota-inner.sh"
               grep -oE '(exportid|exporthash)\)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
           fi
-          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          if [ "$variant" = fixed ]; then
+              # claude-compiler's meta-copy helper-lane fix (apple9/meta-copy-helper-oob e77329b+2f3db1b),
+              # installed and wired into dota-inner.sh inside the overlay only.
+              mkdir -p "$R/driver-fixed"
+              cp "$observe/extra/libvulkan_asahi.fixed.so" "$R/driver-fixed/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-fixed/icd.json"
+              grep -qF 'fixed) ' "$R/dota-inner.sh" || sed -i 's|case "\$variant" in |case "$variant" in fixed) export VK_DRIVER_FILES="$root/driver-fixed/icd.json" HK_APPLE9_DUMP_MODE=0;; |' "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-fixed" "$R/dota-inner.sh"
+              grep -o 'fixed)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
+              sha256sum "$R/driver-fixed/libvulkan_asahi.so" >> "$observe/verdicts.txt"
+          fi
+          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"

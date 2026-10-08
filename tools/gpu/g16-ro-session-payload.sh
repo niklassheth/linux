@@ -52,6 +52,7 @@ finish_stall() {
     echo "STALL in $1 at $(date +%s.%N)" >> "$observe/verdicts.txt"
     sleep 25
     dmesg > "$observe/kernel.log"
+    journalctl -k -b --no-pager > "$observe/kernel-journal.log" 2>&1
     exit 0
 }
 run_user() { # name timeout cmd...
@@ -169,3 +170,4 @@ PY
 done
 echo "NO-STALL all tests" >> "$observe/verdicts.txt"
 dmesg > "$observe/kernel.log"
+journalctl -k -b --no-pager > "$observe/kernel-journal.log" 2>&1

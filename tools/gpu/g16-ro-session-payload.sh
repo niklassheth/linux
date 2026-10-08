@@ -76,6 +76,11 @@ if [ -s "$observe/render_burst.c" ]; then
     cc -O2 -g -Wall -std=c11 -D_POSIX_C_SOURCE=200809L -I"$observe" -o "$rb" "$observe/render_burst.c" -lvulkan > "$observe/render_burst-build.log" 2>&1
     chmod 755 "$rb"
 fi
+rp=$observe/render_present
+if [ -s "$observe/render_present.c" ]; then
+    cc -O2 -g -Wall -std=c11 -D_POSIX_C_SOURCE=200809L -I"$observe" -o "$rp" "$observe/render_present.c" -lvulkan -lxcb > "$observe/render_present-build.log" 2>&1
+    chmod 755 "$rp"
+fi
 [ "$tests" != restore ] || { echo "RESTORED ro production" >> "$observe/verdicts.txt"; exit 0; }
 for t in $tests; do
     case $t in
@@ -91,7 +96,7 @@ for t in $tests; do
     cb-flight-q2) run_user cb-flight-q2 120 $cb --split --interleave --queues 2 --inflight 16 --images 128 --mips 2 --size 64 --format bc7 --submits 400 ;;
     dota|dota-*) R=/home/nsheth/g16-games/dota-shader-identity-20261006
           variant=mode0; [ "$t" = dota ] || variant=${t#dota-}
-          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"
@@ -114,6 +119,9 @@ for t in $tests; do
     rb-c) run_user rb-c 90 $rb --passes 32 --inflight 2 --seconds 60 ;;
     rb-clear) run_user rb-clear 90 $rb --passes 8 --inflight 4 --clear --seconds 60 ;;
     rb-small) run_user rb-small 90 $rb --passes 8 --inflight 4 --width 64 --height 64 --seconds 60 ;;
+    rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
+    rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
+    rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;
     replay) run_user replay 240 env HK_DEBUG=perf VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/icd.json VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
             /home/nsheth/g16-games/codex-dota-replay-20261008/gfxrecon-replay --wsi xcb /mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr ;;
     *) echo "unknown test $t" >> "$observe/verdicts.txt" ;;

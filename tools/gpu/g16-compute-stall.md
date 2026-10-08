@@ -8,7 +8,7 @@ Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Current checkpoint (22:18 local)
+## Current checkpoint (22:36 local)
 
 - Capture 6 audit is complete: [capture6-verified.md](capture6-verified.md),
   `capture6-audit.json`, and `capture6-initial-context.json`. No destroy names H
@@ -22,6 +22,10 @@ claude-driver's integration and recovery work. Never push.
 - H's initial queue-context first 64 bytes exactly match our initializer. Its
   static native-priority queue profile also matches. No missing quantum or
   lane-enable field has been identified in those initial bytes.
+- Capture 6 also proves separate support objects/FList slots (C3/H0) and
+  private physical pool backing. Ours shares slot2 and its pool. Default-off
+  `compute_private_pool=1` WIP b9d449 allocates private backing/exclusive leases;
+  separate production17+213 build is running, with no hardware result.
 - Six historical op1b records are present before the arm cursor; none is newly
   published by these clients. The default-off six-record Linux experiment is
   queued using frozen #6, RO production17+213, native priority, policy3 and
@@ -173,6 +177,7 @@ packed pointer/status value; low bits must be retained in the capture.
 | C13 | Parser on actual Dota trace, singleton objects + trim reconstruction | Pass: six frame submits,2554 transfers, no unobserved CBs; setup submits counted separately |
 | C14 | Capture 6 raw audit: control attribution, snapshots, initial context | 8901 records parse; no H destroy in observed 147 s; H context prefix matches ours; op20 belongs C |
 | C15 | Dota transfer ranking and Honeykrisp source association | 2049 executed buffer copies use libagx compute; largest 2249100 bytes; no duration/hang attribution |
+| C16 | Default-off per-VM compute pool/support/slot experiment | WIP b9d449; separate GCC build running; no hardware result |
 
 ## Valid recovery retry (#17 source + 213, 21:13–21:17)
 

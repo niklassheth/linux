@@ -78,3 +78,41 @@ difference, not an identified quantum or enable bit. Some words resemble
 floating-point coefficients, so assigning scheduling semantics would be
 premature. Capture6 does not sample full regionA/C or the full main bundle.
 No new kernel knob or hardware test is justified by this prefix alone.
+
+
+## Per-client compute pools (22:36)
+
+`capture6-support-fields.json` extracts the support prefix at each client's
+first doorbell. C: support0xfffffc20c05c0000, identity10, FList slot3,
+state0xfffffc2000228000. H: support0xfffffc20c06a8000, identity12, slot0,
+state0xfffffc2000360000. Both have private directory backing as proved above.
+Their capacity is524288 entries, pages10240, and both name operand table
+0x7000408000. H's cursor is10240; C's first observed cursor10352 includes
+preceding execution. Both also have+0x10=2, +0x40=4, +0x48=160, +0x5c=1
+and+0x94=2; these fields are not interpreted as a preemption flag.
+
+Ours names one device-owned support object, slot2, directory0x7002cc0000,
+capacity12288, cursor/pages8192, shared state0xfffffc20001b0000 and no operand
+table pointer in this compute support prefix. `map_compute_work` maps the
+opening client's same physical directory/spill backing into every compute VM.
+The earlier negative record/identity/priority knobs did not change this
+ownership. Metal support identity/FList slot are distinct from per-Work
+register identity, which was already tested negatively.
+
+A default-off `compute_private_pool=1` experiment is WIP b9d449423e29c on213.
+It allocates the same existing32MiB pool plus96KiB directory separately in
+each compute AddressSpace, initializes the directory identically, and leases
+an exclusive support page, shared state and hardware slot from the existing
+3..59 support allocator. The AddressSpace owns that lease; pending and
+quarantined Works already retain it with their VM roots. Render and compute
+leases share the allocator to prevent slot collisions. Default0 preserves the
+opening/shared pool. No per-client op20, opaque captured fields, pool resizing,
+UAPI changes or production integration are included. This tests ownership and
+slot exclusivity, not full Metal-layout equivalence.
+
+A separate required build worktree keeps the queued op1b scripts stable:
+`tmp/g16-compute-build`, `test/m4-7.3-213-privatepool` at76e04c3d5dbc0,
+based frozen production17+213/control1b e6f72e2. GCC in-tree Image.gz/dtbs
+build is running with production17 config; log `build-private-compute-pool.log`.
+It is unbooted. Ordered hardware plan remains op1b, later Dota capture, then
+consider this distinct pool arm in a new lease. No recovery/time-slicing fix.

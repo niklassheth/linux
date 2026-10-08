@@ -1,16 +1,76 @@
 # Dota compute stall / G16 compute time-slicing — Codex (2026-10-07)
 
-Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-driver for queue32; claude-kernel is queued. Private topic branch and worktree created:
+Owner: `codex-dota`. No hardware lease held at this checkpoint. Recovery
+and the first short probe have restored production #17 and released the lease.
+A corrected probe is queued; kernel/driver/air mini users may interleave.
+Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (20:24 local)
+## Status / manager handoff (21:38 local)
 
-Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
-README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. First boot was invalid
-(wrong UTS guard, overlapping default restore visible in queue log); production
-#10 restored and services verified. A retry is queued behind claude-kernel.
-Dota gfxr failed its loader guard; capture 5 is not available yet. No Apple binaries inspected.
+- Valid read-only production #17 + rebased 213 recovery retry is **negative**:
+  teardown policy 3 plus native compute priority does not recover other clients.
+  Logs: `observe-20261007_211348/`, `retry-production17-console.log`. Firmware
+  consumes teardown publications; companion loses device, all three fresh
+  vkcubes time out, and KWin later aborts after a distinct late firmware fault.
+- First exact-path probe slot is **INVALID for capture/FEX**. It booted the
+  expected private #4 image RO, but the Sniper entry point was unavailable.
+  Native AArch64 baseline completes on c0828f3fac Honeykrisp; the two nominal
+  layer runs have no layer mapping or capture and must not count as passes.
+  `probe-service.log` also records muvm launch EPERM, and the verdict file is
+  empty. Logs are `observe-20261007_211820/`. Production #17 and all three
+  desktop/input units were verified, then lease released.
+- Corrected probe runner is queued (`probe-retry-console.log`), same frozen
+  #4 image. It explicitly mounts USB4-TEST read-only and overlays it in tmpfs
+  before starting the Steam VM, checks Sniper availability, requests the
+  layer through VkInstanceCreateInfo as well as the environment, records
+  native and guest environment, and writes verdicts directly to files.
+- Own branch is rebased onto current bit211 a6e385; diagnostic and default-off
+  global control-1b experiment fixes were folded back from the private test
+  assembly. The control-1b build passed (#6, 21:29:19), **not booted**. Current
+  queued probe still uses the previous frozen #4 and does not enable it.
+- Code basis of tested #4 is production f6ba235 plus rebased 213 e3882f12,
+  assembly 69be865. Frozen inputs: `artifacts/m4-linux/bits-7.3-213-prod17-69be865`.
+  It retains system_dfl() and current debug_ctx gates. Nine inherited 212
+  recovery commits remain a test dependency and are not production changes.
+  Release/requeue between all experiments; never push.
+
+Capture5 is available and independently parsed (6348records). Verification:
+[capture5-verified.md](capture5-verified.md), with lifetime/root separation in
+capture5-lifetimes.json. Manager answer **yes** to a teardown rerun, with exact
+additions in [capture6-request.md](capture6-request.md). Current capture ends
+when a retired C record read disables the monitor at80.2s, so H's destruction
+is not established. Zero initial records are normal; first-success op20 ASID
+translation still does not establish mapping ownership.
+Queue32 Dota gfxr crashes before its late loader guard. No Apple binaries inspected.
+
+The exact capture-5 request is [capture5-request.md](capture5-request.md), ready
+for the manager to relay. It includes finite Metal controls and submit-time
+record reads, full 256-entry rings, control registration backing, Work ASID
+correlation, and read-error coverage. Queue32's captured and clean fb0-v1 logs
+have the same set of 60 unknown Vulkan-function warnings. The captured run
+exits 139 before its log reaches the clean run's host-X11 initialization, with
+no useful crash stack. Missing RenderDoc warnings occur in both arms and are
+not evidence of the crash's cause. Comparison: queue32-crash-comparison.json.
+
+The no-submit probe now builds for x86-64 and AArch64 and records mapped Vulkan,
+layer and FEX libraries after instance/device creation. New launch scripts use
+the Sniper entry point inside the same muvm Steam VM, preserving the Dota FEX
+thunk configuration. Target execution remains pending; host-native success
+does not validate the FEX path. FEX's local AGENTS.md forbids AI-generated code
+contributions to that project; this work uses external probes, not FEX edits.
+
+**Additional control audit (20:57):** capture 4's first control dump has state
+cursors `{82,82}`, producer `83`, and slots 79–82. The op-0x1b `{2,2}` is
+slot 79, already behind both cursors; the initial tracer reads `(end-4)..end`
+without a prior baseline. Its dump timestamp is therefore **not** a publication
+timestamp. This does not establish whether op-0x1b is boot/global setup or
+per-client setup. Slot 80's op-0x20 is likewise historical; only slot 82 is
+ahead of those observed cursors. Capture 5's arm snapshot is essential for
+separating historical content from new publications. Raw cursor extract:
+capture4-control-cursors.json. Prepared-tracer coverage review for manager:
+[capture5-preflight-review.md](capture5-preflight-review.md).
 
 **Request through manager to claude-compiler for capture 5:** capture op-0x20's
 firmware descriptor at +0x14 and user mappings at +0x1c/+0x24, plus the Work
@@ -46,8 +106,38 @@ packed pointer/status value; low bits must be retained in the capture.
 | C3 | Prepare matched Metal spin with finite output controls | CPU LCG checks pass; Objective-C build unavailable on controller; mini execution pending capture-owner lease |
 | C4 | GCC build of integrated diagnostics + quarantined-lane follow-up | Pass; Image.gz/dtbs; no boot yet |
 | C5 | Streaming gfxr parser lifecycle fixture + local converter build | Pass; Dota capture pending |
-| C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | First boot invalid (wrong UTS), no GPU workload; restored #10; retry queued |
+| C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | First boot invalid; valid RO #17+213 retry negative: companion DEVICE_LOST, three fresh cubes time out; restored #17 |
 | C7 | Native host no-submit probe: no layer, unassisted, page_guard + convert both captures | All pass; no FEX/mini result yet |
+| C8 | Capture5 full raw audit plus finite logs / root lifetimes | Valid concurrent C/R progress; zero host records normal; teardown and registration ownership coverage gaps |
+| C9 | RO #17+213 exact-path no-submit probe, first slot | INVALID FEX/capture: external Sniper path unavailable, layer absent in nominal native layer modes; production restored |
+| C10 | Explicit-layer probe, external volume RO + tmpfs overlay | Prepared/queued; no target result yet |
+| C11 | Six captured global control-1b records, default-off kernel experiment | Build passed; no hardware result |
+
+## Valid recovery retry (#17 source + 213, 21:13–21:17)
+
+Exact UTS/cmdline guard passed; root and home are Btrfs **ro**, desktop writes
+use tmpfs overlays. Mesa reports c0828f3fac/Honeykrisp, Apple M4 G16G B1.
+Baseline cube120frames passes. Companion completes6141frames before H and
+only5 more in the next10s, then reports DEVICE_LOST. H reports DEVICE_LOST at
+20s; both second submit and wait-idle also report device loss. Fresh cubes
+during15, after35 and after-client-exit all return124 (20s timeout).
+
+Queue descriptors verify native priorities2/2. Control cursors4/4/4 initially,
+then5/5/5 after first destroy and6/6/6 after the next; eventually10/10/10.
+Thus the new debug information establishes consumption of those publications,
+without demonstrating eviction of the non-finishing Work. At135.821s uptime,
+after all observed bans, firmware reports kind4 timeout and event service fails
+EIO globally; fault registers decode0x10000858000, vm_slot3. This later failure
+must be distinguished from the initial engine stall; causal attribution is
+not established. KWin later aborts. Production#17 and all three desktop/input
+services verified after restoration.
+
+Diagnostic limitation/fix: Work pointers+86a/+883 are packed, but my reader
+called FirmwareSpace::read_u64, whose read_u32 rejects unaligned addresses.
+Their deadbeef sentinels therefore do **not** indicate unmapped pointers.
+Aligned-word assembly is committed on the private test branch and building;
+folded the tooling/kernel fixes back into213 after its first probe runner
+finishes. The immutable recovery/probe image remains the verified #4 artifact.
 
 ## Next
 
@@ -392,3 +482,43 @@ these tools for capture setup in a bounded leased slot; no simultaneous runners
 with the same lease owner will be started. Production restoration remains
 mandatory. Capture 5 should also report finite-H GPU-time scaling (the prepared
 Metal tool prints GPU start/end times) to check the workload's executed cost.
+
+
+## Checkpoint for manager (20:24)
+
+- Local WIP tip **ef25ec310a61b** on `bits/213-g16-compute-timeslice`; no pushes.
+  Immutable diagnostic GPU code remains fcf05134b5c35, no new kernel rebuild.
+- Recovery retry still running as a lease waiter (session 90431), output
+  `linux-slot-retry.log`. It will boot RO, test policy3/native compute priority,
+  restore production and verify services before releasing. Do not start another
+  codex-dota runner concurrently. Kernel owner currently has rc6 RO gates.
+- Obsolete queue32 capture-copy watcher stopped locally (exit 143), since the
+  confirmed failed capture means its success marker will not arrive. No device
+  access by that watcher. We will analyze our own successful capture explicitly.
+- Capture isolation tools/launchers are built/committed, native-host smoke passes,
+  FEX and real Dota capture remain pending. No DEVICE_LOST isolation/time-slicing
+  fix or valid Dota A/B improvement demonstrated.
+
+
+## First probe slot and correction (21:30–21:38)
+
+`observe-20261007_211820` passed UTS/RO guards. Native baseline reached
+vkCreateInstance/device/buffer/allocate/map/write/flush and teardown without
+submitting GPU work, on Apple M4 / Honeykrisp c0828f3fac. Nominal unassisted
+and page_guard executions also reached teardown, but maps contain no
+libVkLayer_gfxreconstruct and no gfxr/log files exist: **layer absence, not a
+layer compatibility pass**. FEX log in every mode contains only missing
+`SteamLinuxRuntime_sniper/_v2-entry-point`; there is no Vulkan checkpoint.
+The host service reports `could not request launch to server: EPERM`, so
+joining and synchronous stdio validity must also be verified in the retry.
+The empty verdict file gives no valid success marker. No FEX crash conclusion.
+
+The RO observer had not explicitly mounted the external game volume; corrected
+observer mounts USB4-TEST read-only and overlays the volume in tmpfs before
+muvm starts, requires the actual Sniper path, and records backing mount state.
+The C probe now explicitly enables VK_LAYER_LUNARG_gfxreconstruct for layer
+modes and prints capture/loader environment at entry. Missing layer now fails
+instance creation rather than appearing to pass through environment omission.
+Direct verdict-file writes avoid dependence on launch stdout plumbing. Both
+probe architectures build with -Wall -Wextra -Werror; shell syntax passes.
+These are own external workloads/launchers; no FEX project modifications.

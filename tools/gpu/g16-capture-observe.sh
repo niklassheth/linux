@@ -69,12 +69,12 @@ cat > "$stage/probe-host.sh" <<'HOST'
 set -euo pipefail
 source /home/nsheth/.local/state/m4/session.env
 export M4_MUVM_MEM=6144 M4_MUVM_VRAM=2048 M4_MUVM_FEX_OVERLAY=/var/tmp/g16-steam-mesa.erofs
-exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-capture-probe-guest.sh" "$1" > "$1/probe-launch.log" 2>&1
+exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-capture-probe-guest.sh" "$1" > "$1/probe-launch.log" 2>&1 < <(sleep 115)
 HOST
 chown nsheth:nsheth "$stage/probe-host.sh"
 systemd-run --unit=codex-dota-probe --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=120 /bin/bash "$stage/probe-host.sh" "$stage"
 for second in {1..125}; do
-    systemctl is-active --quiet codex-dota-probe || break
+    grep -q '^page_guard rc=' "$stage/probe-verdicts.txt" 2>/dev/null && break
     sleep 1
 done
 journalctl -u codex-dota-probe --no-pager -o cat > "$observe/probe-service.log"
@@ -94,7 +94,7 @@ cat > "$stage/capture-host.sh" <<'HOST'
 set -euo pipefail
 source /home/nsheth/.local/state/m4/session.env
 export M4_MUVM_MEM=6144 M4_MUVM_VRAM=2048 M4_MUVM_FEX_OVERLAY=/var/tmp/g16-steam-mesa.erofs
-exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-dota-capture-guest.sh" "$2" unassisted
+exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-dota-capture-guest.sh" "$2" unassisted < <(sleep 145)
 HOST
 chown nsheth:nsheth "$stage/capture-host.sh"
 systemd-run --unit=codex-dota-capture --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=150 /bin/bash "$stage/capture-host.sh" "$stage" "$label"

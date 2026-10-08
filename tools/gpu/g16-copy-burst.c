@@ -8,6 +8,9 @@
  *   copy_burst [--images N] [--size S] [--mips M] [--format rgba8|bc1|bc3|bc7|r8]
  *              [--submits K] [--timeout-ms T] [--recreate] [--split]
  * --split submits every image in its own command buffer within one vkQueueSubmit.
+ * --interleave adds, after each image's copies, a clear-only 64x64 RGBA8 render
+ * pass that the next copy waits on (compute->render->compute barriers), like
+ * Dota's loading frames. --queues 2 alternates submits between two queues.
  */
 #include <vulkan/vulkan.h>
 #include <stdio.h>
@@ -29,7 +32,7 @@ static double now(void)
 int main(int argc, char **argv)
 {
    unsigned images = 256, size = 256, mips = 9, submits = 200, timeout_ms = 5000;
-   int recreate = 0, split = 0;
+   int recreate = 0, split = 0, interleave = 0; unsigned nqueues = 1;
    const char *fmt_name = "bc3";
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--images") && i + 1 < argc) images = atoi(argv[++i]);
@@ -40,6 +43,8 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--recreate")) recreate = 1;
       else if (!strcmp(argv[i], "--split")) split = 1;
+      else if (!strcmp(argv[i], "--interleave")) interleave = 1;
+      else if (!strcmp(argv[i], "--queues") && i + 1 < argc) nqueues = atoi(argv[++i]);
       else { fprintf(stderr, "bad arg %s\n", argv[i]); return 64; }
    }
    VkFormat format; unsigned block = 1, bpb = 4;
@@ -64,14 +69,19 @@ int main(int argc, char **argv)
    VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(pd, &props);
    printf("device %s driver 0x%x\n", props.deviceName, props.driverVersion);
    float prio = 1;
+   float prios[2] = { 1, 1 };
+   (void)prio;
+   if (nqueues < 1) nqueues = 1;
+   if (nqueues > 2) nqueues = 2;
    VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-      .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
+      .queueFamilyIndex = 0, .queueCount = nqueues, .pQueuePriorities = prios };
    VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-      .synchronization2 = VK_TRUE };
+      .synchronization2 = VK_TRUE, .dynamicRendering = VK_TRUE };
    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13,
       .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
    VkDevice dev; CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
-   VkQueue q; vkGetDeviceQueue(dev, 0, 0, &q);
+   VkQueue qs[2]; vkGetDeviceQueue(dev, 0, 0, &qs[0]);
+   if (nqueues > 1) vkGetDeviceQueue(dev, 0, 1, &qs[1]);
    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pd, &mp);
 
    /* Staging buffer holding the whole mip chain. */
@@ -121,6 +131,22 @@ int main(int argc, char **argv)
       vkDestroyImage(dev, img[i], NULL); vkFreeMemory(dev, imem[i], NULL); } } while (0)
    CREATE_IMAGES();
 
+   /* Small color target for --interleave passes. */
+   VkImageCreateInfo rti = ii;
+   rti.format = VK_FORMAT_R8G8B8A8_UNORM; rti.extent = (VkExtent3D){ 64, 64, 1 }; rti.mipLevels = 1;
+   rti.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   VkImage rt; CHECK(vkCreateImage(dev, &rti, NULL, &rt));
+   VkDeviceMemory rtmem;
+   {
+      VkMemoryRequirements r; vkGetImageMemoryRequirements(dev, rt, &r);
+      VkMemoryAllocateInfo a = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = r.size, .memoryTypeIndex = dl };
+      CHECK(vkAllocateMemory(dev, &a, NULL, &rtmem)); CHECK(vkBindImageMemory(dev, rt, rtmem, 0));
+   }
+   VkImageViewCreateInfo rtv = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = rt,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+   VkImageView rtview; CHECK(vkCreateImageView(dev, &rtv, NULL, &rtview));
+
    VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = 0 };
    VkCommandPool pool; CHECK(vkCreateCommandPool(dev, &pci, NULL, &pool));
@@ -132,8 +158,8 @@ int main(int argc, char **argv)
    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
    VkFence fence; CHECK(vkCreateFence(dev, &fci, NULL, &fence));
 
-   printf("images=%u size=%u mips=%u format=%s submits=%u split=%d recreate=%d copies/submit=%u\n",
-          images, size, mips, fmt_name, submits, split, recreate, images * mips);
+   printf("images=%u size=%u mips=%u format=%s submits=%u split=%d recreate=%d interleave=%d queues=%u copies/submit=%u\n",
+          images, size, mips, fmt_name, submits, split, recreate, interleave, nqueues, images * mips);
    fflush(stdout);
    double t0 = now();
    for (unsigned k = 0; k < submits; ++k) {
@@ -170,12 +196,45 @@ int main(int argc, char **argv)
             b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             vkCmdPipelineBarrier2(cb[c], &di);
+            if (interleave) {
+               /* copy -> render: the clear waits on the copies, and the
+                * next image's copies wait on the clear. */
+               VkImageMemoryBarrier2 rb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                  .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                  .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                  .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                  .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                  .image = rt, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+               VkDependencyInfo rdi = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                  .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &rb };
+               vkCmdPipelineBarrier2(cb[c], &rdi);
+               VkRenderingAttachmentInfo att = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                  .imageView = rtview, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                  .clearValue.color.float32 = { i * 0.01f, 0.5f, 0.25f, 1 } };
+               VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                  .renderArea = { { 0, 0 }, { 64, 64 } }, .layerCount = 1,
+                  .colorAttachmentCount = 1, .pColorAttachments = &att };
+               vkCmdBeginRendering(cb[c], &ri);
+               vkCmdEndRendering(cb[c]);
+               VkMemoryBarrier2 mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                  .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                  .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+               VkDependencyInfo mdi = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                  .memoryBarrierCount = 1, .pMemoryBarriers = &mb };
+               vkCmdPipelineBarrier2(cb[c], &mdi);
+            }
          }
          CHECK(vkEndCommandBuffer(cb[c]));
       }
       VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = ncb, .pCommandBuffers = cb };
       double ts = now();
-      CHECK(vkQueueSubmit(q, 1, &si, fence));
+      CHECK(vkQueueSubmit(qs[k % nqueues], 1, &si, fence));
       VkResult r = vkWaitForFences(dev, 1, &fence, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
       double te = now();
       if (r != VK_SUCCESS) {

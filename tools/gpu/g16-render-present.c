@@ -21,6 +21,10 @@
  * --win-w/--win-h: initial window size (default WxH); e.g. a 1920x1080 window on a 1920x1080
  *   swapchain presents by FLIP, and --burst-resize-ms with --resize-w 1280 --resize-h 720 then
  *   switches Xwayland to COPY right before the burst (Dota's FLIP->COPY sequence).
+ * --split-burst: on burst frames submit each offscreen WxH pass (CLEAR, then LOADs, into a
+ *   freshly discarded intermediate) as its own vkQueueSubmit, ~tens of us apart, like Dota's
+ *   loading-end burst. --burst-every N: after warmup, only every Nth frame is a burst frame; the
+ *   others are small-only like warmup frames (many bursts per process).
  * --warmup-small N: for the first N frames render only small offscreen passes
  * (112x170 .. 298x452, as Dota's early frames) and present the swapchain image
  * untouched; the first swapchain LOAD pass then comes on frame N, in a context
@@ -136,6 +140,8 @@ int main(int argc, char **argv)
    unsigned swap_w = 0, swap_h = 0;
    int burst_resize_ms = -1;
    unsigned win_w = 0, win_h = 0;
+   bool split_burst = false;
+   unsigned burst_every = 0, bursts = 0;
    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -153,6 +159,8 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--recreate")) recreate = true;
       else if (!strcmp(argv[i], "--swap-w") && i + 1 < argc) swap_w = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--win-w") && i + 1 < argc) win_w = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--split-burst")) split_burst = true;
+      else if (!strcmp(argv[i], "--burst-every") && i + 1 < argc) burst_every = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--win-h") && i + 1 < argc) win_h = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--swap-h") && i + 1 < argc) swap_h = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--burst-resize-ms") && i + 1 < argc) burst_resize_ms = atoi(argv[++i]);
@@ -290,6 +298,9 @@ int main(int argc, char **argv)
    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = inflight };
    CHECK(vkAllocateCommandBuffers(dev, &cai, cbs));
+   VkCommandBuffer bcbs[8];
+   VkCommandBufferAllocateInfo bcai = cai; bcai.commandBufferCount = 8;
+   CHECK(vkAllocateCommandBuffers(dev, &bcai, bcbs));
    VkFence fences[8]; VkSemaphore acq[8];
    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
    for (unsigned f = 0; f < inflight; ++f) { CHECK(vkCreateFence(dev, &fci, NULL, &fences[f])); CHECK(vkCreateSemaphore(dev, &semci, NULL, &acq[f])); }
@@ -335,7 +346,8 @@ int main(int argc, char **argv)
       VkCommandBuffer cb = cbs[slot];
       VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
       CHECK(vkBeginCommandBuffer(cb, &bi));
-      if (k < warmup) {
+      bool burst_frame = k >= warmup && (!burst_every || (k - warmup) % burst_every == 0);
+      if (!burst_frame) {
          /* Dota-like early frames: only small offscreen passes; swapchain image untouched. */
          for (unsigned p = 0; p < 4; ++p) {
             barrier(cb, smallimg, small_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -357,7 +369,27 @@ int main(int argc, char **argv)
          nanosleep(&ts, NULL);
       }
       if (k == warmup && warmup) { printf("first swapchain pass at frame %u t=%.3f (%ux%u)\n", k, now() - t0, sw_w, sw_h); fflush(stdout); }
-      for (unsigned p = 0; p < offscreen; ++p) {
+      if (split_burst) {
+         /* Separate submits per pass; the previous burst's passes are done (fence wait above
+          * covers this slot only, so drain the queue's earlier burst submits first). */
+         CHECK(vkQueueWaitIdle(q));
+         off_first = true;
+         for (unsigned p = 0; p < offscreen && p < 8; ++p) {
+            VkCommandBuffer bcb = bcbs[p];
+            CHECK(vkResetCommandBuffer(bcb, 0));
+            CHECK(vkBeginCommandBuffer(bcb, &bi));
+            barrier(bcb, off, off_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            off_first = false;
+            pass(bcb, offview, p == 0 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, width, height, pipe_off, layout, (struct pc){ p, work, k });
+            CHECK(vkEndCommandBuffer(bcb));
+            VkSubmitInfo bsi = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &bcb };
+            CHECK(vkQueueSubmit(q, 1, &bsi, VK_NULL_HANDLE));
+         }
+         bursts++;
+      }
+      for (unsigned p = 0; p < (split_burst ? 0 : offscreen); ++p) {
          barrier(cb, off, off_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -397,6 +429,6 @@ int main(int argc, char **argv)
    }
    VkResult fr = vkWaitForFences(dev, inflight, fences, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
    if (fr != VK_SUCCESS) { printf("STALL draining result=%d\n", fr); return 1; }
-   printf("PASS frames=%lu in %.1f s resizes=%u suboptimal=%u recreates=%u\n", frames, now() - t0, resizes, suboptimal, recreates);
+   printf("PASS frames=%lu in %.1f s resizes=%u suboptimal=%u recreates=%u bursts=%u\n", frames, now() - t0, resizes, suboptimal, recreates, bursts);
    return 0;
 }

@@ -7,7 +7,7 @@ Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (21:38 local)
+## Status / manager handoff (21:46 local)
 
 - Valid read-only production #17 + rebased 213 recovery retry is **negative**:
   teardown policy 3 plus native compute priority does not recover other clients.
@@ -21,11 +21,24 @@ claude-driver's integration and recovery work. Never push.
   `probe-service.log` also records muvm launch EPERM, and the verdict file is
   empty. Logs are `observe-20261007_211820/`. Production #17 and all three
   desktop/input units were verified, then lease released.
-- Corrected probe runner is queued (`probe-retry-console.log`), same frozen
-  #4 image. It explicitly mounts USB4-TEST read-only and overlays it in tmpfs
-  before starting the Steam VM, checks Sniper availability, requests the
-  layer through VkInstanceCreateInfo as well as the environment, records
-  native and guest environment, and writes verdicts directly to files.
+- Corrected probe has **all six guest verdicts rc0**, full checkpoints and
+  four valid/convertible captures (native and FEX, unassisted and page_guard).
+  FEX is the exact muvm → shared Steam VM → FEX → Sniper → Vulkan thunks path,
+  Apple M4 / Honeykrisp c0828f3fac, layer 1.0.5/header1.4.363. Logs
+  `observe-20261007_213656/`; summary `probe-exact-path-summary.json`.
+  Host returned rc1 because of early asynchronous muvm EPERM and verdict race;
+  all six finished during clean shutdown and were copied completely. Individual
+  probe results are valid; harness outcome and GPU-work recovery are separate.
+- Probe cleanup restored newly promoted production **#19**, verified all three
+  desktop/input services and released the lease at ~21:44. The kscreen-doctor
+  setup command blocked on both candidate and restore boots without G16 errors;
+  terminating that command let post-boot complete. Own observer now bounds it.
+- Bounded Dota unassisted capture is queued (`dota-unassisted-console.log`).
+  It uses frames **1-5**, enabling writing from initialization so an early
+  startup failure can leave useful API evidence, rather than waiting until300.
+  Source shows deferred trim uses a different state-tracking path, not exercised
+  by the successful no-submit write-mode probes. No Dota capture result yet.
+  The corrected join supplies epollable pipe stdin and awaits guest verdicts.
 - Own branch is rebased onto current bit211 a6e385; diagnostic and default-off
   global control-1b experiment fixes were folded back from the private test
   assembly. The control-1b build passed (#6, 21:29:19), **not booted**. Current
@@ -110,7 +123,7 @@ packed pointer/status value; low bits must be retained in the capture.
 | C7 | Native host no-submit probe: no layer, unassisted, page_guard + convert both captures | All pass; no FEX/mini result yet |
 | C8 | Capture5 full raw audit plus finite logs / root lifetimes | Valid concurrent C/R progress; zero host records normal; teardown and registration ownership coverage gaps |
 | C9 | RO #17+213 exact-path no-submit probe, first slot | INVALID FEX/capture: external Sniper path unavailable, layer absent in nominal native layer modes; production restored |
-| C10 | Explicit-layer probe, external volume RO + tmpfs overlay | Prepared/queued; no target result yet |
+| C10 | Explicit-layer probe, external volume RO + tmpfs overlay | All six native/FEX modes rc0; four captures converted, one 64 KiB fill each, zero submissions |
 | C11 | Six captured global control-1b records, default-off kernel experiment | Build passed; no hardware result |
 
 ## Valid recovery retry (#17 source + 213, 21:13–21:17)
@@ -522,3 +535,30 @@ instance creation rather than appearing to pass through environment omission.
 Direct verdict-file writes avoid dependence on launch stdout plumbing. Both
 probe architectures build with -Wall -Wextra -Werror; shell syntax passes.
 These are own external workloads/launchers; no FEX project modifications.
+
+
+## Exact-path probe result (21:42–21:46)
+
+All six modes in the completed guest verdict file pass. Both FEX layer modes
+initialize the same native aarch64 gfxrecon version1.0.5/header1.4.363 seen in
+queue32; maps contain native libvulkan_asahi and libVkLayer_gfxreconstruct.
+The converted file's executable metadata names FEXInterpreter, renderer is
+Apple M4, and the probe completes map/write/flush/unmap/device/instance teardown.
+Each of four traces has25 records, one65536-byte FillMemoryCommand, one map,
+and zero GPU submissions; sizes4826–4908bytes. Conversion succeeds for all4.
+This excludes basic no-submit setup and a single mapped write as sufficient
+causes. It does **not** exclude Dota's API/extension/threading behavior, command
+submissions, or deferred-trim state tracking.
+
+The host-side EPERM is consistent with muvm run_io_host adding stdin fd0 to
+an epoll instance when systemd supplies /dev/null. Guest execution had already
+begun. Own launchers now use a pipe for stdin and wait for a final guest marker,
+so they avoid premature cleanup. Source reference: tmp/muvm-src/crates/muvm/src/
+tty.rs run_io_host; no changes to muvm or FEX. Despite the rc1 orchestration race,
+all six copied results and four complete converted traces are available.
+
+Dota's new first-frame capture changes capture startup mode intentionally.
+Gfxrecon CommonCaptureManager starts frame1; a single range beginning1 opens
+its file immediately and writes setup calls. A future300-304 run will exercise
+the separate pre-range tracking path used by queue32. First-frame startup can
+therefore provide evidence even if the game crashes before its first present.

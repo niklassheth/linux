@@ -65,3 +65,16 @@ Capture5 similarly retained old slots 66..71. Neither trace establishes those
 records' publication timing or semantics. The queued Linux test publishes all
 six before opening registrations, with native priority and valid zeroed record
 storage; even success would need a follow-up to isolate these variables.
+
+## Global prefix follow-up (22:24)
+
+`capture6-global-prefix.json` retains the first sampled global objects and
+change counts. Root+0xb8 points to 0xfffffc200003eb00 (our `extra_0`). Its
+first 64 bytes have nonzero u32 words at+0x10=0x1f, +0x14=0x3e0a3d71,
++0x18=0x401ae148, +0x1c=0x28 and+0x20=1; the sampled prefix stays unchanged.
+Our bootstrap explicitly leaves this extent zeroed. Root+0xc0 (`extra_1`)
+is zero in its sampled 64-byte prefix. This is an untested global-state
+difference, not an identified quantum or enable bit. Some words resemble
+floating-point coefficients, so assigning scheduling semantics would be
+premature. Capture6 does not sample full regionA/C or the full main bundle.
+No new kernel knob or hardware test is justified by this prefix alone.

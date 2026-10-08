@@ -757,9 +757,13 @@ impl Parameters {
         u64_at(&mut out, 0x78, tiles_x * tiles_y);
         out[0x80..0x680].copy_from_slice(&registers);
         u64_at(&mut out, 0x680, 0x8c020001dddc00);
-        u64_at(&mut out, 0x688, 0xa0001de1800);
+        // Experiment (frag_desc_flags=1): Metal's descriptor words for the
+        // second and fourth program pairs (0x4200 and 0x4202 in 632 traced
+        // renders), keeping this driver's program addresses.
+        let metal_flags = crate::module_parameters::frag_desc_flags.value() != 0;
+        u64_at(&mut out, 0x688, if metal_flags { 0x420001de1800 } else { 0xa0001de1800 });
         u64_at(&mut out, 0x690, 0x8c020200029800);
-        u64_at(&mut out, 0x698, 0x220200039520);
+        u64_at(&mut out, 0x698, if metal_flags { 0x420200039520 } else { 0x220200039520 });
         u64_at(&mut out, 0x780, a.fragment_register_alias);
         out[0x788..0x78a].copy_from_slice(&(0x51u16).to_le_bytes());
         out[0x78a..0x78c].copy_from_slice(&((0x51 * 0xc) as u16).to_le_bytes());

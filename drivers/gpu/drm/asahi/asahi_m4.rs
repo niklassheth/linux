@@ -124,6 +124,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
         },
+        frag_desc_flags: u32 {
+            default: 0,
+            description: "Experiment: 1 writes Metal's 3D Work descriptor flags at +0x68c (0x4200) and +0x69c (0x4202) instead of 0xa00/0x2202, keeping this driver's program addresses",
+        },
         ta3d_item: u32 {
             default: 0,
             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",

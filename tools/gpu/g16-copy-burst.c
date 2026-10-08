@@ -11,6 +11,8 @@
  * --interleave adds, after each image's copies, a clear-only 64x64 RGBA8 render
  * pass that the next copy waits on (compute->render->compute barriers), like
  * Dota's loading frames. --queues 2 alternates submits between two queues.
+ * --inflight N keeps N submits in flight (ring of command buffer sets and
+ * fences) instead of waiting for each one, so unretired Works can pass 128.
  */
 #include <vulkan/vulkan.h>
 #include <stdio.h>
@@ -32,7 +34,7 @@ static double now(void)
 int main(int argc, char **argv)
 {
    unsigned images = 256, size = 256, mips = 9, submits = 200, timeout_ms = 5000;
-   int recreate = 0, split = 0, interleave = 0; unsigned nqueues = 1;
+   int recreate = 0, split = 0, interleave = 0; unsigned nqueues = 1, inflight = 1;
    const char *fmt_name = "bc3";
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--images") && i + 1 < argc) images = atoi(argv[++i]);
@@ -44,6 +46,7 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--recreate")) recreate = 1;
       else if (!strcmp(argv[i], "--split")) split = 1;
       else if (!strcmp(argv[i], "--interleave")) interleave = 1;
+      else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--queues") && i + 1 < argc) nqueues = atoi(argv[++i]);
       else { fprintf(stderr, "bad arg %s\n", argv[i]); return 64; }
    }
@@ -151,19 +154,34 @@ int main(int argc, char **argv)
       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = 0 };
    VkCommandPool pool; CHECK(vkCreateCommandPool(dev, &pci, NULL, &pool));
    unsigned ncb = split ? images : 1;
-   VkCommandBuffer *cb = calloc(ncb, sizeof(*cb));
+   if (inflight < 1) inflight = 1;
+   if (inflight > 64) inflight = 64;
+   if (recreate && inflight > 1) { fprintf(stderr, "--recreate needs --inflight 1\n"); return 64; }
+   VkCommandBuffer *cbs = calloc((size_t)ncb * inflight, sizeof(*cbs));
    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = ncb };
-   CHECK(vkAllocateCommandBuffers(dev, &cai, cb));
-   VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-   VkFence fence; CHECK(vkCreateFence(dev, &fci, NULL, &fence));
+      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = ncb * inflight };
+   CHECK(vkAllocateCommandBuffers(dev, &cai, cbs));
+   VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
+   VkFence fences[64];
+   for (unsigned f = 0; f < inflight; ++f) CHECK(vkCreateFence(dev, &fci, NULL, &fences[f]));
 
-   printf("images=%u size=%u mips=%u format=%s submits=%u split=%d recreate=%d interleave=%d queues=%u copies/submit=%u\n",
-          images, size, mips, fmt_name, submits, split, recreate, interleave, nqueues, images * mips);
+   printf("images=%u size=%u mips=%u format=%s submits=%u split=%d recreate=%d interleave=%d queues=%u inflight=%u copies/submit=%u\n",
+          images, size, mips, fmt_name, submits, split, recreate, interleave, nqueues, inflight, images * mips);
    fflush(stdout);
    double t0 = now();
    for (unsigned k = 0; k < submits; ++k) {
       if (recreate && k) { DESTROY_IMAGES(); CREATE_IMAGES(); }
+      unsigned slot = k % inflight;
+      VkCommandBuffer *cb = cbs + (size_t)slot * ncb;
+      VkFence fence = fences[slot];
+      double tw = now();
+      VkResult wr = vkWaitForFences(dev, 1, &fence, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
+      if (wr != VK_SUCCESS) {
+         printf("STALL waiting slot %u before submit=%u result=%d after %.3f s (t=%.3f)\n", slot, k, wr, now() - tw, now() - t0);
+         fflush(stdout);
+         return 1;
+      }
+      CHECK(vkResetFences(dev, 1, &fence));
       for (unsigned c = 0; c < ncb; ++c) {
          VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -235,17 +253,25 @@ int main(int argc, char **argv)
       VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = ncb, .pCommandBuffers = cb };
       double ts = now();
       CHECK(vkQueueSubmit(qs[k % nqueues], 1, &si, fence));
-      VkResult r = vkWaitForFences(dev, 1, &fence, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
-      double te = now();
-      if (r != VK_SUCCESS) {
-         printf("STALL submit=%u result=%d after %.3f s (t=%.3f)\n", k, r, te - ts, te - t0);
-         fflush(stdout);
-         return 1;
+      if (inflight == 1) {
+         VkResult r = vkWaitForFences(dev, 1, &fence, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
+         double te = now();
+         if (r != VK_SUCCESS) {
+            printf("STALL submit=%u result=%d after %.3f s (t=%.3f)\n", k, r, te - ts, te - t0);
+            fflush(stdout);
+            return 1;
+         }
+         if (k % 20 == 0 || k + 1 == submits)
+            printf("submit %u ok %.1f ms (t=%.3f)\n", k, (te - ts) * 1e3, te - t0);
+      } else if (k % 20 == 0 || k + 1 == submits) {
+         printf("submit %u queued (t=%.3f)\n", k, now() - t0);
       }
-      if (k % 20 == 0 || k + 1 == submits)
-         printf("submit %u ok %.1f ms (t=%.3f)\n", k, (te - ts) * 1e3, te - t0);
       fflush(stdout);
-      CHECK(vkResetFences(dev, 1, &fence));
+   }
+   VkResult fr = vkWaitForFences(dev, inflight, fences, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
+   if (fr != VK_SUCCESS) {
+      printf("STALL draining result=%d (t=%.3f)\n", fr, now() - t0);
+      return 1;
    }
    printf("PASS %u submits in %.3f s\n", submits, now() - t0);
    return 0;

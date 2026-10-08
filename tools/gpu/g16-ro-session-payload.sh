@@ -25,7 +25,7 @@ bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 systemctl is-active m4-kwin claude-headless input-forward-server > "$observe/services.txt"
 sha256sum /usr/lib64/libvulkan_asahi.so /home/nsheth/g16-games/dota-shader-identity-20261006/driver/libvulkan_asahi.so > "$observe/drivers.sha256"
 
-stalled() { dmesg | grep -qE "sample=pretimeout|timeout without retirement|G16: hang"; }
+stalled() { dmesg > "$observe/.dmesg-probe" 2>/dev/null; grep -qE "sample=pretimeout|timeout without retirement|G16: hang" "$observe/.dmesg-probe"; }
 finish_stall() {
     echo "STALL in $1 at $(date +%s.%N)" >> "$observe/verdicts.txt"
     sleep 25
@@ -59,6 +59,9 @@ for t in $tests; do
     cb-inter) run_user cb-inter 120 env HK_DEBUG=perf $cb --interleave --images 128 --mips 6 --size 128 --format bc3 --submits 60 ;;
     cb-inter-split) run_user cb-inter-split 120 env HK_DEBUG=perf $cb --interleave --split --images 256 --mips 3 --size 64 --format bc3 --submits 60 ;;
     cb-inter-q2) run_user cb-inter-q2 120 env HK_DEBUG=perf $cb --interleave --split --queues 2 --images 256 --mips 3 --size 64 --format bc7 --submits 60 ;;
+    cb-flight) run_user cb-flight 120 $cb --split --inflight 8 --images 128 --mips 1 --size 64 --format bc3 --submits 400 ;;
+    cb-flight-inter) run_user cb-flight-inter 120 $cb --split --interleave --inflight 8 --images 128 --mips 1 --size 64 --format bc3 --submits 400 ;;
+    cb-flight-q2) run_user cb-flight-q2 120 $cb --split --interleave --queues 2 --inflight 16 --images 128 --mips 2 --size 64 --format bc7 --submits 400 ;;
     replay) run_user replay 240 env HK_DEBUG=perf VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/icd.json VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
             /home/nsheth/g16-games/codex-dota-replay-20261008/gfxrecon-replay --wsi xcb /mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr ;;
     *) echo "unknown test $t" >> "$observe/verdicts.txt" ;;

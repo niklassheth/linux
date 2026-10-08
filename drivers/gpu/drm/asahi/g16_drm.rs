@@ -1252,6 +1252,11 @@ impl WorkItem for Execution {
                         engine.cursor = index + 1;
                         progress = true;
                         admitted += 1;
+                        if crate::module_parameters::flush_each.value() != 0 {
+                            // Experiment: one channel message per Work
+                            // instead of one per lane for the whole pass.
+                            runtime.flush()?;
+                        }
                         if admitted == 64 {
                             break;
                         }

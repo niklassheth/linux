@@ -164,6 +164,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",
         },
+        flush_each: u32 {
+            default: 0,
+            description: "Experiment: 1 publishes every admitted Work with its own channel message and kick, instead of batching all Works admitted in one worker pass into one message per lane",
+        },
         lifecycle: u32 {
             default: 0,
             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",

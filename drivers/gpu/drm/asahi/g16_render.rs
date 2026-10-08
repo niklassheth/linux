@@ -24,6 +24,9 @@ pub(crate) struct Parameters {
     pub(crate) aux_fb_flags: u64,
     pub(crate) aux_fb_page_count: u64,
     pub(crate) completion_control: u64,
+    /// Diagnostics: the submitting process, captured at ioctl time.
+    pub(crate) tgid: i32,
+    pub(crate) comm: [u8; 16],
     /// Tiling-side completion_control when it differs from the fragment
     /// side (Metal phases them independently).
     pub(crate) tiling_completion_control: Option<u64>,

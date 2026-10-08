@@ -4,11 +4,11 @@ Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-dri
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (19:56 local)
+## Status / manager handoff (20:09 local)
 
 Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
-README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. Preparing the queued
-policy-3 + native-priority observation; Dota gfxr and capture 5 are not available yet. No Apple binaries inspected.
+README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. Host runner is queued
+through the lease for policy-3 + native-priority observation; Dota gfxr and capture 5 are not available yet. No Apple binaries inspected.
 
 **Request through manager to claude-compiler for capture 5:** capture op-0x20's
 firmware descriptor at +0x14 and user mappings at +0x1c/+0x24, plus the Work
@@ -239,3 +239,45 @@ attempts and retries. No hardware result or recovery fix is claimed yet.
 The prepared slot uses the immutable artifact (Image/DTB/UTS header), records
 input hashes before waiting, and requests a 15-minute lease. It cannot silently
 boot a later rebuild of the worktree while queued.
+
+## Queued hardware run (20:00)
+
+Live host runner is waiting for the `codex-dota` lease (no lease held yet):
+`linux-slot.log`, observation directory `observe-20261007_200029/`.
+Exec session ID: 28302. Wrapper copied beside the immutable kernel artifact;
+it will boot only after lease acquisition, observe policy 3 + native compute
+priority, collect per-run logs, restore production with service verification,
+and release. Other owners remain uninterrupted. Results are **pending**.
+
+Local topic tip: `a8268feb5ddb3` (tools/docs guard follow-up); GPU diagnostic tip
+`fcf05134b5c35`. Test assembly tip `ce6c0d18f08dc` contains the same GPU code as
+the built `4e3176459a4ce` assembly; later differences are tools/docs only.
+No push. Capture-5 requests remain above; Dota's actual trigger and successful
+compute time-slicing / client-isolated recovery remain unresolved.
+
+
+## Record interpretation / parser check (20:09)
+
+Reconstructed capture-4 slot snapshots with `tools/gpu/g16-slot-windows.py`,
+checking each delta against its recorded prior bytes. Output:
+`slot-window-summary.json`. This confirms the existing capture README's H
+record observation; it is **not a new hardware experiment**.
+
+- C's sampled first record is either all zero or `{u32 0x1016, 0x70, remaining=0}`.
+  Reading that pair as u64 gives `0x70_0000_1016`, but that alone does not prove
+  that this field is a host/GPU virtual address.
+- H's record starts `{u32 0x1a70, 0xb74, 0x1a70, 0xb02}` and settles at
+  `{0x1a70, 0xbed, 0x1a70, 0xb77}` by ~1.94 seconds after its doorbell.
+  The remaining words are zero. A pointer interpretation of its first u64
+  would give `0xb74_0000_1a70`, rather than the apparent C address form.
+- Thus keep **both u32/u64 views and the unmodified bytes** in capture 5.
+  Following the C value as a user VA is a useful probe, not an established ABI.
+  H's changing words could describe progress or allocator state; their meaning
+  and relationship to op-0x20 remain unknown. The snapshot window moves for C,
+  so change counts must not be presented as writes to a single slot address.
+
+The real gfxrecon `triangle.gfxr` sample also passed converter-to-parser
+streaming: 11 queue submits, zero compute/transfer operations, no unknown
+command buffers. This validates actual converter JSON shape beyond the
+synthetic lifecycle fixture (`gfxr-triangle-summary.json`), but gives no Dota
+trigger evidence. Dota capture and our leased mini observation remain pending.

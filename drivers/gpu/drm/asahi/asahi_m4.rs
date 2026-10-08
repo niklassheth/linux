@@ -152,6 +152,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 gives compute queues the native preemptible profile (Metal uses it for compute; this driver forces compute non-preemptible)",
         },
+        control_1b: u32 {
+            default: 0,
+            description: "Debug: 1 publishes the six global control 0x1b records observed before Metal clients (semantics unknown)",
+        },
         debug_ctx: u32 {
             default: 0,
             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",

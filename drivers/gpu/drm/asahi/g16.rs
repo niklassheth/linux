@@ -850,10 +850,19 @@ impl Bootstrap {
             crate::pgtable::prot::PROT_FW_SHARED_RW,
         )?;
         firmware.sync();
-        firmware.write_live(
-            crate::g16_fw::BUNDLE_ADDRESS + 0x1df40,
-            &crate::g16_fw::opening_control(),
-        )?;
+        let control_1b = crate::module_parameters::control_1b.value() == 1;
+        let control_start = crate::g16_fw::BUNDLE_ADDRESS + 0x1df40;
+        let end = if control_1b {
+            // Read-only experiment only: before the opening registration and
+            // any client Work, retaining the normal slot-zero handshake.
+            firmware.write_live(control_start, &crate::g16_fw::global_control_1b())?;
+            firmware.write_live(control_start + 0x180, &crate::g16_fw::opening_control())?;
+            dev_info!(dev, "G16: control_1b experiment: six global records before opening registration\n");
+            9
+        } else {
+            firmware.write_live(control_start, &crate::g16_fw::opening_control())?;
+            3
+        };
         let sgx_guard = self._sgx.try_access().ok_or(ENODEV)?;
         let sgx = &*sgx_guard;
         let before = (
@@ -865,7 +874,7 @@ impl Bootstrap {
             dev_err!(dev, "G16: unexpected opening cursors {:?}\n", before);
             return Err(EIO);
         }
-        sgx.as_view().relaxed().write32(3, 0xd60060);
+        sgx.as_view().relaxed().write32(end, 0xd60060);
         drop(sgx_guard);
         for (address, value) in [
             (0xffff_fc20_0003_4f88, 0xffff_fc21_8100_0000u64),
@@ -888,7 +897,7 @@ impl Bootstrap {
                 sgx.as_view().relaxed().read32(0xd640c8),
                 sgx.as_view().relaxed().read32(0xd60060),
             );
-            if cursors == (3, 3, 3) && firmware.read_u32(0xffff_fc20_0003_f19c)? == 1 {
+            if cursors == (end, end, end) && firmware.read_u32(0xffff_fc20_0003_f19c)? == 1 {
                 dev_info!(
                     dev,
                     "G16: opening control registration retired; cursors {:?}\n",

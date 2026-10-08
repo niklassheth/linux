@@ -44,6 +44,22 @@ pub(crate) fn opening_control() -> [u8; 0x80] {
     out
 }
 
+/// Default-off experiment: six historical global records in the full control
+/// ring captured before our Metal clients started. Meaning is not established;
+/// neither the fields nor the opcode are interpreted as scheduling policy.
+pub(crate) fn global_control_1b() -> [u8; 0x180] {
+    let mut out = [0u8; 0x180];
+    for engine in 0..3usize {
+        for selector in 1..=2usize {
+            let offset = (engine * 2 + selector - 1) * 0x40;
+            for (field, value) in [(0, 0x1bu32), (4, engine as u32), (8, selector as u32)] {
+                out[offset + field..offset + field + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
 /// Fresh opening FList; its operand descriptors are admitted by opcode 0x20.
 pub(crate) fn opening_flist() -> [u8; 0x80] {
     let mut out = [0; 0x80];

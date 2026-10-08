@@ -147,6 +147,7 @@ PY
           echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"
           sleep 5; dmesg | grep "G16: queue deps" > "$observe/dep-stats.txt" 2>/dev/null
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
+          cp "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/console.log" "$observe/dota-console.log" 2>/dev/null
           mkdir -p "$observe/steam-logs"
           cp -a /home/nsheth/.local/share/Steam/logs/{stderr.txt,console_log.txt,connection_log.txt,bootstrap_log.txt} "$observe/steam-logs/" 2>/dev/null
           journalctl -b -u g16-steam -u dota-game -u dota-watch -u dota-collector --no-pager > "$observe/steam-logs/units.log" 2>&1

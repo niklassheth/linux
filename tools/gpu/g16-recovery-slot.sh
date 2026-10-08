@@ -69,12 +69,12 @@ timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_AR
 wait_ssh
 expected_uts=$(sed -n 's/^#define UTS_VERSION "\(.*\)"$/\1/p' "$kernel_uts")
 loaded_uts=$(ssh "${ssh_options[@]}" "$mini" 'uname -v')
-[ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted' >&2; exit 1; }
 loaded_cmdline=$(ssh "${ssh_options[@]}" "$mini" 'cat /proc/cmdline')
+printf 'expected: %s\nloaded: %s\ncmdline: %s\n' "$expected_uts" "$loaded_uts" "$loaded_cmdline" > "$local_output/loaded-kernel.txt"
+[ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted; see loaded-kernel.txt' >&2; exit 1; }
 for required_argument in asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done
-printf '%s\n' "$loaded_uts" "$loaded_cmdline" > "$local_output/loaded-kernel.txt"
 # /tmp must be tmpfs before staging sources or running any GPU program.
 ssh "${ssh_options[@]}" "$mini" "test \"\$(findmnt -no FSTYPE /tmp)\" = tmpfs && mkdir -p '$remote_output'"
 lab=$workspace/tmp/cs2-memory-lab-20261005/lab

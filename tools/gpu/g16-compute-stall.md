@@ -4,11 +4,13 @@ Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-dri
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (20:09 local)
+## Status / manager handoff (20:12 local)
 
 Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
-README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. Host runner is queued
-through the lease for policy-3 + native-priority observation; Dota gfxr and capture 5 are not available yet. No Apple binaries inspected.
+README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. First boot was invalid
+(wrong UTS guard, overlapping default restore visible in queue log); production
+#10 restored and services verified. A retry is queued behind claude-kernel.
+Dota gfxr failed its loader guard; capture 5 is not available yet. No Apple binaries inspected.
 
 **Request through manager to claude-compiler for capture 5:** capture op-0x20's
 firmware descriptor at +0x14 and user mappings at +0x1c/+0x24, plus the Work
@@ -44,7 +46,7 @@ packed pointer/status value; low bits must be retained in the capture.
 | C3 | Prepare matched Metal spin with finite output controls | CPU LCG checks pass; Objective-C build unavailable on controller; mini execution pending capture-owner lease |
 | C4 | GCC build of integrated diagnostics + quarantined-lane follow-up | Pass; Image.gz/dtbs; no boot yet |
 | C5 | Streaming gfxr parser lifecycle fixture + local converter build | Pass; Dota capture pending |
-| C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | Prepared; waiting for shared hardware |
+| C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | First boot invalid (wrong UTS), no GPU workload; restored #10; retry queued |
 
 ## Next
 
@@ -281,3 +283,40 @@ streaming: 11 queue submits, zero compute/transfer operations, no unknown
 command buffers. This validates actual converter JSON shape beyond the
 synthetic lifecycle fixture (`gfxr-triangle-summary.json`), but gives no Dota
 trigger evidence. Dota capture and our leased mini observation remain pending.
+
+
+## Lease handoff collision / invalidated boot (20:10)
+
+**Manager coordination:** our lease history records codex-dota acquisition at
+20:08:59 after queue32 released at 20:08:46. Queue32's shared log then records
+`20:09:17 inst-v3 left G16 errors (): rebooting to default`, after its release.
+Our candidate boot returned but the exact UTS guard reported **wrong kernel
+booted**. No forced-hang workload was launched. The runner is restoring
+production under our lease; it will verify services and release.
+
+This is an **invalid boot attempt, not a negative compute/recovery result**.
+Please ensure all queue exit/trim restore paths hold the lease before resetting;
+another owner's later restore must not race a new candidate. Our wrapper's UTS
+and cmdline guards prevented testing on the wrong kernel. Driver gfxr-v1 also
+failed its EXPECT_DRIVER guard (rc=3); no completed capture is available.
+The streaming capture worker (session 88653) is waiting for a successful copy
+marker, so it cannot analyze a partial/missing file.
+
+Our completed offline tools/doc WIP is local topic `1078edd4f4a4e`; test assembly
+`d0041a28a83b4` has the same GPU diagnostic code as the immutable fcf0513 image.
+
+
+## Restore verified / retry queued (20:12)
+
+First runner completed with exit 1 after its wrong-kernel guard. Restoration
+succeeded on attempt 1: `observe-20261007_200029/production-services-1.log`
+records production #10 and all three services active. Lease released 20:10:26;
+claude-kernel acquired at 20:10:39 for 7.3-rc6 RO gates. No workloads or GPU
+state changes were made by our first attempt.
+
+Retry runner is now lease-waiting: session **90431**, `linux-slot-retry.log`,
+using the same fcf0513 diagnostic image. The guard now persists both expected
+and actual UTS/cmdline **before** comparing them, so a future invalid boot will
+retain that evidence. These are host-script changes only; no kernel rebuild
+needed. Please keep all other restore paths inside their own lease. This retry
+will also restore production and verify services before release.

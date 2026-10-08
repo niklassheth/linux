@@ -31,13 +31,32 @@ unset ASAHI_MESA_DEBUG VK_DRIVER_FILES VK_ICD_FILENAMES LD_PRELOAD LD_LIBRARY_PA
 HK_EXPERIMENTAL_APPLE9=1 vulkaninfo --summary > "$observe/vulkaninfo-native.txt" 2>&1
 grep -q 'deviceName.*Apple M4' "$observe/vulkaninfo-native.txt"
 grep -q 'driverName.*Honeykrisp' "$observe/vulkaninfo-native.txt"
+guest_stage=/home/nsheth/.cache/codex-context-smoke
+mkdir -p "$guest_stage"
+cat > "$guest_stage/run.sh" <<'GUEST'
+#!/bin/bash
+set -euo pipefail
+out=/home/nsheth/.cache/codex-context-smoke
+trap 'echo "$?" > "$out/exit-status"' EXIT
+FEXInterpreter /usr/bin/vulkaninfo --summary > "$out/vulkaninfo-x86.log" 2>&1
+FEXInterpreter /usr/bin/vkcube --c 120 > "$out/vkcube-x86.log" 2>&1
+GUEST
+chown -R nsheth:nsheth "$guest_stage"
 runuser -u nsheth -- env G16_SMOKE_OUTPUT="$observe" bash -c '
     set -euo pipefail
     source /home/nsheth/.local/state/m4/session.env
     HK_EXPERIMENTAL_APPLE9=1 timeout 30 vkcube --c 120 > "$G16_SMOKE_OUTPUT/vkcube-native.log" 2>&1
     echo "native vkcube rc=0 frames=120" > "$G16_SMOKE_OUTPUT/verdicts.txt"
-    timeout 60 m4-muvm FEXInterpreter /usr/bin/vulkaninfo --summary > "$G16_SMOKE_OUTPUT/vulkaninfo-x86.log" 2>&1
-    timeout 60 m4-muvm FEXInterpreter /usr/bin/vkcube --c 120 > "$G16_SMOKE_OUTPUT/vkcube-x86.log" 2>&1
-    echo "x86 vkcube rc=0 frames=120" >> "$G16_SMOKE_OUTPUT/verdicts.txt"
+    timeout 90 m4-muvm /bin/bash /home/nsheth/.cache/codex-context-smoke/run.sh > "$G16_SMOKE_OUTPUT/muvm-host.log" 2>&1
 ' < <(sleep 180)
+for retry in {1..60}; do
+    [ ! -s "$guest_stage/exit-status" ] || break
+    sleep 1
+done
+cp -a "$guest_stage" "$observe/guest-results"
+[ "$(cat "$guest_stage/exit-status")" = 0 ]
+grep -q 'deviceName.*Apple M4' "$guest_stage/vulkaninfo-x86.log"
+grep -q 'driverName.*Honeykrisp' "$guest_stage/vulkaninfo-x86.log"
+grep -q 'Selected GPU.*Apple M4' "$guest_stage/vkcube-x86.log"
+echo 'x86 guest vkcube rc=0 frames=120' >> "$observe/verdicts.txt"
 systemctl is-active m4-kwin claude-headless input-forward-server > "$observe/services-after.txt"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Block 47: ta_sel6 A/B on #69 (abd0f0e = production #68 + asahi_m4.ta_sel6: re-publish the TVB buffer-manager init
+# Block 47: ta_sel6=2 A/B on #70 (3a4c07a = #69 + ta_sel6=2: grow the TVB to the new size, then re-publish the TVB buffer-manager init
 # item (TA sel6) on a pool's first render larger than any before, as Metal does). Live Dota default mode, quar0 trace
 # build, A4-prone settings, recent ring, fw_trace=512. ta_sel6=1 (A) x6 vs 0 (C) x2: A A C A A C A A; stops at the
 # first =1 stall or a failed boot (first run doubles as #69's boot test).
@@ -12,10 +12,10 @@ last() { ls -td artifacts/dota-compute-stall-20261007/ro-session/$1-* | head -1;
 n=0
 for slot in A A C A A C A A; do
     n=$((n + 1))
-    if [ $slot = A ]; then tag=k69-s6on-$n; v=1; else tag=k69-s6off-$n; v=0; fi
-    env G16_KEEP_LEASE=1 G16_TAG=$tag G16_KERNEL_ARTIFACT=artifacts/m4-linux/bits-7.3-69-sel6 "G16_EXPECT_UTS=#69 SMP PREEMPT_DYNAMIC Thu Oct  8 17:17:46 EDT 2026" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$X asahi_m4.ta_sel6=$v" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$tag $R
+    if [ $slot = A ]; then tag=k70-s6grow-$n; v=2; else tag=k70-s6off-$n; v=0; fi
+    env G16_KEEP_LEASE=1 G16_TAG=$tag G16_KERNEL_ARTIFACT=artifacts/m4-linux/bits-7.3-70-sel6grow "G16_EXPECT_UTS=#70 SMP PREEMPT_DYNAMIC Thu Oct  8 17:20:02 EDT 2026" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$X asahi_m4.ta_sel6=$v" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$tag $R
     d=$(last $tag)
-    [ -s "$d/loaded-kernel.txt" ] || { echo "#69 failed to boot in $tag; stopping"; break; }
-    [ $slot = A ] && grep -qs "STALL in" "$d"/codex-dota-*/verdicts.txt && { echo "ta_sel6=1 stalled in run $n; stopping"; break; }
+    [ -s "$d/loaded-kernel.txt" ] || { echo "#69 failed to boot in $tag (#70); stopping"; break; }
+    [ $slot = A ] && grep -qs "STALL in" "$d"/codex-dota-*/verdicts.txt && { echo "ta_sel6=2 stalled in run $n; stopping"; break; }
 done
 echo "block 47 done at $(date -Is)"

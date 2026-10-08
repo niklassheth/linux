@@ -21,7 +21,7 @@ static const char *SRC =
 "fragment float4 fs(VO in [[stage_in]], constant float &k [[buffer(0)]]) { return float4(in.uv * k, 0.5, 0.5); }\n";
 
 static id<MTLDevice> dev;
-static id<MTLRenderPipelineState> pipe(id<MTLLibrary> lib, MTLPixelFormat f, bool blend_rgb)
+static id<MTLRenderPipelineState> mkpipe(id<MTLLibrary> lib, MTLPixelFormat f, bool blend_rgb)
 {
    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
    d.vertexFunction = [lib newFunctionWithName:@"vs"];
@@ -74,7 +74,7 @@ int main(int argc, char **argv)
       const MTLPixelFormat SRGB = MTLPixelFormatBGRA8Unorm_sRGB;
       if (!strcmp(argv[1], "client")) {
          NSUInteger W = atoi(argv[2]), H = atoi(argv[3]); double secs = argc > 4 ? atof(argv[4]) : 30;
-         id<MTLRenderPipelineState> p = pipe(lib, SRGB, false);
+         id<MTLRenderPipelineState> p = mkpipe(lib, SRGB, false);
          id<MTLTexture> t = tex(SRGB, W, H, true);
          double t0 = now(); unsigned long n = 0; id<MTLCommandBuffer> cb = nil;
          while (now() - t0 < secs) {
@@ -89,7 +89,7 @@ int main(int argc, char **argv)
       }
       bool split = !strcmp(argv[1], "split");
       unsigned bursts = atoi(argv[2]);
-      id<MTLRenderPipelineState> pclear = pipe(lib, SRGB, false), pload = pipe(lib, SRGB, true);
+      id<MTLRenderPipelineState> pclear = mkpipe(lib, SRGB, false), pload = mkpipe(lib, SRGB, true);
       id<MTLTexture> small = tex(SRGB, 298, 452, true), big = tex(SRGB, 1920, 1080, false);
       id<MTLCommandBuffer> cb = nil;
       for (unsigned b = 0; b < bursts; b++) {

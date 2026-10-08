@@ -50,6 +50,27 @@ struct DependencyStats {
     lane_dropped: u64,
     /// Compute admissions deferred on another queue's stamp.
     compute_held: u64,
+    /// Works admitted after at least one deferral, and the total time from
+    /// their first deferral to admission.
+    held_works: u64,
+    held_us: u64,
+    /// First deferral of the Work currently waiting, if any.
+    hold_start: Option<Instant<Monotonic>>,
+}
+
+impl DependencyStats {
+    fn defer(&mut self) {
+        if self.hold_start.is_none() {
+            self.hold_start = Some(Instant::now());
+        }
+    }
+
+    fn admit(&mut self) {
+        if let Some(start) = self.hold_start.take() {
+            self.held_works += 1;
+            self.held_us += start.elapsed().as_micros_ceil() as u64;
+        }
+    }
 }
 
 impl Drop for FirmwareQueues {
@@ -59,14 +80,16 @@ impl Drop for FirmwareQueues {
             && d.ta_ordered + d.ta_held + d.cross_held + d.lane_dropped + d.compute_held != 0
         {
             pr_info!(
-                "G16: queue deps renders={} computes={} ta_ordered={} ta_held={} cross_held={} lane_dropped={} compute_held={}\n",
+                "G16: queue deps renders={} computes={} ta_ordered={} ta_held={} cross_held={} lane_dropped={} compute_held={} held_works={} held_us={}\n",
                 self.render_count,
                 self.compute_count,
                 d.ta_ordered,
                 d.ta_held,
                 d.cross_held,
                 d.lane_dropped,
-                d.compute_held
+                d.compute_held,
+                d.held_works,
+                d.held_us
             );
         }
     }
@@ -1608,6 +1631,7 @@ impl Bootstrap {
                 } else {
                     queue.deps.cross_held += 1;
                 }
+                queue.deps.defer();
                 return Err(EBUSY);
             }
             ta_ordered |= ta_wait;
@@ -1615,6 +1639,7 @@ impl Bootstrap {
         }
         queue.deps.ta_ordered += u64::from(ta_ordered);
         queue.deps.lane_dropped += u64::from(lane_dropped);
+        queue.deps.admit();
         Ok([None; 2])
     }
 
@@ -2198,9 +2223,11 @@ impl Bootstrap {
                 && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value)
             {
                 queue.deps.compute_held += 1;
+                queue.deps.defer();
                 return Err(EBUSY);
             }
         }
+        queue.deps.admit();
         Ok([None; 2])
     }
 

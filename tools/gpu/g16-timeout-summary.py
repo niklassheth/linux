@@ -27,8 +27,8 @@ def summarize(path):
             snapshot["record_words"] = re.findall(r"0x[0-9a-f]+", line)
     for work in works.values():
         samples = work["compute_samples"]
-        runtime = {s.get("runtime") for s in samples}
-        records = {tuple(s["record_words"]) for s in samples if "record_words" in s}
+        runtime = {s["runtime"] for s in samples if s.get("runtime") not in (None, "0xdeadbeef")}
+        records = {tuple(s["record_words"]) for s in samples if "record_words" in s and not any("deadbeef" in w for w in s["record_words"])}
         work["runtime_changes"] = max(0, len(runtime) - 1)
         work["record_changes"] = max(0, len(records) - 1)
         work["progress_evidence"] = ("sampled fields changed; correlate lane scheduling and Work identity"

@@ -15,23 +15,32 @@ if ! mountpoint -q /home; then
     mount -o ro,subvol=home "$root_source" /home
 fi
 case ",$(findmnt -no OPTIONS /home)," in *,ro,*) ;; *) exit 1 ;; esac
-for desktop_dir in .config .local .cache; do
-    overlay_dir=/run/codex-dota-overlay/$desktop_dir
-    mkdir -p "$overlay_dir/upper" "$overlay_dir/work"
-    mount -t overlay overlay -o "lowerdir=/home/nsheth/$desktop_dir,upperdir=$overlay_dir/upper,workdir=$overlay_dir/work" "/home/nsheth/$desktop_dir"
-done
+# Steam creates .steam tokens and top-level .steampid/.steampath files. A
+# full home overlay keeps those writes temporary and preserves Steam discovery.
+home_overlay=/tmp/codex-dota-home
+mkdir -p "$home_overlay/lower" "$home_overlay/upper" "$home_overlay/work"
+mount --bind /home/nsheth "$home_overlay/lower"
+mount -o remount,bind,ro "$home_overlay/lower"
+mount -t overlay overlay -o "lowerdir=$home_overlay/lower,upperdir=$home_overlay/upper,workdir=$home_overlay/work" /home/nsheth
 games=/home/nsheth/g16-games
-mkdir -p /run/codex-dota-games/upper /run/codex-dota-games/work
-mount -t overlay overlay -o "lowerdir=$games,upperdir=/run/codex-dota-games/upper,workdir=/run/codex-dota-games/work" "$games"
 # The RO boot does not automatically provide the external game volume.
 # Mount its backing read-only before starting muvm, then use a tmpfs upper
 # for runtime locks, game logs and Steam metadata.
 external=/mnt/g16-external
 mountpoint -q "$external" || mount -o ro /dev/disk/by-label/USB4-TEST "$external"
 case ",$(findmnt -no OPTIONS "$external")," in *,ro,*) ;; *) exit 1 ;; esac
-mkdir -p /run/codex-dota-external/upper /run/codex-dota-external/work
-mount -t overlay overlay -o "lowerdir=$external,upperdir=/run/codex-dota-external/upper,workdir=/run/codex-dota-external/work" "$external"
+mkdir -p /tmp/codex-dota-overlay-storage-external/upper /tmp/codex-dota-overlay-storage-external/work
+mount -t overlay overlay -o "lowerdir=$external,upperdir=/tmp/codex-dota-overlay-storage-external/upper,workdir=/tmp/codex-dota-overlay-storage-external/work" "$external"
 test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
+# The stock Sniper run script forces copy mode. Under virtiofs/overlay its
+# hardlinks fail and it copies GiBs to tmpfs. Use its supported bind mode in
+# this temporary overlay, preserving the exact entry point and runtime files.
+sniper=$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper
+cp "$sniper/run" "$observe/sniper-run-original.sh"
+grep -q '^export PRESSURE_VESSEL_COPY_RUNTIME=1$' "$sniper/run"
+sed -i 's/^export PRESSURE_VESSEL_COPY_RUNTIME=1$/export PRESSURE_VESSEL_COPY_RUNTIME=0/' "$sniper/run"
+cp "$sniper/run" "$observe/sniper-run-staged.sh"
+sha256sum "$observe/sniper-run-"*.sh > "$observe/sniper-inputs.sha256"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
 if [ "$capture_stage" = dota ]; then
@@ -52,7 +61,7 @@ cat /proc/cmdline >> "$observe/kernel.txt"
 findmnt -R /mnt/g16-external > "$observe/external-mount.txt"
 find /usr/share/vulkan /home/nsheth/.local/share/vulkan /usr/local/share/vulkan -type f -name "*.json" > "$observe/vulkan-manifests.txt" 2>&1 || true
 findmnt -no TARGET,FSTYPE,OPTIONS -T / >> "$observe/kernel.txt"
-findmnt -no TARGET,FSTYPE,OPTIONS -T /home >> "$observe/kernel.txt"
+findmnt -no TARGET,FSTYPE,OPTIONS -T /home/nsheth >> "$observe/kernel.txt"
 findmnt -t btrfs -no TARGET,OPTIONS >> "$observe/kernel.txt"
 stage=/home/nsheth/.cache/codex-dota-capture-$(date +%Y%m%d_%H%M%S)
 mkdir -p "$stage"
@@ -125,7 +134,7 @@ export M4_MUVM_MEM=6144 M4_MUVM_VRAM=2048 M4_MUVM_FEX_OVERLAY=/var/tmp/g16-steam
 exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-dota-capture-guest.sh" "$2" unassisted "$3" < <(sleep 295)
 HOST
 chown nsheth:nsheth "$stage/capture-host.sh"
-systemd-run --unit=codex-dota-capture --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=300 /bin/bash "$stage/capture-host.sh" "$stage" "$label" 1800-1804
+systemd-run --unit=codex-dota-capture --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=300 /bin/bash "$stage/capture-host.sh" "$stage" "$label" 600-604
 reason=deadline
 for second in {1..305}; do
     if [ -f "$out/exit-status" ]; then reason=exited; break; fi

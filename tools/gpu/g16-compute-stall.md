@@ -831,4 +831,25 @@ Original and staged scripts/hashes are saved. This is a harness resource
 change and must be recorded when comparing earlier writable-root controls.
 Valve source package0.20261007.0 (official pressure-vessel snapshot) documents
 the boolean in wrap.1.md; source reference is read-only, no imported code.
-Current control43125/observe-20261007_231444 is pending, not a verdict.
+Current control43125/observe-20261007_231452 is pending, not a verdict.
+
+
+## Second memory-limited retry (23:20)
+
+observe-20261007_231452 ended at34.6s on the same host-memory guard, before
+any GPU timeout and before the45s driver-map marker. Startup ownership122,
+terminal772; again not a counted clean control. The full-home overlay
+removed Steam's read-only token failures; Dota initially obtained the user
+SteamID, although secondary initialization later printed the default ID.
+Do not claim every Steam initialization is now verified from unit liveness.
+External Sniper runtime.log still contains240 hardlink-fallback copies;
+changing only its `run` file did not cover the chosen runtime alias.
+
+Cleanup restored production20, all services active, released. The next
+observer enumerates script wrappers named run/run-in-* under external
+Sniper and Steam's own runtime; changes only the explicit copy-mode export
+in overlay copies and saves every original/staged script plus path/hashes.
+No runtime library files are modified. Need prove fallback copying is gone
+and loaded-driver marker appears before calling this a valid control.
+Current runner48107 is queued on the same diagnostic image/parameters.
+No further containment device experiment has displaced this investigation.

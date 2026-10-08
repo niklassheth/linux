@@ -48,7 +48,7 @@ runuser -u nsheth -- env G16_SMOKE_OUTPUT="$observe" bash -c '
     HK_EXPERIMENTAL_APPLE9=1 timeout 30 vkcube --c 120 > "$G16_SMOKE_OUTPUT/vkcube-native.log" 2>&1
     echo "native vkcube rc=0 frames=120" > "$G16_SMOKE_OUTPUT/verdicts.txt"
     timeout 90 m4-muvm /bin/bash /home/nsheth/.cache/codex-context-smoke/run.sh > "$G16_SMOKE_OUTPUT/muvm-host.log" 2>&1
-' < <(sleep 180)
+' < <(sleep 180 2>/dev/null)
 for retry in {1..60}; do
     [ ! -s "$guest_stage/exit-status" ] || break
     sleep 1

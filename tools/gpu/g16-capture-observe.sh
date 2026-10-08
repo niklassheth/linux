@@ -92,7 +92,7 @@ grep -q 'device=Apple M4.*driver=Honeykrisp' "$stage/fex-baseline.log"
 grep -q 'libvulkan_asahi' "$stage/fex-baseline-maps.txt"
 exit 0
 fi
-# Dota has a 150 s deadline and 2 GiB capture limit. A failure is a diagnostic
+# Dota has a 300 s deadline and 2 GiB capture limit. A failure is a diagnostic
 # result, never counted as a clean run. Keep Steam's existing launch path.
 label=dota-gfxr-codex-$(date +%H%M%S)
 out=$results/$label
@@ -102,12 +102,12 @@ cat > "$stage/capture-host.sh" <<'HOST'
 set -euo pipefail
 source /home/nsheth/.local/state/m4/session.env
 export M4_MUVM_MEM=6144 M4_MUVM_VRAM=2048 M4_MUVM_FEX_OVERLAY=/var/tmp/g16-steam-mesa.erofs
-exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-dota-capture-guest.sh" "$2" unassisted < <(sleep 145)
+exec /usr/local/bin/m4-muvm /bin/bash "$1/g16-dota-capture-guest.sh" "$2" unassisted "$3" < <(sleep 295)
 HOST
 chown nsheth:nsheth "$stage/capture-host.sh"
-systemd-run --unit=codex-dota-capture --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=150 /bin/bash "$stage/capture-host.sh" "$stage" "$label"
+systemd-run --unit=codex-dota-capture --uid=nsheth --setenv=HOME=/home/nsheth -p RuntimeMaxSec=300 /bin/bash "$stage/capture-host.sh" "$stage" "$label" 1800-1804
 reason=deadline
-for second in {1..155}; do
+for second in {1..305}; do
     if [ -f "$out/exit-status" ]; then reason=exited; break; fi
     bytes=$(du -sb "$out" | cut -f1)
     available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
@@ -118,6 +118,10 @@ printf 'reason=%s\n' "$reason" > "$out/host-verdict.txt"
 m4-steam-shutdown 45 || true
 systemctl stop codex-dota-capture 2>/dev/null || true
 cp -a "$out" "$observe/dota-results"
+for console_path in dota/console.log core/console.log console.log; do
+    console_source="/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/$console_path"
+    [ ! -f "$console_source" ] || cp "$console_source" "$observe/dota-results/${console_path//\//-}"
+done
 if [ -s "$out/loaded-driver.txt" ] && grep -q 'libvulkan_asahi' "$out/loaded-driver.txt"; then
     printf 'driver-map=present; verify version and Vulkan init in application.log\n' >> "$observe/dota-results/host-verdict.txt"
 else

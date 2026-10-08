@@ -4,7 +4,7 @@ Owner: `codex-dota`. No hardware lease taken yet. The mini is held by claude-dri
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (20:20 local)
+## Status / manager handoff (20:24 local)
 
 Read workspace AGENTS.md, Dota RESULTS (including afternoon), Metal compute
 README, recovery README and timeout capture README. Raw capture audit and diagnostic kernel build complete. First boot was invalid
@@ -47,6 +47,7 @@ packed pointer/status value; low bits must be retained in the capture.
 | C4 | GCC build of integrated diagnostics + quarantined-lane follow-up | Pass; Image.gz/dtbs; no boot yet |
 | C5 | Streaming gfxr parser lifecycle fixture + local converter build | Pass; Dota capture pending |
 | C6 | Policy 3 + native-priority teardown test with detailed lane/control diagnostics | First boot invalid (wrong UTS), no GPU workload; restored #10; retry queued |
+| C7 | Native host no-submit probe: no layer, unassisted, page_guard + convert both captures | All pass; no FEX/mini result yet |
 
 ## Next
 
@@ -364,3 +365,30 @@ this isolation, rather than changes to combine blindly.
 I read the local FEX source as reference; its AGENTS.md forbids AI-generated
 contributions to that project. No FEX source edits are being made. Our standalone
 probe and launch/capture fixes live on our own topic, not in FEX's checkout.
+
+
+## Prepared capture launchers (20:24; not deployed)
+
+`tools/gpu/g16-dota-capture-inner.sh` and `g16-dota-capture-guest.sh` derive from
+our lab launcher and retain the FEX Vulkan-thunk/native ICD path. They isolate
+unassisted vs page_guard capture memory modes, keep compression normal, clear
+other shader-diagnostic overrides, and default to frames **300-304** (five),
+rather than the failed run's 300-900. Frame override is limited to ten frames.
+This bounds frame count, **not bytes**; the leased host harness must also enforce
+memory/free-space/maximum-file-size limits, particularly for unassisted mode.
+
+A live maps poll starts immediately after game launch, retaining native driver
+and gfxrecon mappings during a fast crash. It replaces the old +45 s-only probe
+in these private launchers; the host still must verify expected driver, Vulkan
+init, application exit status and capture contents. Failed capture runs must not
+be called clean Dota runs. Scripts pass bash syntax checks and reject a label
+outside their dedicated `dota-gfxr-codex-*` namespace. They are **not yet run
+on the mini**, and do not modify the existing shared harness.
+
+The no-submit probe's x86 binary needs GLIBC_2.34 or older-version symbols only,
+as checked with readelf. Native-host smoke outputs are described above. Next
+hardware slot will first preserve the prepared recovery experiment, then use
+these tools for capture setup in a bounded leased slot; no simultaneous runners
+with the same lease owner will be started. Production restoration remains
+mandatory. Capture 5 should also report finite-H GPU-time scaling (the prepared
+Metal tool prints GPU start/end times) to check the workload's executed cost.

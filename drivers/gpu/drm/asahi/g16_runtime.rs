@@ -597,6 +597,20 @@ impl Bootstrap {
                 // a ring. Like the channel epochs above, never let the head
                 // run half a ring past an unretired flight on this lane, or
                 // that flight's ring check stays false and it never retires.
+                // Experiment (max_lane_works): bound unretired Works per
+                // firmware lane. The firmware reads up to 128 Works ahead.
+                let cap = crate::module_parameters::max_lane_works.value() as usize;
+                if cap != 0
+                    && self
+                        .flights
+                        .iter()
+                        .filter(|f| f.queues.iter().any(|&(pointers, _)| pointers == lane.pointers))
+                        .count()
+                        >= cap
+                {
+                    self.report_pressure(16, "workqueue");
+                    return Err(EBUSY);
+                }
                 let next = (lane.head + entries[stage]) % 0x500;
                 if self.flights.iter().any(|f| {
                     f.queues

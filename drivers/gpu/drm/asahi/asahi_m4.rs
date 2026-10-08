@@ -160,6 +160,10 @@ kernel::module_platform_driver! {
             default: 1,
             description: "1 keeps firmware context slots bound to their VM: a VM reuses its slot, new VMs take never-bound slots, then the least recently used idle slot. 0 rebinds the preferred slot (9 render, 1 compute) whenever it is idle (the #26 policy)",
         },
+        max_lane_works: u32 {
+            default: 0,
+            description: "Experiment: maximum unretired Works per firmware lane before submissions back off (0: unlimited)",
+        },
         compute_deps: u32 {
             default: 1,
             description: "Experiment: firmware dependency items on compute Works. 1 keeps all; 0 drops all (unsafe, diagnosis only); 2 drops items on the queue's own compute lane; 3 drops items already reached at submit",

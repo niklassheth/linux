@@ -1879,8 +1879,33 @@ impl Bootstrap {
             a.fragment_uuid = u64::from(low);
             a.tiling_uuid = u64::from(low + 1);
         }
-        if crate::module_parameters::cc_pattern.value() != 0 {
-            params.completion_control = if queue_ordinal % 5 == 1 { 0 } else { 3 };
+        let cc_pattern = crate::module_parameters::cc_pattern.value();
+        if cc_pattern != 0 {
+            let solo = queue_ordinal % 5 == 1;
+            params.completion_control = if solo { 0 } else { 3 };
+            if cc_pattern == 3 {
+                // Capture 8's tiling side has its own phase, two renders
+                // later, and a stamp series one below the fragment one.
+                let tiling_solo = queue_ordinal % 5 == 3;
+                params.tiling_completion_control = Some(if tiling_solo { 0 } else { 3 });
+                params.tiling_work_stamp = if tiling_solo {
+                    0x100 + 2 * ((queue_ordinal / 5) & 0x7f)
+                } else {
+                    let count = queue_ordinal - (queue_ordinal + 1) / 5;
+                    0x500 | ((0x0f + (count + 1) / 2) & 0xff)
+                };
+            }
+            if cc_pattern >= 2 {
+                // Metal pairs the two: completion 0 renders count 0x100 up
+                // in steps of two, completion 3 renders count 0x510 up once
+                // per two renders (all 24 renders of capture 8 fit).
+                params.fragment_work_stamp = if solo {
+                    0x100 + 2 * ((queue_ordinal / 5) & 0x7f)
+                } else {
+                    let count = queue_ordinal - (queue_ordinal + 3) / 5;
+                    0x500 | ((0x10 + (count + 1) / 2) & 0xff)
+                };
+            }
         }
         let mut ta = params.tiling_work(&a).ok_or(EINVAL)?;
         let mut frag = params.fragment_work(&a).ok_or(EINVAL)?;

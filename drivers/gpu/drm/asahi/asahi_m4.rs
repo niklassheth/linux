@@ -162,7 +162,7 @@ kernel::module_platform_driver! {
         },
         cc_pattern: u32 {
             default: 0,
-            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 0: completion_control as configured",
+            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 2: also the fragment work stamp Metal pairs with it (0x100 + 2k with completion 0, 0x510 + (n + 1) / 2 with completion 3). 3: also the tiling side's own phase from Metal (completion 0 when the ordinal % 5 == 3, stamps 0x100 + 2k or 0x50f + (n + 1) / 2). 0: completion_control as configured",
         },
         ta3d_item: u32 {
             default: 0,

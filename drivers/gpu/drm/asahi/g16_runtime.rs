@@ -830,9 +830,10 @@ impl Bootstrap {
         let support = pointer(flight.id + 0x86a);
         let slot = pointer(flight.id + 0x883);
         dev_err!(self.dev.as_ref(),
-                 "G16: compute queue={:#x} priority={}/{} runtime={:#x} context_object={:#x} context_words={:#x}/{:#x}/{:#x}\n",
+                 "G16: compute queue={:#x} priority={}/{} runtime={:#x} context_object={:#x} context_words={:#x}/{:#x}/{:#x} context_dynamic={:#x}/{:#x}\n",
                  queue, word(queue + 0x30), word(queue + 0x48), word(queue + 0x9c),
-                 context, word(context), word(context.saturating_add(4)), word(context.saturating_add(0x24)));
+                 context, word(context), word(context.saturating_add(4)), word(context.saturating_add(0x24)),
+                 (word(context.saturating_add(0xc)) >> 16) & 0xff, (word(context.saturating_add(0x2c)) >> 24) & 0xff);
         dev_err!(self.dev.as_ref(),
                  "G16: compute support={:#x} identity={:#x} slot_id={} directory={:#x} capacity={} cursor={} pages={} state={:#x} save_area={:#x} record={:#x}\n",
                  support, pointer(support), word(support.saturating_add(8)), pointer(support.saturating_add(0x14)),
@@ -843,6 +844,15 @@ impl Bootstrap {
                      "G16: compute record words {:#018x} {:#018x} {:#018x} {:#018x}\n",
                      pointer(slot), pointer(slot.saturating_add(8)), pointer(slot.saturating_add(0x10)), pointer(slot.saturating_add(0x18)));
         }
+        // The GPU save-area alias names the upper half of this owned Work
+        // page. Read its firmware VA, without creating a +0x883 record or
+        // translating arbitrary client memory. This works at default settings.
+        dev_err!(self.dev.as_ref(),
+                 "G16: compute save backing={:#x} words={:#018x}/{:#018x}/{:#018x}/{:#018x} tail={:#018x}/{:#018x}/{:#018x}/{:#018x}\n",
+                 flight.id + 0x2000, pointer(flight.id + 0x2000), pointer(flight.id + 0x2008),
+                 pointer(flight.id + 0x2010), pointer(flight.id + 0x2018),
+                 pointer(flight.id + 0x3480), pointer(flight.id + 0x3488),
+                 pointer(flight.id + 0x3490), pointer(flight.id + 0x3498));
         // Register/value pairs are data, not GPU instructions. A fixed array
         // keeps the timeout diagnostic independent of a successful allocation.
         let mut registers = [(0u32, 0u64); 6];
@@ -1295,7 +1305,11 @@ impl Bootstrap {
         // default watchdog fails clients. This does not extend its deadline,
         // change firmware state or interpret frozen counters as non-execution.
         if crate::module_parameters::debug_ctx.value() != 0 {
-            for index in 0..self.flights.len().min(4) {
+            let mut reported = 0;
+            for index in 0..self.flights.len() {
+                if reported == 4 {
+                    break;
+                }
                 let flight = &self.flights[index];
                 if flight.render.is_some()
                     || flight.started.elapsed().as_millis() < watchdog / 2
@@ -1303,6 +1317,7 @@ impl Bootstrap {
                 {
                     continue;
                 }
+                reported += 1;
                 self.flights[index].diagnostic_sampled = Some(Instant::now());
                 let flight = &self.flights[index];
                 dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render=false stream={:#x} stream_end={:#x} sample=pretimeout\n",

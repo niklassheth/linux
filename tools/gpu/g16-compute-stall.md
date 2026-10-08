@@ -806,3 +806,29 @@ window; no immediate need for another teardown soak. The later gfxr
 window1800 is too late for the reproduced~54s launch failure. After
 identity controls, try an earlier window600-604 with the proven Steam
 liveness guard and larger overlay backing, rather than reusing1800.
+
+
+## Temporary filesystem correction (23:15)
+
+Retry observe-20261007_230805 did launch Dota and capture122 startup /624
+terminal ownership snapshots, but ended at38.6s on the2GiB host-memory guard.
+No GPU timeout in the observed interval. Cleanup ran before the original
+45s loaded-driver marker, so its EXPECT_DRIVER gate failed (missing marker);
+this is not a wrong binary assertion and is not counted as a valid clean run.
+The snapshots total56MiB; runtime hardlink fallback copying is the larger
+known overhead. Steam startup also reports read-only .steam/starting,
+steam.token and top-level .steampid/.steampath failures. Dota reports no
+Steam process/default SteamID. A live Steam unit alone was insufficient.
+
+Production20 restored, services verified, lease released and reacquired.
+Next observer uses a full /home/nsheth tmpfs overlay over a read-only bind
+view, rather than only .config/.local/.cache. This allows Steam's top-level
+IPC/discovery files while all persistent Btrfs backing remains read-only.
+Sniper's stock open-source run script forces PRESSURE_VESSEL_COPY_RUNTIME=1;
+its temporary overlay copy now sets0 (supported bind mode), preserving
+_v2-entry-point, runtime library files, FEX/thunks, Dota arguments and driver.
+Original and staged scripts/hashes are saved. This is a harness resource
+change and must be recorded when comparing earlier writable-root controls.
+Valve source package0.20261007.0 (official pressure-vessel snapshot) documents
+the boolean in wrap.1.md; source reference is read-only, no imported code.
+Current control43125/observe-20261007_231444 is pending, not a verdict.

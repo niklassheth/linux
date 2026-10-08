@@ -853,3 +853,38 @@ No runtime library files are modified. Need prove fallback copying is gone
 and loaded-driver marker appears before calling this a valid control.
 Current runner48107 is queued on the same diagnostic image/parameters.
 No further containment device experiment has displaced this investigation.
+
+
+## Manager-authorized rw trigger controls (23:30)
+
+Stop further RO harness iteration for Dota trigger reproduction. The latest
+RO attempt observe-20261007_232008 again hit the2GiB memory guard (~12s)
+without a GPU timeout. Host-side staged copy-mode flags were0 in five
+scripts, yet Sniper performed240 fallback copies. Official pressure-vessel
+source runtime.c forces COPY_RUNTIME when INTERPRETER_ROOT (FEX) is set,
+and also when applying an mtree manifest. The flags were ineffective and
+are reverted in the unused RO observers. No zram experiment was run.
+Cleanup restored20, services verified and lease released. Four RO trigger
+launch attempts are invalid; none contributes to a control hang-rate claim.
+
+Manager explicitly authorizes normal rw roots for production20+213 trigger
+runs with default GPU behavior; RO remains required for firmware/recovery
+behavior experiments. New g16-dota-rw-slot.sh reuses installed run-variant.sh,
+collector, watcher, Steam/game scripts unchanged, with EXPECT_DRIVER and
+clean Steam shutdown. No home/runtime overlays, custom stdin wrappers or
+watcher replacement. Baseline variantmode0 pins a8c33e3.
+
+Separate build branch test/m4-7.3-213-trigger-prod20 assembly9a87be0c0c26b:
+production20 source4b4f4b078a633/config plus213 and reporting-only pretimeout
+samples. GCC in-tree build PASS, frozen artifact
+`artifacts/m4-linux/bits-7.3-213-prod20-trigger/`, UTS#4 23:28:05.
+Boot args only dependency_kind=0 (production boot setting) and debug_ctx=1.
+All behavior parameters retain defaults, including timeout_policy0,
+record storage0, private pool0, control1b0, compute_preempt0, barrier0 and
+render_preempt1. No per-Work save record exists with the default record
+setting, so those words cannot be an execution discriminator in this arm.
+Read runtime/context status on each existing service call after5s without
+retirement (at mostonce/sec, firstfour flights); no new polling, watchdog
+extension, firmware writes or changed retirement conditions. Frozen values
+still cannot distinguish continuous execution from an unscheduled lane.
+Current rw runner25381 is queued/running; no verdict yet.

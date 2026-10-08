@@ -134,6 +134,20 @@ PY
               grep -o 'fixed)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
               sha256sum "$R/driver-fixed/libvulkan_asahi.so" >> "$observe/verdicts.txt"
           fi
+          # G16_DOTA_MODE (overlay-only): fixed = a plain 1280x720 window (no borderless/coop fullscreen);
+          # fullscreen = exclusive fullscreen at the display size (1920x1080).
+          V=/home/nsheth/g16-games/dota-civ-followup-20261006/dota-video-low.txt
+          case "${G16_DOTA_MODE:-}" in
+          fixed)
+              sed -i -E 's/("setting\.(fullscreen|coop_fullscreen|nowindowborder)"\s+)"[01]"/\1"0"/' "$V" ;;
+          fullscreen)
+              sed -i -E 's/("setting\.fullscreen"\s+)"[01]"/\1"1"/; s/("setting\.(coop_fullscreen|nowindowborder)"\s+)"[01]"/\1"0"/; s/("setting\.defaultres"\s+)"[0-9]+"/\1"1920"/; s/("setting\.defaultresheight"\s+)"[0-9]+"/\1"1080"/' "$V"
+              sed -i 's/ -windowed -w 1280 -h 720 / -fullscreen -w 1920 -h 1080 /' "$R/dota-inner.sh" ;;
+          esac
+          if [ -n "${G16_DOTA_MODE:-}" ]; then
+              chown nsheth:nsheth "$V" "$R/dota-inner.sh"
+              { echo "dota-mode=$G16_DOTA_MODE"; grep -E 'setting\.(defaultres|defaultresheight|fullscreen|coop_fullscreen|nowindowborder)"' "$V"; grep -oE '\-(windowed|fullscreen) -w [0-9]+ -h [0-9]+' "$R/dota-inner.sh"; } >> "$observe/verdicts.txt"
+          fi
           case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.

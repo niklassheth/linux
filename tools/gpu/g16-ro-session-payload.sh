@@ -5,6 +5,7 @@
 set -uo pipefail
 observe=$1; tests=$2
 case "$observe" in /tmp/codex-dota-*) ;; *) exit 64 ;; esac
+tests=${tests:-}
 case ",$(findmnt -no OPTIONS /)," in *,ro,*) ;; *) echo "root not ro"; exit 1 ;; esac
 swapoff -a
 if ! mountpoint -q /home; then
@@ -43,7 +44,12 @@ run_user() { # name timeout cmd...
     wait $pid; echo "$name rc=$? secs=$((SECONDS - start))" >> "$observe/verdicts.txt"
     stalled && finish_stall "$name"
 }
-cb=/home/nsheth/g16-games/copy-burst/copy_burst
+cb=$observe/copy_burst
+if [ -s "$observe/copy_burst.c" ]; then
+    cc -O2 -g -Wall -std=c11 -D_POSIX_C_SOURCE=200809L -o "$cb" "$observe/copy_burst.c" -lvulkan > "$observe/copy_burst-build.log" 2>&1
+    chmod 755 "$cb"; sha256sum "$cb" >> "$observe/drivers.sha256"
+fi
+[ "$tests" != restore ] || { echo "RESTORED ro production" >> "$observe/verdicts.txt"; exit 0; }
 for t in $tests; do
     case $t in
     cb-one) run_user cb-one 120 env HK_DEBUG=perf $cb --images 64 --mips 9 --format bc3 --submits 40 ;;

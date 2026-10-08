@@ -149,7 +149,17 @@ PY
               chown nsheth:nsheth "$V" "$R/dota-inner.sh"
               { echo "dota-mode=$G16_DOTA_MODE"; grep -E 'setting\.(defaultres|defaultresheight|fullscreen|coop_fullscreen|nowindowborder)"' "$V"; grep -oE '\-(windowed|fullscreen) -w [0-9]+ -h [0-9]+' "$R/dota-inner.sh"; } >> "$observe/verdicts.txt"
           fi
-          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          case "$variant" in quar*)
+              # claude-driver's apple9/va-quarantine-debug 7835475b288 (8825824 + traces + HK_VA_QUARANTINE_MS).
+              qms=${variant#quar}
+              mkdir -p "$R/driver-quar"
+              cp "$observe/extra/libvulkan_asahi.quar.so" "$R/driver-quar/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-quar/icd.json"
+              grep -qF "quar$qms) " "$R/dota-inner.sh" || sed -i "s|case \"\\\$variant\" in |case \"\$variant\" in quar$qms) export VK_DRIVER_FILES=\"\$root/driver-quar/icd.json\" HK_APPLE9_DUMP_MODE=0 HK_VA_TRACE=1 HK_WSI_TRACE=1 HK_VA_QUARANTINE_MS=$qms;; |" "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-quar" "$R/dota-inner.sh"
+              grep -o "quar$qms)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
+          esac
+          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"
@@ -161,6 +171,7 @@ PY
           echo "dota variant=$variant rc=$?" >> "$observe/verdicts.txt"
           echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"
           sleep 5; dmesg | grep "G16: queue deps" > "$observe/dep-stats.txt" 2>/dev/null
+          grep -c "hk-va-quarantine pressure" "$R/results/$label/application.log" 2>/dev/null | sed 's/^/quarantine-pressure-lines=/' >> "$observe/verdicts.txt"
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
           cp "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/console.log" "$observe/dota-console.log" 2>/dev/null
           mkdir -p "$observe/steam-logs"

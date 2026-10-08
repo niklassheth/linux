@@ -1,5 +1,5 @@
 #!/bin/bash
-# Block 48 (manager + claude-kernel): localise why the #68/#70 tree ran A4-clean (controls 3/3, =2 7/7). All ta_sel6=0.
+# Block 48 (env R48_ROUNDS, R48_SKIP_ROUND + R48_SKIP arms already done) (manager + claude-kernel): localise why the #68/#70 tree ran A4-clean (controls 3/3, =2 7/7). All ta_sel6=0.
 #   T63:  #63 (last tree with confirmed A4), my usual A4-prone args
 #   R71:  #71 (4de40e1 = #70 + diag_record knob), my usual args, recording on (as #70)
 #   D71:  #71 diag_record=0, no dump_render_*/dep_stats (all optional recording off)
@@ -17,9 +17,10 @@ U71="#71 SMP PREEMPT_DYNAMIC Thu Oct  8 18:27:11 EDT 2026"
 r() { env G16_KEEP_LEASE=1 G16_TAG=$1 G16_KERNEL_ARTIFACT=$2 "G16_EXPECT_UTS=$3" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$4" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$1 $R; }
 stalls() { local c=0; for d in artifacts/dota-compute-stall-20261007/ro-session/k48b-$1-*; do grep -qs "STALL in" $d/codex-dota-*/verdicts.txt && c=$((c+1)); done; echo $c; }
 fifth=; fifth_k=; fifth_x=
-for n in 1 2 3 4 5 6 7 8; do
-    r k48b-t63-$n artifacts/m4-linux/bits-7.3-63-wedge-r3 "$U63" "$BEH $REC"
-    r k48b-r71-$n artifacts/m4-linux/bits-7.3-71-diagoff "$U71" "$BEH $REC asahi_m4.ta_sel6=0"
+for n in ${R48_ROUNDS:-1 2 3 4 5 6 7 8}; do
+    sk=; [ "$n" = "${R48_SKIP_ROUND:-}" ] && sk=" ${R48_SKIP:-} "
+    case "$sk" in *" t63 "*) ;; *) r k48b-t63-$n artifacts/m4-linux/bits-7.3-63-wedge-r3 "$U63" "$BEH $REC" ;; esac
+    case "$sk" in *" r71 "*) ;; *) r k48b-r71-$n artifacts/m4-linux/bits-7.3-71-diagoff "$U71" "$BEH $REC asahi_m4.ta_sel6=0" ;; esac
     [ -s "$(ls -td artifacts/dota-compute-stall-20261007/ro-session/k48b-r71-$n-* | head -1)/loaded-kernel.txt" ] || { echo "#71 failed to boot; stopping"; break; }
     r k48b-d71-$n artifacts/m4-linux/bits-7.3-71-diagoff "$U71" "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"
     r k48b-n71-$n artifacts/m4-linux/bits-7.3-71-diagoff-nortc "$U71" "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"

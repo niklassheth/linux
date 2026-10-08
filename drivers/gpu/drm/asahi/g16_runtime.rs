@@ -148,6 +148,9 @@ pub(super) struct Flight {
     id: u64,
     owner: Arc<Mutex<FirmwareQueues>>,
     context: u32,
+    /// Original userspace stream: join timeout Work identities to Mesa diagnostics.
+    stream: u64,
+    stream_end: u64,
     started: Instant<Monotonic>,
     stamps: [Option<Stamp>; 2],
     driver_stamps: [Option<Stamp>; 2],
@@ -939,9 +942,9 @@ impl Bootstrap {
         }
         for flight in self.flights.iter().take(24) {
             // blocked: bit 1 notifier, 2 ring, 3 channel, 4 control reply.
-            dev_err!(self.dev.as_ref(), "G16: hang flight Work={:#x} context={} age_ms={} render={} blocked={:#x} notifier={:?}\n",
+            dev_err!(self.dev.as_ref(), "G16: hang flight Work={:#x} context={} age_ms={} render={} stream={:#x} stream_end={:#x} blocked={:#x} notifier={:?}\n",
                      flight.id, flight.context, flight.started.elapsed().as_millis(),
-                     flight.render.is_some(), flight.blocked,
+                     flight.render.is_some(), flight.stream, flight.stream_end, flight.blocked,
                      flight.notifier_count.map(|(addr, total)| (word(addr), total)));
             if flight.render.is_none() {
                 let _ = self.dump_compute_state(flight);
@@ -1002,9 +1005,9 @@ impl Bootstrap {
         }
         let _ = self.dump_hang_state();
         for flight in self.flights.iter().take(16) {
-            dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render={}\n",
+            dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render={} stream={:#x} stream_end={:#x}\n",
                      flight.id, flight.context, flight.started.elapsed().as_millis(),
-                     flight.render.is_some());
+                     flight.render.is_some(), flight.stream, flight.stream_end);
             for (stage, stamp) in flight.stamps.iter().enumerate() {
                 if let Some(stamp) = stamp {
                     let (pointers, head) = flight.queues[stage];
@@ -2022,6 +2025,8 @@ impl Bootstrap {
                 id: va,
                 owner: queues,
                 context: a.context_id as u32,
+                stream: params.encoder,
+                stream_end: 0,
                 started: Instant::now(),
                 notifier_count,
                 stamps_seen: None,
@@ -2433,6 +2438,8 @@ impl Bootstrap {
                 id: a.work,
                 owner: queues.clone(),
                 context: a.context,
+                stream: params.cdm,
+                stream_end: params.cdm_end,
                 started: Instant::now(),
                 notifier_count: None,
                 stamps_seen: None,

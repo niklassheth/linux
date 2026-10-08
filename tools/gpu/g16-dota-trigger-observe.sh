@@ -31,15 +31,23 @@ case ",$(findmnt -no OPTIONS "$external")," in *,ro,*) ;; *) exit 1 ;; esac
 mkdir -p /tmp/codex-dota-overlay-storage-external/upper /tmp/codex-dota-overlay-storage-external/work
 mount -t overlay overlay -o "lowerdir=$external,upperdir=/tmp/codex-dota-overlay-storage-external/upper,workdir=/tmp/codex-dota-overlay-storage-external/work" "$external"
 test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
-# The stock Sniper run script forces copy mode. Under virtiofs/overlay its
-# hardlinks fail and it copies GiBs to tmpfs. Use its supported bind mode in
-# this temporary overlay, preserving the exact entry point and runtime files.
+# Runtime aliases and Steam's bootstrap wrapper independently force copy
+# mode. Stage their supported bind mode in overlays only, keeping all library
+# files and _v2-entry-point unchanged. Save every changed script and its path.
 sniper=$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper
-cp "$sniper/run" "$observe/sniper-run-original.sh"
-grep -q '^export PRESSURE_VESSEL_COPY_RUNTIME=1$' "$sniper/run"
-sed -i 's/^export PRESSURE_VESSEL_COPY_RUNTIME=1$/export PRESSURE_VESSEL_COPY_RUNTIME=0/' "$sniper/run"
-cp "$sniper/run" "$observe/sniper-run-staged.sh"
-sha256sum "$observe/sniper-run-"*.sh > "$observe/sniper-inputs.sha256"
+wrapper_index=0
+while IFS= read -r -d '' wrapper; do
+    [ "$(head -c 2 "$wrapper")" = '#!' ] || continue
+    grep -q '^export PRESSURE_VESSEL_COPY_RUNTIME=1$' "$wrapper" || continue
+    wrapper_index=$((wrapper_index + 1))
+    printf '%s %s\n' "$wrapper_index" "$wrapper" >> "$observe/runtime-wrapper-paths.txt"
+    cp "$wrapper" "$observe/runtime-wrapper-$wrapper_index-original.sh"
+    sed -i 's/^export PRESSURE_VESSEL_COPY_RUNTIME=1$/export PRESSURE_VESSEL_COPY_RUNTIME=0/' "$wrapper"
+    cp "$wrapper" "$observe/runtime-wrapper-$wrapper_index-staged.sh"
+done < <(find "$sniper" /home/nsheth/.local/share/Steam -maxdepth 8 -type f \( -name run -o -name 'run-in-*' \) -print0)
+[ "$wrapper_index" -gt 0 ]
+sha256sum "$observe/runtime-wrapper-"*.sh > "$observe/runtime-wrapper-inputs.sha256"
+cp "$sniper/_v2-entry-point" "$observe/sniper-entry-point.sh"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
 if [ "$capture_stage" = trigger ]; then

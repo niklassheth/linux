@@ -63,7 +63,17 @@ cleanup() {
 trap cleanup EXIT
 m4-steam-shutdown 45
 systemctl stop g16-steam 2>/dev/null || true
-systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash /home/nsheth/g16-games/dota-shader-identity-20261006/steam-host.sh
+# The initial Steam launcher also reaches muvm's epoll(stdin) path. Keep an
+# epollable input open throughout this bounded observer, as for its joined
+# clients, while retaining the installed Steam/FEX launch script unchanged.
+cp "$games/dota-shader-identity-20261006/steam-host.sh" "$observe/steam-host-input.sh"
+cat > "$stage/steam-host-pipe.sh" <<'HOST'
+#!/bin/bash
+set -euo pipefail
+exec /bin/bash /home/nsheth/g16-games/dota-shader-identity-20261006/steam-host.sh < <(sleep 900)
+HOST
+chown nsheth:nsheth "$stage/steam-host-pipe.sh"
+systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash "$stage/steam-host-pipe.sh"
 sleep 75
 systemctl show g16-steam -p ActiveState -p SubState -p MainPID > "$observe/steam-vm-before-launch.txt"
 if ! systemctl is-active --quiet g16-steam; then

@@ -1,0 +1,18 @@
+{
+  "path": "artifacts/dota-compute-stall-20261007/observe-20261007_214416/codex-dota-20261007_214416/dota-results/dota_frames_300_through_304.gfxr",
+  "bytes": 967866872,
+  "sha256": "2266d8a0dd7154fbcc12d5ec0f4db67bb1be2131a0e23bc8c2338064d017cec0",
+  "frames": [
+    300,
+    301,
+    302,
+    303,
+    304
+  ],
+  "convert_exit": 0,
+  "host_verdict": "deadline, driver-map present",
+  "limits": [
+    "Original Steam service exited before launch; not a matched gameplay control.",
+    "No explicit compute dispatches in this window."
+  ]
+}

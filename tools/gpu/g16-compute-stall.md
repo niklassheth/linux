@@ -7,7 +7,7 @@ Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (21:46 local)
+## Status / manager handoff (21:56 local)
 
 - Valid read-only production #17 + rebased 213 recovery retry is **negative**:
   teardown policy 3 plus native compute priority does not recover other clients.
@@ -33,12 +33,28 @@ claude-driver's integration and recovery work. Never push.
   desktop/input services and released the lease at ~21:44. The kscreen-doctor
   setup command blocked on both candidate and restore boots without G16 errors;
   terminating that command let post-boot complete. Own observer now bounds it.
-- Bounded Dota unassisted capture is queued (`dota-unassisted-console.log`).
-  It uses frames **1-5**, enabling writing from initialization so an early
-  startup failure can leave useful API evidence, rather than waiting until300.
-  Source shows deferred trim uses a different state-tracking path, not exercised
-  by the successful no-submit write-mode probes. No Dota capture result yet.
-  The corrected join supplies epollable pipe stdin and awaits guest verdicts.
+- Dota unassisted capture **completed and converted**, actual staged frames
+  **300-304**, 967866872bytes, five presents. The staged script preceded the
+  local frame1 change; actual capture-inputs/logs take precedence. Artifacts
+  `observe-20261007_214416/`, `dota-unassisted-300-304.jsonl` (80MiB),
+  `dota-compute-summary.json`, `dota-frames-vs-state.json`.
+  Six application submits execute2554 transfers; no vkCmdDispatch, indirect
+  dispatch, or query-copy calls in either reconstructed state or five frames.
+  State reconstructs93 compute-pipeline creation calls. This is a usable trace
+  and shows unassisted + deferred tracking can work through FEX. It is not a
+  reproducing hang or proof of page_guard as queue32's crash cause.
+- Launch-path limitation: original g16-steam service exited after30s, before
+  the75s Dota launch. App logs later include SteamAPI failures/default Steam ID;
+  this is not the same living Steam VM condition as queue32 and must not count
+  as a matched clean Dota run. Native libvulkan_asahi is mapped, trace renderer
+  is Apple M4, and five successful presents establish Vulkan initialization.
+  Capture ended normally at304; host150s deadline stopped the remaining game.
+  No G16 timeout/fault lines, all desktop/input services active after capture.
+- Restored current production#19 and all three services; lease released21:53.
+  No codex runner remains. Compiler now owns mini for requested capture6.
+  Next: investigate Steam lifetime/exact-scene validity, capture later live
+  gameplay with unassisted, and test default-off global control1b in a fresh
+  RO lease. Correlate capture6's actual roots/backing with op20 registration.
 - Own branch is rebased onto current bit211 a6e385; diagnostic and default-off
   global control-1b experiment fixes were folded back from the private test
   assembly. The control-1b build passed (#6, 21:29:19), **not booted**. Current
@@ -125,6 +141,8 @@ packed pointer/status value; low bits must be retained in the capture.
 | C9 | RO #17+213 exact-path no-submit probe, first slot | INVALID FEX/capture: external Sniper path unavailable, layer absent in nominal native layer modes; production restored |
 | C10 | Explicit-layer probe, external volume RO + tmpfs overlay | All six native/FEX modes rc0; four captures converted, one 64 KiB fill each, zero submissions |
 | C11 | Six captured global control-1b records, default-off kernel experiment | Build passed; no hardware result |
+| C12 | Dota unassisted deferred trim300-304 under FEX/Sniper, RO17+213 | 924MiB complete trace converts; five presents, no explicit compute; original Steam exited before launch, so not matched clean/hang control |
+| C13 | Parser on actual Dota trace, singleton objects + trim reconstruction | Pass: six frame submits,2554 transfers, no unobserved CBs; setup submits counted separately |
 
 ## Valid recovery retry (#17 source + 213, 21:13–21:17)
 
@@ -562,3 +580,77 @@ Gfxrecon CommonCaptureManager starts frame1; a single range beginning1 opens
 its file immediately and writes setup calls. A future300-304 run will exercise
 the separate pre-range tracking path used by queue32. First-frame startup can
 therefore provide evidence even if the game crashes before its first present.
+
+
+## Dota unassisted capture and first analysis (21:48–21:56)
+
+Raw file: `observe-20261007_214416/codex-dota-20261007_214416/dota-results/`
+`dota_frames_300_through_304.gfxr`. Actual size/hash are in
+`dota-capture-manifest.json`; conversion exit0,153666JSONL records, five frame
+end markers300–304, no truncated-file warnings. Native driver mapping is
+`/usr/lib64/libvulkan_asahi.so`, renderer Apple M4, gfxrecon1.0.5/header1.4.363.
+The same installed native path was verified by the preceding probe as c0828f3fac.
+The trace's deferred-state setup does not preserve driverInfo, so driver commit
+comes from that adjacent probe rather than an independent trace string.
+
+Six **frame** queue submits (plus one synthesized trim-setup submit) execute
+2554 executed transfers:500 buffer-to-image,2049 buffer copies and five blits.
+Five of those uploads were recorded in reconstructed CBs and submitted again
+in the captured frames; frame API recording itself has495 upload commands. There are1180 CmdDraw and five CmdDrawIndexed calls
+in the five frames. State reconstructs93 compute-pipeline creations but no
+explicit compute dispatch appears anywhere. Neither query-copy nor query-reset
+calls appear. Application-level dispatch duration and dependency analysis thus
+has no compute dispatch to rank in this window. Transfers and graphics setup
+may still create internal driver compute; a later gameplay window and driver
+Work-to-command association are needed. Gfxrecon state reconstruction must not
+be counted as live frame executions.
+
+The streaming parser previously assumed structure arrays were always lists;
+real pSubmits with count1 is a dict. Normalization now handles singleton structs
+and handles consistently. It retains reconstructed CB definitions but excludes
+trim setup submissions from frame execution counts, and records transfers that
+may invoke driver compute. The real trace passes with zero unobserved CBs.
+Analysis outputs: `dota-compute-summary.json`, `dota-frames-vs-state.json`,
+`dota-trace-validation.json`. Largest transfer does not mean longest GPU time.
+
+Steam lifetime is a real validity limitation: its initial service deactivated
+at21:47:08 after30.3s. Dota starts21:47:53 and can render/capture through the
+fresh VM, but the original authenticated Steam VM is no longer alive and later
+Steam API failures are present. Do not score this as a matching five-minute
+control or claim unassisted caused the change from queue32. The preserved
+capture input is300-304 despite the later local default1-5 change. Observer
+captured completed gfxr within its2GiB limit and stopped at150s deadline.
+
+No firmware failure is visible in this run. Production restore booted#19;
+kscreen-doctor blocked again and was terminated so post-boot finished normally.
+Desktop/headless/input units all active before lease release. The next capture
+must preserve Steam launch/shutdown logs and assert original Steam VM liveness
+before claiming the exact authenticated path. Requested capture6 is currently
+with compiler; do not contend for its UART or memory monitor.
+
+Static source check: current libagx_copy_query has no shader-side availability
+spin; only the CPU GetQueryPoolResults wait path spins with a timeout. The old
+helper.cl threadgroup-allocation TODO is not evidence of the Apple9 issue:
+current G16G scratch reservation explicitly skips that older helper protocol.
+No changes or hardware tests were made for those discarded hypotheses.
+
+
+## Final checkpoint (21:58)
+
+All three authorized mini blocks are finished; no codex hardware waiter or
+runner remains. Each released the lease after verifying production restoration.
+Current main development tip is on own bit213; diagnostic, global-control1b and
+harness/parser changes are committed WIP, with no pushes or production merges.
+The tried table records the valid recovery negative. Global-control1b remains
+**unbooted**. The frozen #6 artifact is
+`artifacts/m4-linux/bits-7.3-213-prod17-e6f72e2/`; future boot must use its exact
+UTS and explicit parameter, RO backing and a fresh lease.
+
+Next Dota runner now requires the original Steam unit still active at launch,
+and preserves startup/service/guest-shutdown logs. This guard was added after
+the successful API capture; do not retroactively claim that run passed it.
+Capture5 teardown rerun: yes; capture6-request.md is the exact pending scope.
+Compiler holds the lease for it now. Follow-ups are Steam lifetime/exact gameplay,
+then later capture with actual compute/driver-meta association, and the new
+op1b forced-stall experiment after release/requeue. Neither time-slicing nor
+isolated DEVICE_LOST recovery is fixed; no 3x5-minute success claim.

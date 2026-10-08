@@ -8,7 +8,7 @@ Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Current checkpoint (22:36 local)
+## Current checkpoint (22:47 local)
 
 - Capture 6 audit is complete: [capture6-verified.md](capture6-verified.md),
   `capture6-audit.json`, and `capture6-initial-context.json`. No destroy names H
@@ -25,11 +25,13 @@ claude-driver's integration and recovery work. Never push.
 - Capture 6 also proves separate support objects/FList slots (C3/H0) and
   private physical pool backing. Ours shares slot2 and its pool. Default-off
   `compute_private_pool=1` WIP b9d449 allocates private backing/exclusive leases;
-  separate production17+213 build is running, with no hardware result.
+  separate production17+213 GCC build passed (#1,22:41:30), with no hardware result.
 - Six historical op1b records are present before the arm cursor; none is newly
   published by these clients. The default-off six-record Linux experiment is
-  queued using frozen #6, RO production17+213, native priority, policy3 and
-  valid zeroed Work-record storage. This is a combined setup test, not a fix.
+  tested using frozen #6, RO production17+213, native priority, policy3 and
+  zeroed Work-record storage. **Negative:** companion/H DEVICE_LOST; all three
+  fresh cubes timeout. Opening cursors9/9/9 and destroys11..16 are consumed.
+  Logs `observe-20261007_220513/`; restored#19/all services, released22:44.
 - Dota300-304 has 2049 executed buffer copies; Honeykrisp lowers buffer copies
   to libagx compute kernels. Largest recorded copy is 2249100 bytes. No explicit
   dispatch does not imply no firmware compute. Image uploads may use graphics
@@ -172,12 +174,12 @@ packed pointer/status value; low bits must be retained in the capture.
 | C8 | Capture5 full raw audit plus finite logs / root lifetimes | Valid concurrent C/R progress; zero host records normal; teardown and registration ownership coverage gaps |
 | C9 | RO #17+213 exact-path no-submit probe, first slot | INVALID FEX/capture: external Sniper path unavailable, layer absent in nominal native layer modes; production restored |
 | C10 | Explicit-layer probe, external volume RO + tmpfs overlay | All six native/FEX modes rc0; four captures converted, one 64 KiB fill each, zero submissions |
-| C11 | Six captured global control-1b records, default-off kernel experiment | Build passed; no hardware result |
+| C11 | Six captured global control-1b records, native priority, zeroed record storage, policy3 | Negative RO#6: opening consumed9/9/9; H/companion DEVICE_LOST and all three fresh cubes timeout; restore#19 verified |
 | C12 | Dota unassisted deferred trim300-304 under FEX/Sniper, RO17+213 | 924MiB complete trace converts; five presents, no explicit compute; original Steam exited before launch, so not matched clean/hang control |
 | C13 | Parser on actual Dota trace, singleton objects + trim reconstruction | Pass: six frame submits,2554 transfers, no unobserved CBs; setup submits counted separately |
 | C14 | Capture 6 raw audit: control attribution, snapshots, initial context | 8901 records parse; no H destroy in observed 147 s; H context prefix matches ours; op20 belongs C |
 | C15 | Dota transfer ranking and Honeykrisp source association | 2049 executed buffer copies use libagx compute; largest 2249100 bytes; no duration/hang attribution |
-| C16 | Default-off per-VM compute pool/support/slot experiment | WIP b9d449; separate GCC build running; no hardware result |
+| C16 | Default-off per-VM compute pool/support/slot experiment | WIP b9d449; separate GCC build passed, frozen76e04c3 (#1); no hardware result |
 
 ## Valid recovery retry (#17 source + 213, 21:13–21:17)
 
@@ -713,3 +715,38 @@ the original Steam host script is copied into artifacts for exact review.
 Bash syntax passes; WIP f9c2e37. Dota retains liveness gate and frames1800-1804.
 Conditional initialization request after a negative op1b:
 `capture7-initialization-request.md`; no request to displace the current lease.
+
+
+## Op1b result and next lease (22:47)
+
+Valid read-only candidate#6 (production17+213 e6f72e2) has debug_ctx=1,
+control_1b=1, compute_save_slot=1, compute_preempt=1, timeout_policy=3.
+Opening control retires at0.923532s with9/9/9 cursors. Baseline cube rc0;
+Honeykrisp c0828f3fac / Apple M4 validated. Companion reaches6129 frames by10s,
+then6136 frames by20s and DEVICE_LOST at20.2s after H starts at22:41:41.
+H submission succeeds and wait reports DEVICE_LOST at20s, subsequent submit
+and wait-idle also lost. During15, after35 and post-client-exit cubes allrc124.
+These are phase labels: after35 starts later if the earlier cube uses its20s
+timeout; future harness records actual cube-start times to avoid ambiguity.
+
+The diagnostic pointer fix now gives real support/record values. H queue
+0xfffffc2200310000 has native2/2 priority, runtime0; companion queue
+0xfffffc2200378000 runtime0xbb25c5 stays flat. Both name shared support
+0xfffffc20c05e8000/slot2/directory0x7002cc0000 and cursor560/pages8192.
+Observed records remain zero, unlike Metal's evolving records after scheduling.
+Consumed destroys reach11..16; none restores rendering. At154.005s uptime
+another kind4 event records read fault0x10000858000, vm_slot3. Keep this later
+fault distinct from the original compute stall and do not assert causality.
+Services were active at the pre-fault sample; active alone is not frame progress.
+
+Complete logs copied before reset. Default production#19 restored, all three
+desktop/input services verified, lease released22:44. The default-off combined
+six-record setup is negative; no claim about unknown1b semantics or timing.
+
+Later Dota runner34830 is queued now; claude-air's short reference slot finished
+and claude-kernel holds a short rc6 gate. It stages1800-1804, retains initial
+Steam pipe input and liveness gate, low video input in the overlay, scene logs
+and300s game deadline. No second concurrent Codex waiter. Private-pool build
+passed separately, frozen `m4-linux/bits-7.3-213-prod17-76e04c3/`. Its later
+arm uses policy2+native priority+record storage, explicit control1b=0 to keep
+pool ownership distinct and avoid assuming early context destroy evicts H.

@@ -756,10 +756,34 @@ impl Parameters {
         u32_at(&mut out, 0x6c, merge_y as u32);
         u64_at(&mut out, 0x78, tiles_x * tiles_y);
         out[0x80..0x680].copy_from_slice(&registers);
+        // Four (32-bit program offset, descriptor) pairs. This driver has
+        // always written constants taken from one Metal process's heap, so in
+        // the client VM they point at arbitrary USC code. Experiment
+        // (pair_source): point pairs 3/4 (and 2) at this render's own helper
+        // programs, with Metal's descriptor words.
+        let usc = |pipeline: u64| pipeline & 0xffff_ffff;
+        let (pair2, pair3, pair4) = match crate::module_parameters::pair_source.value() {
+            1 => (
+                0xa0001de1800,
+                (0x8c0202 << 32) | usc(self.partial_load_pipeline),
+                (0x4202 << 32) | usc(self.partial_store_pipeline),
+            ),
+            2 => (
+                (0x4200 << 32) | usc(self.store_pipeline),
+                (0x8c0202 << 32) | usc(self.partial_load_pipeline),
+                (0x4202 << 32) | usc(self.partial_store_pipeline),
+            ),
+            3 => (
+                0xa0001de1800,
+                (0x8c0202 << 32) | usc(self.load_pipeline),
+                (0x4202 << 32) | usc(self.store_pipeline),
+            ),
+            _ => (0xa0001de1800, 0x8c020200029800, 0x220200039520),
+        };
         u64_at(&mut out, 0x680, 0x8c020001dddc00);
-        u64_at(&mut out, 0x688, 0xa0001de1800);
-        u64_at(&mut out, 0x690, 0x8c020200029800);
-        u64_at(&mut out, 0x698, 0x220200039520);
+        u64_at(&mut out, 0x688, pair2);
+        u64_at(&mut out, 0x690, pair3);
+        u64_at(&mut out, 0x698, pair4);
         u64_at(&mut out, 0x780, a.fragment_register_alias);
         out[0x788..0x78a].copy_from_slice(&(0x51u16).to_le_bytes());
         out[0x78a..0x78c].copy_from_slice(&((0x51 * 0xc) as u16).to_le_bytes());

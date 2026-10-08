@@ -106,7 +106,23 @@ for t in $tests; do
               chown -R nsheth:nsheth "$R/driver-vatrace" "$R/dota-inner.sh"
               grep -o 'vatrace)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
           fi
-          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          if [ "$variant" = exportid ] || [ "$variant" = exporthash ]; then
+              # Export driver (a8c33e3-based, identity ring; af3ac8a/000e1ef/c8392e4). exportid dumps
+              # all SPIR-V; exporthash dumps NIR/asm/bin for the hashes in extra/export-hashes.
+              hashes=$(cat "$observe/extra/export-hashes" 2>/dev/null | tr -d ' \n')
+              arm_id='exportid) export VK_DRIVER_FILES="$root/driver-export/icd.json" HK_APPLE9_DUMP_MODE=0 MESA_SPIRV_DUMP_PATH="$out/spirv";; '
+              arm_hash="exporthash) export VK_DRIVER_FILES=\"\$root/driver-export/icd.json\" HK_APPLE9_DUMP_MODE=0 HK_APPLE9_EXPORT_GRAPHICS=$hashes HK_APPLE9_DUMP_HASH=${hashes%%,*} AGX_APPLE9_ASM_DIR=\"\$out/dump\" HK_APPLE9_DUMP_DIR=\"\$out/dump\" MESA_SPIRV_DUMP_PATH=\"\$out/spirv\";; "
+              grep -qF 'exportid)' "$R/dota-inner.sh" || python3 - "$R/dota-inner.sh" "$arm_id$arm_hash" <<'PY'
+import sys
+p,arms=sys.argv[1],sys.argv[2]
+s=open(p).read(); needle='case "$variant" in '
+assert s.count(needle)==1
+open(p,'w').write(s.replace(needle,needle+arms))
+PY
+              chown nsheth:nsheth "$R/dota-inner.sh"
+              grep -oE '(exportid|exporthash)\)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
+          fi
+          case "$variant" in mode0) drv=$R/driver ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"

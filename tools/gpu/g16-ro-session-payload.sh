@@ -273,27 +273,28 @@ BURST
         kill $partner 2>/dev/null; wait $partner 2>/dev/null
         f="$observe/$t.log"; [ "$t" = rp-mburst ] && f="$observe/$t-guest.log"
         echo "$t: attempts=$(grep -c '^== attempt' "$f" 2>/dev/null) pass=$(grep -c '^PASS' "$f" 2>/dev/null) stall=$(grep -c '^STALL' "$f" 2>/dev/null) fail=$(grep -c 'rc=' "$f" 2>/dev/null) first-big=$(grep -m1 -o 'first swapchain pass.*' "$f")" >> "$observe/verdicts.txt" ;;
-    rp-sburst|rp-msburst)
+    rp-sburst|rp-msburst|rp-1burst|rp-m1burst)
         # Split-submit burst (claude-compiler cadence): every 3rd frame, CLEAR + 2 LOAD 1280x720 passes into a freshly
         # discarded intermediate, each its own vkQueueSubmit, plus a 1920x1080 swapchain pass; two partner clients
         # (1280x720 fifo + 1920x1080 immediate). rp-msburst runs the burst process as x86/FEX in m4-muvm.
         install -o nsheth -g nsheth -m 755 "$observe/extra/render_present.x86" /home/nsheth/.cache/render_present.x86
-        args="--width 1280 --height 720 --swap-w 1920 --swap-h 1080 --warmup-small 10 --burst-every 3 --split-burst --offscreen 3 --passes 1 --inflight 2 --mode immediate --seconds 200 --timeout-ms 4000"
+        args="--width 1280 --height 720 --swap-w 1920 --swap-h 1080 --warmup-small 10 --burst-every 3 --split-burst --offscreen 3 --passes 1 --inflight 2 --mode immediate --seconds 120 --timeout-ms 4000"
+        case "$t" in rp-1burst|rp-m1burst) args=${args/--split-burst /} ;; esac
         for pp in 1 2; do
-            pargs="--passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 260"; [ $pp = 2 ] && pargs="--width 1920 --height 1080 --passes 2 --offscreen 2 --inflight 2 --mode immediate --seconds 260"
+            pargs="--passes 3 --offscreen 0 --inflight 2 --mode fifo --seconds 170"; [ $pp = 2 ] && pargs="--width 1920 --height 1080 --passes 2 --offscreen 2 --inflight 2 --mode immediate --seconds 170"
             runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; export HK_EXPERIMENTAL_APPLE9=1; exec "$0" $1' "$rp" "$pargs" > "$observe/$t-partner$pp.log" 2>&1 &
             eval partner$pp=\$!
         done
         sleep 3
-        if [ "$t" = rp-sburst ]; then
-            run_user $t 260 $rp $args
+        if [ "$t" = rp-sburst ] || [ "$t" = rp-1burst ]; then
+            run_user $t 180 $rp $args
         else
             printf '#!/bin/bash\n/home/nsheth/.cache/render_present.x86 %s > /home/nsheth/.cache/%s-guest.log 2>&1\n' "$args" "$t" > /home/nsheth/.cache/$t.sh; chown nsheth:nsheth /home/nsheth/.cache/$t.sh; chmod 755 /home/nsheth/.cache/$t.sh
-            run_user $t 280 m4-muvm /bin/bash /home/nsheth/.cache/$t.sh
+            run_user $t 200 m4-muvm /bin/bash /home/nsheth/.cache/$t.sh
             cp /home/nsheth/.cache/$t-guest.log "$observe/$t-guest.log" 2>/dev/null
         fi
         kill $partner1 $partner2 2>/dev/null; wait $partner1 $partner2 2>/dev/null
-        f="$observe/$t.log"; [ "$t" = rp-msburst ] && f="$observe/$t-guest.log"
+        f="$observe/$t.log"; case "$t" in rp-msburst|rp-m1burst) f="$observe/$t-guest.log" ;; esac
         echo "$t: $(grep -E 'PASS|STALL' "$f" | tail -1) partners: $(grep -hE 'PASS|STALL|frames=' "$observe/$t-partner1.log" "$observe/$t-partner2.log" | tail -2 | tr '\n' ' ')" >> "$observe/verdicts.txt" ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;

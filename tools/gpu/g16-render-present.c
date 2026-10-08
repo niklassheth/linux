@@ -389,6 +389,7 @@ int main(int argc, char **argv)
          }
          bursts++;
       }
+      if (!split_burst && burst_every) { off_first = true; bursts++; } /* fresh intermediate, one submit */
       for (unsigned p = 0; p < (split_burst ? 0 : offscreen); ++p) {
          barrier(cb, off, off_first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,

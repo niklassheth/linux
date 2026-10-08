@@ -89,7 +89,7 @@ if [ "$mode" = recovery ]; then
     fi
 fi
 if [ "$mode" = trigger ]; then
-    experiment_args="$experiment_args asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2"
+    experiment_args="$experiment_args asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2 asahi_m4.compute_private_pool=0"
 fi
 boot_attempted=1
 timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
@@ -103,7 +103,7 @@ required_arguments=(asahi_m4.debug_ctx=1)
 if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=$recovery_policy asahi_m4.compute_preempt=1); fi
 if [ "$control_1b" = 1 ]; then required_arguments+=(asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1); fi
 if [ "$private_pool" = 1 ]; then required_arguments+=(asahi_m4.compute_private_pool=1 asahi_m4.control_1b=0 asahi_m4.compute_save_slot=1); fi
-if [ "$mode" = trigger ]; then required_arguments+=(asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2); fi
+if [ "$mode" = trigger ]; then required_arguments+=(asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2 asahi_m4.compute_private_pool=0); fi
 for required_argument in "${required_arguments[@]}"; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done

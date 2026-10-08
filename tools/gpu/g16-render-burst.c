@@ -8,7 +8,9 @@
  *
  *   render_burst [--passes N] [--width W --height H] [--format srgb|unorm]
  *                [--clear] [--blend 0|1] [--inflight K] [--submits S]
- *                [--work R] [--timeout-ms T] [--seconds S]
+ *                [--work R] [--timeout-ms T] [--seconds S] [--instances N]
+ * --instances N draws N overlapping full-screen triangles per pass, so tile
+ * lists overflow the tiler heap and the firmware must do partial renders.
  */
 #include <vulkan/vulkan.h>
 #include <stdio.h>
@@ -34,7 +36,7 @@ static double now(void)
 int main(int argc, char **argv)
 {
    unsigned passes = 8, width = 1280, height = 720, inflight = 4, submits = 100000;
-   unsigned work = 0, timeout_ms = 5000, seconds = 60;
+   unsigned work = 0, timeout_ms = 5000, seconds = 60, instances = 1;
    bool clear = false, blend = true, srgb = true;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -48,6 +50,7 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--instances") && i + 1 < argc) instances = atoi(argv[++i]);
       else { fprintf(stderr, "bad arg %s\n", argv[i]); return 64; }
    }
    if (inflight < 1) inflight = 1;
@@ -144,9 +147,9 @@ int main(int argc, char **argv)
    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
    for (unsigned f = 0; f < inflight; ++f) CHECK(vkCreateFence(dev, &fci, NULL, &fences[f]));
 
-   printf("passes=%u size=%ux%u format=%s load=%s blend=%d inflight=%u work=%u seconds=%u\n",
+   printf("passes=%u size=%ux%u format=%s load=%s blend=%d inflight=%u work=%u seconds=%u instances=%u\n",
           passes, width, height, srgb ? "B8G8R8A8_SRGB" : "R8G8B8A8_UNORM", clear ? "clear" : "load",
-          blend, inflight, work, seconds);
+          blend, inflight, work, seconds, instances);
    fflush(stdout);
    double t0 = now(), last = t0;
    unsigned long total_passes = 0;
@@ -192,7 +195,7 @@ int main(int argc, char **argv)
          vkCmdSetViewport(cb, 0, 1, &vpt); vkCmdSetScissor(cb, 0, 1, &sc);
          struct pc pcv = { p, work, k };
          vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcv), &pcv);
-         vkCmdDraw(cb, 3, 1, 0, 0);
+         vkCmdDraw(cb, 3, instances, 0, 0);
          vkCmdEndRendering(cb);
       }
       CHECK(vkEndCommandBuffer(cb));

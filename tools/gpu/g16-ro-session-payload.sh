@@ -119,6 +119,8 @@ for t in $tests; do
     rb-c) run_user rb-c 90 $rb --passes 32 --inflight 2 --seconds 60 ;;
     rb-clear) run_user rb-clear 90 $rb --passes 8 --inflight 4 --clear --seconds 60 ;;
     rb-small) run_user rb-small 90 $rb --passes 8 --inflight 4 --width 64 --height 64 --seconds 60 ;;
+    rb-ovf) run_user rb-ovf 90 $rb --passes 4 --inflight 3 --instances 4000 --seconds 60 ;;
+    rb-ovf2) run_user rb-ovf2 90 $rb --passes 1 --inflight 6 --instances 20000 --seconds 60 ;;
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;

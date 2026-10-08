@@ -930,3 +930,28 @@ bytes+0xe/+0x2f without enabling record storage or changing firmware inputs.
 GCC build PASS; artifact m4-linux/bits-7.3-213-prod20-2758ebc. This diagnostic
 limit now selects up to four COMPUTE flights, rather than the firstfour
 flights of any type. No valid verdict yet for the repeat.
+
+
+## Fresh-thread checkpoint (2026-10-08 00:16 local)
+
+Read the complete handoff, Dota history and recovery/capture reports. Capture7
+currently contains the prepared tracer/workload/session only: no trace or run
+result exists to compare yet. Do not call its initialization comparison done.
+Recovered the predecessor repeat's full results under the codex-dota lease:
+`rw-20261007_233700/dota-trigger-rw-20261007_233700/`. Watcher reaches
+300.711 s, no fault, 4649 valid owners, correct pinned a8c33e3 library. Its
+kernel log has no timeout/hang/fault lines. This is one clean observation,
+not proof that the render trigger is gone. Earlier console did not include
+local copied logs or restoration; current production20/services were verified
+when the new lease started.
+
+New unchanged pinned rw control is running in `rw-20261008_001334/`
+(on frozen production20+213 UTS#5 2758ebc). No verdict yet. Source topic
+`apple9/dota-draw-export` in the existing clean identity worktree
+`tmp/cs2-memory-20261005`, WIP af3ac8a6180, adds default-off selected graphics
+NIR/binary exports, packed compiler assembly per binary part, helper exports
+and draw/attachment/compression metadata. Host Vulkan build passes; aarch64
+build is in progress. This diagnostic driver is for a separate export run,
+not the unchanged control. Original ring contains identities/addresses only;
+it has no SPIR-V or shader binary payload. Existing compiler cache audit had
+no matched ring shaders, so unverified cache candidates will not be relabelled.

@@ -156,6 +156,10 @@ kernel::module_platform_driver! {
             default: 400,
             description: "Debug: at most this many renders are dumped per boot",
         },
+        unmap_full_inval: u32 {
+            default: 0,
+            description: "Experiment: on every VM bind and unbind, 1 also invalidates each bound context's whole ASID (not only the changed pages); 2 additionally invalidates all EL1 translations (tlbi vmalle1os). Both complete with dsb sy before the ioctl returns",
+        },
         lifecycle: u32 {
             default: 0,
             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",

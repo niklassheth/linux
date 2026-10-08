@@ -19,6 +19,13 @@ pub(crate) fn tlbi_asid(asid: u8) {
     }
 }
 
+/// Experiment (unmap_full_inval=2): invalidate every EL1 translation in the
+/// outer-shareable domain, CPU and GPU, all ASIDs.
+pub(crate) fn tlbi_all() {
+    // SAFETY: These instructions only discard cached translations.
+    unsafe { core::arch::asm!(".arch armv8.4-a", "tlbi vmalle1os", options(nostack, preserves_flags)) };
+}
+
 /// Invalidate only these GPU virtual pages, including global firmware mappings.
 /// VA operands use 4 KiB units even though the GPU page size is 16 KiB.
 /// The caller publishes PTE writes before this and completes the batch after it.

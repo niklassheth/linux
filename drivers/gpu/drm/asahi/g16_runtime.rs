@@ -1522,11 +1522,20 @@ impl Bootstrap {
             client.low.invalidate(Some(0));
             client.high.invalidate(Some(0));
         }
+        let full = crate::module_parameters::unmap_full_inval.value();
         for (index, roots) in self.context_roots.iter().enumerate().skip(1) {
             if roots.is_some_and(|r| r.low == root) {
                 client.low.invalidate(Some(index as u8));
                 client.high.invalidate(Some(index as u8));
+                if full != 0 {
+                    // Experiment: drop every cached translation of the
+                    // context, not just the changed pages.
+                    crate::mem::tlbi_asid(index as u8);
+                }
             }
+        }
+        if full >= 2 {
+            crate::mem::tlbi_all();
         }
         crate::mem::sync();
         client.low.clear_invalidations();

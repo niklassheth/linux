@@ -750,3 +750,37 @@ and300s game deadline. No second concurrent Codex waiter. Private-pool build
 passed separately, frozen `m4-linux/bits-7.3-213-prod17-76e04c3/`. Its later
 arm uses policy2+native priority+record storage, explicit control1b=0 to keep
 pool ownership distinct and avoid assuming early context destroy evicts H.
+
+
+## Trigger priority and later capture (23:05)
+
+Trigger investigation now receives at least equal effort to containment.
+The later-frame attempt observe-20261007_224529 ran the exact Steam/FEX/Sniper
+path with the original Steam VM still active at launch, low video settings,
+and explicit frames1800-1804. Candidate#4 was read-only. It reached a real
+GPU timeout at157.659s uptime, before frame1800, and produced no gfxr file.
+Dota then emitted mapping EINVAL failures and exited139. This is a separate
+render-stall signature: oldest Work0xfffffc2200a18000/context9/render=true
+had its TA stamp satisfied, fragment actual0x1ea00/want0x1eb00, and both
+incoming dependencies (render0x1ea00, compute0x14400) satisfied. The other
+pending Works were renders, including KWin context2. No pending compute
+Work appeared in that dump. Do not infer a compute infinite loop from it.
+The final context9 VM rebind was147.649893s, about10s before the timeout;
+logs show repeated reuse between Dota and Steam/browser roots. This is a
+correlation to investigate, not proof of an unsafe context switch.
+Production#20 restored, desktop/headless/input services active, lease released.
+
+The first pinned a8c33e3 mode0 control observe-20261007_225852 failed before
+Vulkan: Sniper runtime copying filled the3.1GiB /run tmpfs at23:01 and its
+launcher exited1. No loaded driver or Dota launch, so it counts as invalid,
+not clean and not a GPU hang. Stopped the watcher to end the invalid arm.
+Move temporary overlay uppers/workdirs to /tmp (7.7GiB tmpfs) for the retry;
+retain the2GiB host-memory guard. Persistent Btrfs remains read-only.
+
+Found a shader-identity join gap: old hang-flight lines lacked stream=,
+which shader-ring.py requires. Commit c3d636320bbeb stores original VDM/CDM
+stream on each Flight and prints stream plus CDM end in timeout reports,
+without UAPI changes or submission behavior changes. A separate in-tree
+GCC build is running; its private-pool knob will stay explicitly disabled
+for trigger controls. Frozen runtime or save records do not alone prove
+non-execution: capture6 indicates runtime updates at lane switches.

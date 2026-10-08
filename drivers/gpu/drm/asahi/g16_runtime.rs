@@ -2270,7 +2270,8 @@ impl Bootstrap {
     /// Work carries. 1 keeps all (default). 0 drops all, which is unsafe and
     /// for diagnosis only. 2 drops items on this queue's own compute lane,
     /// which runs in order anyway. 3 drops items whose stamp the CPU already
-    /// sees reached at submit time.
+    /// sees reached at submit time. 4 resolves all of them in the kernel and
+    /// submits the Work without items once its inputs are complete.
     fn filter_compute_dependencies(
         &self,
         queue: &FirmwareQueues,
@@ -2286,6 +2287,19 @@ impl Bootstrap {
                 0 => true,
                 2 => own_lane == Some(dep.address),
                 3 => g16_stamp::reached(fw.read_u32(dep.address)?, dep.value),
+                // Resolve every dependency in the kernel: the queue's own
+                // compute lane is ordered by the ring; any other stamp must
+                // already be reached, otherwise hold the Work back (EBUSY)
+                // until a completion wakes the submission worker. The Work
+                // then reaches the firmware with no dependency items.
+                4 => {
+                    if own_lane != Some(dep.address)
+                        && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value)
+                    {
+                        return Err(EBUSY);
+                    }
+                    true
+                }
                 _ => false,
             };
             if !drop {

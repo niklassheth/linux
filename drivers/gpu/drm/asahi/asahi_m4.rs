@@ -166,7 +166,7 @@ kernel::module_platform_driver! {
         },
         compute_deps: u32 {
             default: 1,
-            description: "Experiment: firmware dependency items on compute Works. 1 keeps all; 0 drops all (unsafe, diagnosis only); 2 drops items on the queue's own compute lane; 3 drops items already reached at submit",
+            description: "Experiment: firmware dependency items on compute Works. 1 keeps all; 0 drops all (unsafe, diagnosis only); 2 drops items on the queue's own compute lane; 3 drops items already reached at submit; 4 resolves dependencies in the kernel (waits for other queues' stamps, then submits with no items)",
         },
         context_handoff: u32 {
             default: 0,

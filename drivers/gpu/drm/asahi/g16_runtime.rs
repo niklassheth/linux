@@ -151,6 +151,7 @@ pub(super) struct Flight {
     /// Original userspace stream: join timeout Work identities to Mesa diagnostics.
     stream: u64,
     stream_end: u64,
+    diagnostic_sampled: Option<Instant<Monotonic>>,
     started: Instant<Monotonic>,
     stamps: [Option<Stamp>; 2],
     driver_stamps: [Option<Stamp>; 2],
@@ -1290,6 +1291,26 @@ impl Bootstrap {
             return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
         }
         let watchdog = i64::from(crate::module_parameters::watchdog_ms.value()).max(100);
+        // Reporting only: collect several switch-time samples before the
+        // default watchdog fails clients. This does not extend its deadline,
+        // change firmware state or interpret frozen counters as non-execution.
+        if crate::module_parameters::debug_ctx.value() != 0 {
+            for index in 0..self.flights.len().min(4) {
+                let flight = &self.flights[index];
+                if flight.render.is_some()
+                    || flight.started.elapsed().as_millis() < watchdog / 2
+                    || flight.diagnostic_sampled.as_ref().is_some_and(|last| last.elapsed().as_millis() < 1000)
+                {
+                    continue;
+                }
+                self.flights[index].diagnostic_sampled = Some(Instant::now());
+                let flight = &self.flights[index];
+                dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render=false stream={:#x} stream_end={:#x} sample=pretimeout\n",
+                         flight.id, flight.context, flight.started.elapsed().as_millis(),
+                         flight.stream, flight.stream_end);
+                let _ = self.dump_compute_state(flight);
+            }
+        }
         if let Some(index) = self
             .flights
             .iter()
@@ -2027,6 +2048,7 @@ impl Bootstrap {
                 context: a.context_id as u32,
                 stream: params.encoder,
                 stream_end: 0,
+                diagnostic_sampled: None,
                 started: Instant::now(),
                 notifier_count,
                 stamps_seen: None,
@@ -2440,6 +2462,7 @@ impl Bootstrap {
                 context: a.context,
                 stream: params.cdm,
                 stream_end: params.cdm_end,
+                diagnostic_sampled: None,
                 started: Instant::now(),
                 notifier_count: None,
                 stamps_seen: None,

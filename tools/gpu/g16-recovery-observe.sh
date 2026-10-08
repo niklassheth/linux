@@ -55,6 +55,7 @@ cc -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -o gpu_contend gpu_contend.c -lvulkan 
 cc -O2 -o gpu_fault_test gpu_fault_test.c -lvulkan
 cube() {
     local name=$1 rc=0
+    printf '%s %s\n' "$name" "$(date -Is)" >> "$observe/cube-start-times.txt"
     runuser -u nsheth -- env G16_CUBE_LOG="$observe/$name.log" bash -c '
         source /home/nsheth/.local/state/m4/session.env
         HK_EXPERIMENTAL_APPLE9=1 timeout 20 vkcube --c 120 > "$G16_CUBE_LOG" 2>&1

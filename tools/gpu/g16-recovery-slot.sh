@@ -18,8 +18,15 @@ lease=$workspace/tools/lease/lease.sh
 owner=codex-dota
 mode=${G16_SLOT_MODE:-recovery}
 control_1b=${G16_CONTROL_1B:-0}
+private_pool=${G16_COMPUTE_PRIVATE_POOL:-0}
 case "$control_1b" in 0|1) ;; *) exit 64 ;; esac
+case "$private_pool" in 0|1) ;; *) exit 64 ;; esac
 case "$mode" in recovery|capture|dota) ;; *) exit 64 ;; esac
+if [ "$mode" != recovery ] && { [ "$control_1b" = 1 ] || [ "$private_pool" = 1 ]; }; then exit 64; fi
+# Keep the ownership arm separate from the six-record global setup arm.
+if [ "$control_1b" = 1 ] && [ "$private_pool" = 1 ]; then exit 64; fi
+recovery_policy=3
+if [ "$private_pool" = 1 ]; then recovery_policy=2; fi
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$workspace/artifacts/dota-compute-stall-20261007/observe-$stamp
 remote_output=/tmp/codex-dota-$stamp
@@ -70,11 +77,15 @@ readonly_args='ro systemd.mask=systemd-remount-fs.service systemd.mask=home.moun
 # priority enables teardown even when it has not enabled compute time-slicing.
 experiment_args="asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1 $readonly_args"
 if [ "$mode" = recovery ]; then
-    experiment_args="$experiment_args asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1"
+    experiment_args="$experiment_args asahi_m4.timeout_policy=$recovery_policy asahi_m4.compute_preempt=1"
     if [ "$control_1b" = 1 ]; then
         # Valid zeroed record storage is paired with the new global setup,
         # matching the captured firmware-output record rather than a null VA.
         experiment_args="$experiment_args asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1"
+    fi
+    if [ "$private_pool" = 1 ]; then
+        # Quarantine retains H without assuming destroy_context aborts it.
+        experiment_args="$experiment_args asahi_m4.compute_private_pool=1 asahi_m4.control_1b=0 asahi_m4.compute_save_slot=1"
     fi
 fi
 boot_attempted=1
@@ -86,8 +97,9 @@ loaded_cmdline=$(ssh "${ssh_options[@]}" "$mini" 'cat /proc/cmdline')
 printf 'expected: %s\nloaded: %s\ncmdline: %s\n' "$expected_uts" "$loaded_uts" "$loaded_cmdline" > "$local_output/loaded-kernel.txt"
 [ -n "$expected_uts" ] && [ "$loaded_uts" = "$expected_uts" ] || { echo 'wrong kernel booted; see loaded-kernel.txt' >&2; exit 1; }
 required_arguments=(asahi_m4.debug_ctx=1)
-if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=3 asahi_m4.compute_preempt=1); fi
+if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=$recovery_policy asahi_m4.compute_preempt=1); fi
 if [ "$control_1b" = 1 ]; then required_arguments+=(asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1); fi
+if [ "$private_pool" = 1 ]; then required_arguments+=(asahi_m4.compute_private_pool=1 asahi_m4.control_1b=0 asahi_m4.compute_save_slot=1); fi
 for required_argument in "${required_arguments[@]}"; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done

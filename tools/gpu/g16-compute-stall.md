@@ -1,13 +1,41 @@
 # Dota compute stall / G16 compute time-slicing — Codex (2026-10-07)
 
-Owner: `codex-dota`. No hardware lease held at this checkpoint. Recovery
-and the first short probe have restored production #17 and released the lease.
-A corrected probe is queued; kernel/driver/air mini users may interleave.
+Owner: `codex-dota`. No hardware lease held at the 22:18 checkpoint.
+The op-0x1b recovery runner is queued behind claude-driver; no device access
+has begun. Earlier blocks restored the then-current production kernel (#19
+at the last release). Kernel/driver/air mini users may interleave.
 Private topic branch and worktree:
 `bits/213-g16-compute-timeslice` in `tmp/g16-compute-timeslice`, independent of
 claude-driver's integration and recovery work. Never push.
 
-## Status / manager handoff (21:56 local)
+## Current checkpoint (22:18 local)
+
+- Capture 6 audit is complete: [capture6-verified.md](capture6-verified.md),
+  `capture6-audit.json`, and `capture6-initial-context.json`. No destroy names H
+  during the observed 147 s after SIGTERM; C/R destroys do match their objects.
+  H retains changing state while C/R progress. Lane switching fits the evidence;
+  firmware write sites and the guest process's final exit are not observed.
+- Control82's op20 VA maps to C's operand-table physical page through ASID7.
+  It is not a registration for H. H's support/operand/save mappings are private,
+  despite identical virtual addresses. A per-process op20 is not established
+  as a prerequisite for H's coexistence with C/R.
+- H's initial queue-context first 64 bytes exactly match our initializer. Its
+  static native-priority queue profile also matches. No missing quantum or
+  lane-enable field has been identified in those initial bytes.
+- Six historical op1b records are present before the arm cursor; none is newly
+  published by these clients. The default-off six-record Linux experiment is
+  queued using frozen #6, RO production17+213, native priority, policy3 and
+  valid zeroed Work-record storage. This is a combined setup test, not a fix.
+- Dota300-304 has 2049 executed buffer copies; Honeykrisp lowers buffer copies
+  to libagx compute kernels. Largest recorded copy is 2249100 bytes. No explicit
+  dispatch does not imply no firmware compute. Image uploads may use graphics
+  for compressed G16G layouts, so they cannot all be classified as compute.
+  Ranking/dependencies: `dota-transfer-ranking.json`; size is not GPU duration.
+- Next fresh Dota lease stages explicit frames 1800-1804, a 300 s deadline and
+  scene console logs, retaining original Steam-unit liveness as a validity gate.
+  The op1b runner must finish restoration/release before that runner is queued.
+
+## Prior status / manager handoff (21:56 local; historical)
 
 - Valid read-only production #17 + rebased 213 recovery retry is **negative**:
   teardown policy 3 plus native compute priority does not recover other clients.
@@ -143,6 +171,8 @@ packed pointer/status value; low bits must be retained in the capture.
 | C11 | Six captured global control-1b records, default-off kernel experiment | Build passed; no hardware result |
 | C12 | Dota unassisted deferred trim300-304 under FEX/Sniper, RO17+213 | 924MiB complete trace converts; five presents, no explicit compute; original Steam exited before launch, so not matched clean/hang control |
 | C13 | Parser on actual Dota trace, singleton objects + trim reconstruction | Pass: six frame submits,2554 transfers, no unobserved CBs; setup submits counted separately |
+| C14 | Capture 6 raw audit: control attribution, snapshots, initial context | 8901 records parse; no H destroy in observed 147 s; H context prefix matches ours; op20 belongs C |
+| C15 | Dota transfer ranking and Honeykrisp source association | 2049 executed buffer copies use libagx compute; largest 2249100 bytes; no duration/hang attribution |
 
 ## Valid recovery retry (#17 source + 213, 21:13–21:17)
 

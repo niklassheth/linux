@@ -50,6 +50,7 @@ sha256sum /usr/lib64/libvulkan_asahi.so /home/nsheth/g16-games/dota-shader-ident
 stalled() { dmesg > "$observe/.dmesg-probe" 2>/dev/null; grep -qE "sample=pretimeout|timeout without retirement|G16: hang" "$observe/.dmesg-probe"; }
 finish_stall() {
     echo "STALL in $1 at $(date +%s.%N)" >> "$observe/verdicts.txt"
+    ps -eo pid,ppid,user,comm,args --sort=pid > "$observe/ps-at-stall.txt" 2>&1
     sleep 25
     dmesg > "$observe/kernel.log"
     journalctl -k -b --no-pager > "$observe/kernel-journal.log" 2>&1
@@ -184,5 +185,6 @@ PY
     esac
 done
 echo "NO-STALL all tests" >> "$observe/verdicts.txt"
+ps -eo pid,ppid,user,comm,args --sort=pid > "$observe/ps-at-end.txt" 2>&1
 dmesg > "$observe/kernel.log"
 journalctl -k -b --no-pager > "$observe/kernel-journal.log" 2>&1

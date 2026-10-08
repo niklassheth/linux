@@ -157,8 +157,12 @@ kernel::module_platform_driver! {
             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
         },
         context_sticky: u32 {
+            default: 1,
+            description: "1 keeps firmware context slots bound to their VM: a VM reuses its slot, new VMs take never-bound slots, then the least recently used idle slot. 0 rebinds the preferred slot (9 render, 1 compute) whenever it is idle (the #26 policy)",
+        },
+        context_handoff: u32 {
             default: 0,
-            description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+            description: "Experiment: 1 changes context slot page-table roots under the firmware handoff lock and warns if the firmware has the slot current",
         },
         completion_control: u32 {
             default: 4,

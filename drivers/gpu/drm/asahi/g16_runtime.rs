@@ -8,7 +8,7 @@ use kernel::io::Io;
 use super::Bootstrap;
 use crate::{g16_compute as compute, g16_fw, g16_render as render, g16_stamp, g16_vm};
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel::time::{Instant, Monotonic};
+use kernel::time::{Delta, Instant, Monotonic};
 use kernel::{
     c_str, io,
     prelude::*,
@@ -801,6 +801,11 @@ impl Bootstrap {
     /// firmware and driver stamps against their targets, and the newest
     /// firmware receive-ring entries.
     fn dump_hang_state(&self) -> Result {
+        if crate::module_parameters::debug_ctx.value() != 0 {
+            if let Ok(page) = self.handoff_page() {
+                self.log_handoff(&page, "hang", 0);
+            }
+        }
         if let Some(guard) = self._sgx.try_access() {
             let read64 = |offset: usize| -> u64 {
                 let lo = guard.try_read32(offset).unwrap_or(0xdeadbeef);
@@ -1336,6 +1341,101 @@ impl Bootstrap {
         Ok(lease)
     }
 
+    /// Map the firmware handoff page. Its layout matches the AGX firmware's
+    /// (the boot code writes the same AP magic): AP and firmware lock flags at
+    /// 0x10/0x11, the lock turn at 0x14 and the firmware's current user
+    /// context slot at 0x18.
+    fn handoff_page(&self) -> Result<io::mem::Mem> {
+        let res = self
+            .dev
+            .as_ref()
+            .of_node()
+            .ok_or(EINVAL)?
+            .reserved_mem_region_to_resource_byname(c_str!("handoff"))?;
+        // SAFETY: This is the loader's reserved handoff page, shared with the
+        // firmware by design; it is only accessed with volatile reads/writes.
+        unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WB.into()) }
+    }
+
+    /// Read (lock_ap, lock_fw, turn, cur_slot) from the handoff page, after
+    /// dropping any stale cached copy of its first line.
+    fn handoff_state(page: &io::mem::Mem) -> (u8, u8, u32, u32) {
+        // SAFETY: The handoff page is at least one 64-byte line long; the
+        // reads are volatile because firmware updates these words.
+        unsafe {
+            let base = page.ptr();
+            core::arch::asm!("dc civac, {addr}", "dsb osh", addr = in(reg) base);
+            (
+                base.add(0x10).read_volatile(),
+                base.add(0x11).read_volatile(),
+                base.add(0x14).cast::<u32>().read_volatile(),
+                base.add(0x18).cast::<u32>().read_volatile(),
+            )
+        }
+    }
+
+    fn log_handoff(&self, page: &io::mem::Mem, what: &str, slot: usize) {
+        let (lock_ap, lock_fw, turn, cur_slot) = Self::handoff_state(page);
+        dev_info!(
+            self.dev.as_ref(),
+            "G16: handoff {} slot {}: cur_slot={:#x} lock_fw={} lock_ap={} turn={}\n",
+            what,
+            slot,
+            cur_slot,
+            lock_fw,
+            lock_ap,
+            turn
+        );
+    }
+
+    /// Take the AP side of the two-party handoff lock: announce intent, and
+    /// while firmware holds it and it is firmware's turn, back off until the
+    /// turn passes. Bounded so a silent firmware cannot wedge the driver.
+    fn handoff_lock(page: &io::mem::Mem) -> Result {
+        let base = page.ptr();
+        let start = Instant::<Monotonic>::now();
+        let write = |offset: usize, value: u8| {
+            // SAFETY: In-bounds byte of the handoff page.
+            unsafe {
+                base.add(offset).write_volatile(value);
+                core::arch::asm!("dc cvac, {addr}", "dsb osh", addr = in(reg) base);
+            }
+        };
+        write(0x10, 1);
+        loop {
+            let (_, lock_fw, turn, _) = Self::handoff_state(page);
+            if lock_fw == 0 {
+                return Ok(());
+            }
+            if turn != 0 {
+                write(0x10, 0);
+                while Self::handoff_state(page).2 != 0 {
+                    if start.elapsed() > Delta::from_millis(100) {
+                        return Err(ETIMEDOUT);
+                    }
+                    core::hint::spin_loop();
+                }
+                write(0x10, 1);
+            }
+            if start.elapsed() > Delta::from_millis(100) {
+                write(0x10, 0);
+                return Err(ETIMEDOUT);
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Release the AP side: give firmware the turn, then drop the flag.
+    fn handoff_unlock(page: &io::mem::Mem) {
+        let base = page.ptr();
+        // SAFETY: In-bounds words of the handoff page.
+        unsafe {
+            base.add(0x14).cast::<u32>().write_volatile(1);
+            base.add(0x10).write_volatile(0);
+            core::arch::asm!("dc cvac, {addr}", "dsb osh", addr = in(reg) base);
+        }
+    }
+
     fn set_context(&mut self, index: usize, roots: Option<g16_vm::Roots>) -> Result {
         let res = self
             .dev
@@ -1346,6 +1446,26 @@ impl Bootstrap {
         // SAFETY: The reserved table has 64 two-root slots. A slot is changed
         // only with no outstanding Work using it, under the runtime mutex.
         let table = unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WB.into())? };
+        // Experiment: change the roots only while firmware is locked out of
+        // the handoff, and report a slot firmware still has current.
+        let handoff = if crate::module_parameters::context_handoff.value() != 0 {
+            let page = self.handoff_page()?;
+            if let Err(e) = Self::handoff_lock(&page) {
+                dev_warn!(self.dev.as_ref(), "G16: handoff lock for slot {} timed out\n", index);
+                return Err(e);
+            }
+            let cur_slot = Self::handoff_state(&page).3;
+            if cur_slot as usize == index {
+                dev_warn!(
+                    self.dev.as_ref(),
+                    "G16: context {} changes roots while firmware has it current\n",
+                    index
+                );
+            }
+            Some(page)
+        } else {
+            None
+        };
         unsafe {
             let ptr = table.ptr().add(index * 16);
             ptr.cast::<u64>()
@@ -1366,6 +1486,9 @@ impl Bootstrap {
             }
         }
         crate::mem::sync();
+        if let Some(page) = &handoff {
+            Self::handoff_unlock(page);
+        }
         self.context_roots[index] = roots;
         Ok(())
     }
@@ -1399,10 +1522,13 @@ impl Bootstrap {
         let slot = existing
             .or_else(|| {
                 if sticky {
-                    // Debug: never rebind a slot while an unbound one exists.
-                    (1..64)
-                        .find(|&i| self.context_roots[i].is_none())
-                        .or_else(|| (1..64).find(|&i| self.context_users[i] == 0))
+                    // Keep slots bound to their VM: take a never-bound slot,
+                    // else evict the idle slot used least recently.
+                    (1..64).find(|&i| self.context_roots[i].is_none()).or_else(|| {
+                        (1..64)
+                            .filter(|&i| self.context_users[i] == 0)
+                            .min_by_key(|&i| self.context_used[i])
+                    })
                 } else if self.context_users[preferred] == 0 {
                     Some(preferred)
                 } else {
@@ -1412,8 +1538,14 @@ impl Bootstrap {
             .ok_or(EBUSY)?;
         if existing.is_none() {
             let previous = self.context_roots[slot].map(|r| r.low);
+            let debug = crate::module_parameters::debug_ctx.value() != 0;
+            if debug {
+                if let Ok(page) = self.handoff_page() {
+                    self.log_handoff(&page, "rebind", slot);
+                }
+            }
             self.set_context(slot, Some(roots))?;
-            if crate::module_parameters::debug_ctx.value() != 0 {
+            if debug {
                 pr_info!(
                     "G16: context {} bound to root {:#x} (previous {:#x})\n",
                     slot,
@@ -1422,6 +1554,8 @@ impl Bootstrap {
                 );
             }
         }
+        self.context_tick += 1;
+        self.context_used[slot] = self.context_tick;
         self.context_users[slot] += 1;
         Ok(slot as u32)
     }

@@ -229,6 +229,9 @@ pub(crate) struct Bootstrap {
     batch_works: usize,
     context_roots: [Option<crate::g16_vm::Roots>; 64],
     context_users: [u32; 64],
+    /// Last acquisition tick of each slot, for least-recently-used eviction.
+    context_used: [u64; 64],
+    context_tick: u64,
     pressure_reported: core::sync::atomic::AtomicU64,
     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
 }
@@ -698,6 +701,8 @@ impl Bootstrap {
             batch_works: 0,
             context_roots: [None; 64],
             context_users: [0; 64],
+            context_used: [0; 64],
+            context_tick: 0,
             pressure_reported: core::sync::atomic::AtomicU64::new(0),
             render_support: kernel::sync::Arc::new(
                 core::sync::atomic::AtomicU64::new(0),

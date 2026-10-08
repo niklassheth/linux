@@ -125,8 +125,8 @@ kernel::module_platform_driver! {
             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
         },
         render_deps: u32 {
-            default: 0,
-            description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",
+            default: 1,
+            description: "Render ordering: 1 waits in the kernel (for other queues, and for the earlier fragment stamp a tiling stage needs) and submits renders without firmware dependency items, as Metal does; 0 encodes firmware dependency items, which can stall the firmware (Dota 2)",
         },
         compute_deps: u32 {
             default: 1,

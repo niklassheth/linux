@@ -1570,7 +1570,7 @@ impl Bootstrap {
 
     /// The caller retains all client mappings throughout this call. On failure
     /// after publication it must quarantine those mappings until reset.
-    /// Experiment (render_deps=1): order a render against earlier work in the
+    /// Order a render against earlier work in the
     /// kernel instead of with firmware dependency items, as for compute. A
     /// render waiting on this queue's own fragment lane from its fragment
     /// stage (VDM_BARRIER_FRAGMENT) is ordered by that lane. Every other
@@ -1579,7 +1579,7 @@ impl Bootstrap {
     /// output, must be reached before admission; until then return EBUSY and
     /// let the worker retry after the next completion. The render then
     /// reaches the firmware with no dependency items; its internal TA-to-3D
-    /// link is unchanged. render_deps=0 keeps the items.
+    /// link is unchanged. render_deps=0 keeps the firmware items.
     fn resolve_render_dependencies(
         &self,
         queue: &mut FirmwareQueues,

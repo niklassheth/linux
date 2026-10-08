@@ -44,17 +44,23 @@ pub(crate) fn private_ranges() -> [(u64, usize); 19] {
 }
 
 pub(crate) fn support() -> [u8; 0x100] {
+    pool_support(2, SHARED_STATE)
+}
+
+/// Describe the same pool layout with an exclusively leased hardware slot.
+/// Slot zero remains reserved; the runtime allocator supplies IDs 3..59.
+pub(crate) fn pool_support(id: u64, shared: u64) -> [u8; 0x100] {
     let mut out = [0; 0x100];
     let pages = (BUFFER_COUNT * BUFFER_SIZE / 0x1000) as u32;
-    u64_at(&mut out, 0, 2);
+    u64_at(&mut out, 0, id);
     // +8 selects the hardware FList slot; +0 is a separate pool identity.
     // Sharing slot zero with render corrupts concurrently active pool state.
-    u32_at(&mut out, 8, 2);
+    u32_at(&mut out, 8, id as u32);
     u64_at(&mut out, 0x14, DIRECTORY);
     u32_at(&mut out, 0x1c, (DIRECTORY_SIZE / 8) as u32);
     u32_at(&mut out, 0x24, pages % (DIRECTORY_SIZE / 8) as u32);
     u32_at(&mut out, 0x2c, pages);
-    u64_at(&mut out, 0x4c, SHARED_STATE);
+    u64_at(&mut out, 0x4c, shared);
     out
 }
 

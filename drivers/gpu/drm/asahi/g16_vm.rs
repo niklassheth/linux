@@ -32,6 +32,9 @@ pub(crate) struct AddressSpace {
     render_arena: Arena,
     scratch_free: [KVec<core::ops::Range<u64>>; 2],
     scratch_users: [usize; 2],
+    // Retained with the VM roots by pending/quarantined compute Works. Its
+    // exclusive FList slot must not be recycled while firmware can use them.
+    compute_support: Option<crate::g16::Support>,
 }
 
 /// An exclusive suballocation; its backing remains owned by the VM.
@@ -72,6 +75,7 @@ impl AddressSpace {
             render_arena: Arena::default(),
             scratch_free: [KVec::new(), KVec::new()],
             scratch_users: [0; 2],
+            compute_support: None,
         })
     }
 
@@ -183,6 +187,48 @@ impl AddressSpace {
     /// owned by the VM; allocating a later command never replaces a live PTE.
     pub(crate) fn init_compute_private(&mut self, range: core::ops::Range<u64>) {
         self.compute_arena = Arena::new(range);
+    }
+
+    pub(crate) fn compute_support_address(&self) -> Option<u64> {
+        self.compute_support.as_ref().map(|s| s.address())
+    }
+
+    pub(crate) fn set_compute_support(&mut self, support: crate::g16::Support) -> Result {
+        if self.compute_support.is_some() {
+            return Err(EEXIST);
+        }
+        self.compute_support = Some(support);
+        Ok(())
+    }
+
+    /// Private physical storage at the existing accelerator pool VAs. Keep
+    /// directory capacity, page count and initial cursor identical to the
+    /// opening pool so this experiment changes ownership rather than layout.
+    pub(crate) fn alloc_compute_pool(&mut self) -> Result {
+        use crate::g16_compute as compute;
+        for (base, size) in compute::private_ranges() {
+            if base != compute::SCRATCH && base != compute::MARKER {
+                self.alloc_low(base, size, prot::PROT_GPU_SHARED_RW)?;
+            }
+        }
+        for buffer in 0..compute::BUFFER_COUNT {
+            for first in (0..compute::BUFFER_SIZE / 0x1000).step_by(32) {
+                let mut row = [0; 256];
+                for i in 0..32 {
+                    let va = compute::BUFFER_BASE
+                        + buffer as u64 * compute::BUFFER_STRIDE
+                        + (first + i) as u64 * 0x1000;
+                    row[i * 8..i * 8 + 8].copy_from_slice(&va.to_le_bytes());
+                }
+                self.write_low(
+                    compute::DIRECTORY
+                        + (buffer * (compute::BUFFER_SIZE / 0x1000) + first) as u64 * 8,
+                    &row,
+                )?;
+            }
+        }
+        self.sync();
+        Ok(())
     }
 
     pub(crate) fn prepare_compute(

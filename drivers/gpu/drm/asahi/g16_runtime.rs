@@ -1446,7 +1446,7 @@ impl Bootstrap {
         self.render_failed
     }
 
-    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> Result<Support> {
+    fn acquire_support_slot(&mut self) -> Result<Support> {
         if self.render_failed {
             return Err(EIO);
         }
@@ -1466,23 +1466,41 @@ impl Bootstrap {
                 Err(value) => used = value,
             }
         };
-        let lease = Support {
+        Ok(Support {
             slots: self.render_support.clone(),
             index,
             submissions: AtomicU64::new(
                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
             ),
-        };
+        })
+    }
+
+    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> Result<Support> {
+        let lease = self.acquire_support_slot()?;
         let mut a = render::Addresses::bootstrap();
         a.support = lease.address();
         a.render_shared_state = lease.shared_state();
         let mut page = KVec::new();
         page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
-        page[..0x100].copy_from_slice(&pool.support(3 + u64::from(index), a.render_shared_state));
+        page[..0x100].copy_from_slice(&pool.support(3 + u64::from(lease.index), a.render_shared_state));
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         fw.write_live(a.support, &page)?;
         // A reused lease starts its submitted-Work count afresh.
         fw.zero_live(a.render_shared_state, 0x4000)?;
+        Ok(lease)
+    }
+
+    fn acquire_compute_support(&mut self) -> Result<Support> {
+        let lease = self.acquire_support_slot()?;
+        let mut page = KVec::new();
+        page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
+        page[..0x100].copy_from_slice(&compute::pool_support(
+            3 + u64::from(lease.index), lease.shared_state(),
+        ));
+        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+        fw.write_live(lease.address(), &page)?;
+        fw.zero_live(lease.shared_state(), 0x4000)?;
+        fw.write_live(lease.shared_state(), &1u32.to_le_bytes())?;
         Ok(lease)
     }
 
@@ -2204,6 +2222,13 @@ impl Bootstrap {
         space: &mut g16_vm::AddressSpace,
         private: core::ops::Range<u64>,
     ) -> Result {
+        if crate::module_parameters::compute_private_pool.value() != 0 {
+            space.alloc_compute_pool()?;
+            space.set_compute_support(self.acquire_compute_support()?)?;
+            space.init_compute_private(private);
+            space.sync();
+            return Ok(());
+        }
         let opening = self._opening_client.as_mut().ok_or(EIO)?;
         for (base, size) in compute::private_ranges() {
             // Scratch and marker are private to each command at fresh VAs.
@@ -2305,6 +2330,9 @@ impl Bootstrap {
         fw.zero_live(work + 0x2000, 0x2000)?;
         let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
         a.queue = lane.queue;
+        if let Some(support) = client.compute_support_address() {
+            a.support = support;
+        }
         a.driver_stamp = work + 0x4000;
         a.firmware_stamp = lane.firmware_stamp();
         if crate::module_parameters::compute_save_slot.value() != 0 {

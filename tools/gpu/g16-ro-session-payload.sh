@@ -12,11 +12,19 @@ if ! mountpoint -q /home; then
     source=$(findmnt -no SOURCE /); source=${source%%\[*}
     mount -o ro,subvol=home "$source" /home
 fi
-overlay=/tmp/codex-dota-home
+# Live Dota needs a disk-backed upper (Sniper's runtime copies exhaust tmpfs):
+# G16_OVERLAY_BASE on the external ext4 disk; the btrfs root stays read-only.
+overlay=${G16_OVERLAY_BASE:-/tmp/codex-dota-home}
+case "$overlay" in /tmp/codex-dota-*|/mnt/g16-external/codex-dota-overlay/*) ;; *) exit 64 ;; esac
+case "$overlay" in /mnt/g16-external/*)
+    # Only the external USB ext4 (not the NVMe btrfs) becomes writable.
+    mount -o remount,rw /mnt/g16-external || { echo "external remount failed" >> "$observe/verdicts.txt"; exit 1; }
+    findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/g16-external >> "$observe/verdicts.txt" ;;
+esac
 mkdir -p "$overlay/lower" "$overlay/upper" "$overlay/work"
 mount --bind /home/nsheth "$overlay/lower"
 mount -o remount,bind,ro "$overlay/lower"
-mount -t overlay overlay -o "lowerdir=$overlay/lower,upperdir=$overlay/upper,workdir=$overlay/work" /home/nsheth
+mount -t overlay overlay -o "lowerdir=$overlay/lower,upperdir=$overlay/upper,workdir=$overlay/work" /home/nsheth || { echo "overlay mount failed" >> "$observe/verdicts.txt"; exit 1; }
 mountpoint -q /mnt/g16-external || mount -o ro /dev/sda1 /mnt/g16-external 2>/dev/null || true
 chmod 1777 "$observe"
 sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
@@ -62,6 +70,14 @@ for t in $tests; do
     cb-flight) run_user cb-flight 120 $cb --split --inflight 8 --images 128 --mips 1 --size 64 --format bc3 --submits 400 ;;
     cb-flight-inter) run_user cb-flight-inter 120 $cb --split --interleave --inflight 8 --images 128 --mips 1 --size 64 --format bc3 --submits 400 ;;
     cb-flight-q2) run_user cb-flight-q2 120 $cb --split --interleave --queues 2 --inflight 16 --images 128 --mips 2 --size 64 --format bc7 --submits 400 ;;
+    dota) R=/home/nsheth/g16-games/dota-shader-identity-20261006
+          label=dota-ro-$(basename "$observe")
+          EXPECT_DRIVER=$R/driver/libvulkan_asahi.so WATCH_LIMIT=300 WATCH_MIN_KB=2097152 \
+              timeout 600 bash $R/run-variant.sh "$label" mode0 > "$observe/dota-harness.log" 2>&1
+          echo "dota rc=$?" >> "$observe/verdicts.txt"
+          cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
+          df -h /mnt/g16-external /tmp > "$observe/df.txt"
+          stalled && finish_stall dota ;;
     replay) run_user replay 240 env HK_DEBUG=perf VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver/icd.json VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
             /home/nsheth/g16-games/codex-dota-replay-20261008/gfxrecon-replay --wsi xcb /mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr ;;
     *) echo "unknown test $t" >> "$observe/verdicts.txt" ;;

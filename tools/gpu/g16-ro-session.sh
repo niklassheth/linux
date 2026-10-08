@@ -43,7 +43,7 @@ trap cleanup EXIT
 ssh "${ssh_options[@]}" "$mini" 'm4-steam-shutdown 45' > "$local_output/steam-shutdown.log" 2>&1 || true
 sha256sum "$G16_KERNEL_ARTIFACT/Image.gz" "$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" > "$local_output/boot-inputs.sha256"
 boot_attempted=1
-timeout 240 env -u KERNEL_BUILD IMAGE="$G16_KERNEL_ARTIFACT/Image.gz" DTB="$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" EXTRA_ARGS="asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1 ${G16_BOOT_EXTRA:-} $ro_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
+timeout 240 env -u KERNEL_BUILD IMAGE="$G16_KERNEL_ARTIFACT/Image.gz" DTB="$G16_KERNEL_ARTIFACT/t8132-j773g.dtb" EXTRA_ARGS="${G16_BASE_ARGS-asahi_m4.dependency_kind=0 asahi_m4.debug_ctx=1} ${G16_BOOT_EXTRA:-} $ro_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
 wait_ssh
 loaded=$(ssh "${ssh_options[@]}" "$mini" 'uname -v')
 printf 'expected=%s\nloaded=%s\n' "$G16_EXPECT_UTS" "$loaded" > "$local_output/loaded-kernel.txt"
@@ -52,4 +52,4 @@ ssh "${ssh_options[@]}" "$mini" "mkdir -p '$remote_output'"
 scp "${ssh_options[@]}" -q "$here/payload.sh" "$mini:$remote_output/payload.sh"
 scp "${ssh_options[@]}" -q "$here/../copy-burst/copy_burst.c" "$mini:$remote_output/copy_burst.c"
 "$lease" renew mini codex-dota 30
-timeout 900 ssh "${ssh_options[@]}" "$mini" "bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true
+timeout 900 ssh "${ssh_options[@]}" "$mini" "G16_OVERLAY_BASE='${G16_OVERLAY_BASE:-}' bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true

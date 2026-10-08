@@ -21,7 +21,7 @@ control_1b=${G16_CONTROL_1B:-0}
 private_pool=${G16_COMPUTE_PRIVATE_POOL:-0}
 case "$control_1b" in 0|1) ;; *) exit 64 ;; esac
 case "$private_pool" in 0|1) ;; *) exit 64 ;; esac
-case "$mode" in recovery|capture|dota) ;; *) exit 64 ;; esac
+case "$mode" in recovery|capture|dota|trigger) ;; *) exit 64 ;; esac
 if [ "$mode" != recovery ] && { [ "$control_1b" = 1 ] || [ "$private_pool" = 1 ]; }; then exit 64; fi
 # Keep the ownership arm separate from the six-record global setup arm.
 if [ "$control_1b" = 1 ] && [ "$private_pool" = 1 ]; then exit 64; fi
@@ -88,6 +88,9 @@ if [ "$mode" = recovery ]; then
         experiment_args="$experiment_args asahi_m4.compute_private_pool=1 asahi_m4.control_1b=0 asahi_m4.compute_save_slot=1"
     fi
 fi
+if [ "$mode" = trigger ]; then
+    experiment_args="$experiment_args asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2"
+fi
 boot_attempted=1
 timeout 240 env -u KERNEL_BUILD IMAGE="$kernel_image" DTB="$kernel_dtb" EXTRA_ARGS="$experiment_args" "$workspace/gravity-bootloader/m4-linux/boot.sh" > "$local_output/test-boot.log" 2>&1
 wait_ssh
@@ -100,6 +103,7 @@ required_arguments=(asahi_m4.debug_ctx=1)
 if [ "$mode" = recovery ]; then required_arguments+=(asahi_m4.timeout_policy=$recovery_policy asahi_m4.compute_preempt=1); fi
 if [ "$control_1b" = 1 ]; then required_arguments+=(asahi_m4.control_1b=1 asahi_m4.compute_save_slot=1); fi
 if [ "$private_pool" = 1 ]; then required_arguments+=(asahi_m4.compute_private_pool=1 asahi_m4.control_1b=0 asahi_m4.compute_save_slot=1); fi
+if [ "$mode" = trigger ]; then required_arguments+=(asahi_m4.timeout_policy=1 asahi_m4.compute_preempt=0 asahi_m4.compute_save_slot=1 asahi_m4.control_1b=0 asahi_m4.render_preempt=1 asahi_m4.render_barrier=2); fi
 for required_argument in "${required_arguments[@]}"; do
     case " $loaded_cmdline " in *" $required_argument "*) ;; *) echo "missing $required_argument" >&2; exit 1 ;; esac
 done
@@ -108,9 +112,12 @@ ssh "${ssh_options[@]}" "$mini" "test \"\$(findmnt -no FSTYPE /tmp)\" = tmpfs &&
 lab=$workspace/tmp/cs2-memory-lab-20261005/lab
 if [ "$mode" = recovery ]; then
     scp "${ssh_options[@]}" -q "$lab/gpu-contend/gpu_contend.c" "$lab/gpu-contend/spirv.h" "$lab/gpu-fault-test/gpu_fault_test.c" "$lab/gpu-fault-test/fault.spv.inc" "$(dirname "$0")/g16-recovery-observe.sh" "$mini:$remote_output/"
+elif [ "$mode" = trigger ]; then
+    scp "${ssh_options[@]}" -q "$(dirname "$0")"/g16-dota-trigger-{observe.sh,watch.py} "$mini:$remote_output/"
 else
     scp "${ssh_options[@]}" -q "$(dirname "$0")"/g16-capture-probe-{a64,x64,guest.sh,inner.sh} "$(dirname "$0")"/g16-dota-capture-{guest.sh,inner.sh} "$(dirname "$0")/g16-capture-observe.sh" "$mini:$remote_output/"
 fi
 observe_script=g16-recovery-observe.sh
-if [ "$mode" != recovery ]; then observe_script=g16-capture-observe.sh; fi
+if [ "$mode" = capture ] || [ "$mode" = dota ]; then observe_script=g16-capture-observe.sh; fi
+if [ "$mode" = trigger ]; then observe_script=g16-dota-trigger-observe.sh; fi
 timeout 600 ssh "${ssh_options[@]}" "$mini" "G16_CAPTURE_STAGE='$mode' G16_OBSERVATION_DIR='$remote_output' bash '$remote_output/$observe_script'" > "$local_output/observation.log" 2>&1

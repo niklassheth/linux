@@ -34,6 +34,16 @@ mount -t overlay overlay -o "lowerdir=$external,upperdir=/run/codex-dota-externa
 test -r "$external/SteamLibrary/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
 results=$games/dota-shader-identity-20261006/results
 chmod 1777 "$observe"
+if [ "$capture_stage" = dota ]; then
+    # Match run-variant.sh's scene-quality input inside the temporary Steam
+    # overlay. Preserve the exact file used without modifying persistent home.
+    video_source=$games/dota-civ-followup-20261006/dota-video-low.txt
+    video_target=/home/nsheth/.local/share/Steam/userdata/147853552/570/local/cfg/video.txt
+    test -r "$video_source"
+    cp "$video_source" "$video_target"
+    chown nsheth:nsheth "$video_target"
+    cp "$video_source" "$observe/dota-video-input.txt"
+fi
 sed -e 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' -e 's/^runuser -u /timeout 15 runuser -u /' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
 bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 systemctl is-active m4-kwin claude-headless input-forward-server > "$observe/services-before.txt"

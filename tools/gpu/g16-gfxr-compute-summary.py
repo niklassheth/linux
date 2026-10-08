@@ -17,7 +17,20 @@ SYNC = {'vkCmdPipelineBarrier', 'vkCmdPipelineBarrier2', 'vkCmdPipelineBarrier2K
         'vkCmdWriteTimestamp', 'vkCmdWriteTimestamp2', 'vkCmdWriteTimestamp2KHR'}
 SUBMIT = {'vkQueueSubmit', 'vkQueueSubmit2', 'vkQueueSubmit2KHR'}
 COPIES = {'vkCmdCopyImageToBuffer', 'vkCmdCopyImageToBuffer2',
-          'vkCmdCopyImageToBuffer2KHR', 'vkCmdCopyQueryPoolResults'}
+          'vkCmdCopyImageToBuffer2KHR', 'vkCmdCopyQueryPoolResults',
+          'vkCmdCopyBuffer', 'vkCmdCopyBuffer2', 'vkCmdCopyBuffer2KHR',
+          'vkCmdCopyBufferToImage', 'vkCmdCopyBufferToImage2', 'vkCmdCopyBufferToImage2KHR',
+          'vkCmdCopyImage', 'vkCmdCopyImage2', 'vkCmdCopyImage2KHR',
+          'vkCmdBlitImage', 'vkCmdBlitImage2', 'vkCmdBlitImage2KHR',
+          'vkCmdResolveImage', 'vkCmdResolveImage2', 'vkCmdResolveImage2KHR',
+          'vkCmdClearColorImage', 'vkCmdClearDepthStencilImage',
+          'vkCmdFillBuffer', 'vkCmdUpdateBuffer'}
+
+
+def array(value):
+    # gfxrecon emits one-element structure arrays as objects. Handles may
+    # likewise be scalar; null is the empty pointer, not an array element.
+    return [] if value is None else value if isinstance(value, list) else [value]
 
 
 def compute(bind_point):
@@ -30,8 +43,8 @@ def state():
 
 def commands_of(submit):
     if 'pCommandBufferInfos' in submit:
-        return [info['commandBuffer'] for info in submit['pCommandBufferInfos'] or []]
-    return submit.get('pCommandBuffers') or []
+        return [info['commandBuffer'] for info in array(submit['pCommandBufferInfos'])]
+    return array(submit.get('pCommandBuffers'))
 
 
 class Inspector:
@@ -43,6 +56,10 @@ class Inspector:
         self.pipelines = {}
         self.patterns = {}
         self.unknown = collections.Counter()
+        self.in_state = False
+        self.state_counts = collections.Counter()
+        self.frame_counts = collections.Counter()
+        self.state_submit_count = 0
         self.submit_count = 0
         self.submitted_operations = 0
 
@@ -62,7 +79,7 @@ class Inspector:
 
     def submit(self, index, function, args):
         self.submit_count += 1
-        for batch_index, batch in enumerate(args.get('pSubmits') or []):
+        for batch_index, batch in enumerate(array(args.get('pSubmits'))):
             for buffer in commands_of(batch):
                 for operation in self.flatten(buffer):
                     self.submitted_operations += 1
@@ -83,6 +100,9 @@ class Inspector:
                     pattern['last_submission'] = submission
 
     def feed(self, record):
+        if 'state' in record:
+            self.in_state = record['state'].get('marker_type') == 'BeginMarker'
+            return
         function = record.get('function')
         if not function:
             return
@@ -90,16 +110,17 @@ class Inspector:
         args = function.get('args') or {}
         index = record.get('index')
         self.counts[name] += 1
+        (self.state_counts if self.in_state else self.frame_counts)[name] += 1
         if name == 'vkCreateComputePipelines':
-            for pipeline, info in zip(args.get('pPipelines') or [], args.get('pCreateInfos') or []):
+            for pipeline, info in zip(array(args.get('pPipelines')), array(args.get('pCreateInfos'))):
                 self.pipelines[pipeline] = copy.deepcopy(info)
         if name == 'vkAllocateCommandBuffers':
             pool = (args.get('pAllocateInfo') or {}).get('commandPool')
-            for buffer in args.get('pCommandBuffers') or []:
+            for buffer in array(args.get('pCommandBuffers')):
                 self.buffers[buffer] = state()
                 self.pools[buffer] = pool
         if name == 'vkFreeCommandBuffers':
-            for buffer in args.get('pCommandBuffers') or []:
+            for buffer in array(args.get('pCommandBuffers')):
                 self.buffers.pop(buffer, None)
                 self.pools.pop(buffer, None)
         if name in ('vkResetCommandPool', 'vkDestroyCommandPool'):
@@ -111,7 +132,12 @@ class Inspector:
                     else:
                         self.buffers[buffer] = state()
         if name in SUBMIT:
-            self.submit(index, function, args)
+            # Keep reconstructed definitions, but don't count trim setup's
+            # synthesized submissions as executions by the captured frames.
+            if self.in_state:
+                self.state_submit_count += 1
+            else:
+                self.submit(index, function, args)
             return
         buffer = args.get('commandBuffer')
         if buffer is None:
@@ -128,7 +154,7 @@ class Inspector:
             current['sync'].append({'index': index, 'name': name, 'arguments': arguments})
             del current['sync'][:-4]
         elif name == 'vkCmdExecuteCommands':
-            current['commands'].append({'secondary': args.get('pCommandBuffers') or []})
+            current['commands'].append({'secondary': array(args.get('pCommandBuffers'))})
         elif name in DIRECT or name.startswith('vkCmdDispatchIndirect') or name in COPIES:
             operation = {'index': index, 'command_buffer': buffer, 'name': name,
                          'arguments': arguments, 'preceding_sync_last_four': list(current['sync'])}
@@ -150,7 +176,11 @@ class Inspector:
         direct.sort(key=lambda p: p['operation']['workgroups'], reverse=True)
         indirect = [p for p in patterns if p['operation']['name'].startswith('vkCmdDispatchIndirect')]
         copies = [p for p in patterns if p['operation']['name'] in COPIES]
-        return {'api_counts': dict(self.counts), 'queue_submit_calls': self.submit_count,
+        return {'api_counts': dict(self.counts),
+                'state_reconstruction_api_counts': dict(self.state_counts),
+                'captured_frame_api_counts': dict(self.frame_counts),
+                'state_reconstruction_submit_calls': self.state_submit_count,
+                'queue_submit_calls': self.submit_count,
                 'submitted_compute_or_transfer_operations': self.submitted_operations,
                 'distinct_patterns': len(patterns), 'unknowns': dict(self.unknown),
                 'largest_direct_dispatches_by_workgroups': direct[:self.limit],
@@ -159,7 +189,8 @@ class Inspector:
                 'limits': ['Workgroup count is not GPU duration.',
                            'Indirect sizes require buffer contents at execution.',
                            'API waits are recorded, not proven satisfied.',
-                           'Image/query copies may invoke driver-internal compute.',
+                           'Transfers may invoke driver-internal compute.',
+                           'Deferred-trim initialization may contain synthesized setup calls.',
                            'Only four preceding sync commands are retained per operation.']}
 
 

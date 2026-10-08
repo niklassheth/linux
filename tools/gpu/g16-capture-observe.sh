@@ -5,6 +5,8 @@ set -euo pipefail
 : "${G16_OBSERVATION_DIR:?set directory under /tmp}"
 case "$G16_OBSERVATION_DIR" in /tmp/codex-dota-*) ;; *) exit 64 ;; esac
 observe=$G16_OBSERVATION_DIR
+capture_stage=${G16_CAPTURE_STAGE:-capture}
+case "$capture_stage" in capture|dota) ;; *) exit 64 ;; esac
 case ",$(findmnt -no OPTIONS /)," in *,ro,*) ;; *) exit 1 ;; esac
 [ "$(findmnt -no FSTYPE /tmp)" = tmpfs ] || exit 1
 swapoff -a
@@ -50,6 +52,7 @@ systemctl stop g16-steam 2>/dev/null || true
 systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash /home/nsheth/g16-games/dota-shader-identity-20261006/steam-host.sh
 sleep 75
 # Joining the running Steam VM is part of the reproduction path.
+if [ "$capture_stage" = capture ]; then
 cat > "$stage/probe-host.sh" <<'HOST'
 #!/bin/bash
 set -euo pipefail
@@ -68,6 +71,8 @@ cat "$stage/probe-verdicts.txt" || true
 grep -q '^baseline rc=0$' "$stage/probe-verdicts.txt"
 grep -q 'device=Apple M4.*driver=Honeykrisp' "$stage/fex-baseline.log"
 grep -q 'libvulkan_asahi' "$stage/fex-baseline-maps.txt"
+exit 0
+fi
 # Dota has a 150 s deadline and 2 GiB capture limit. A failure is a diagnostic
 # result, never counted as a clean run. Keep Steam's existing launch path.
 label=dota-gfxr-codex-$(date +%H%M%S)

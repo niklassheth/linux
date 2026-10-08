@@ -17,7 +17,7 @@ fi
 lease=$workspace/tools/lease/lease.sh
 owner=codex-dota
 mode=${G16_SLOT_MODE:-recovery}
-case "$mode" in recovery|capture) ;; *) exit 64 ;; esac
+case "$mode" in recovery|capture|dota) ;; *) exit 64 ;; esac
 stamp=$(date +%Y%m%d_%H%M%S)
 local_output=$workspace/artifacts/dota-compute-stall-20261007/observe-$stamp
 remote_output=/tmp/codex-dota-$stamp
@@ -92,5 +92,5 @@ else
     scp "${ssh_options[@]}" -q "$(dirname "$0")"/g16-capture-probe-{a64,x64,guest.sh,inner.sh} "$(dirname "$0")"/g16-dota-capture-{guest.sh,inner.sh} "$(dirname "$0")/g16-capture-observe.sh" "$mini:$remote_output/"
 fi
 observe_script=g16-recovery-observe.sh
-if [ "$mode" = capture ]; then observe_script=g16-capture-observe.sh; fi
-timeout 600 ssh "${ssh_options[@]}" "$mini" "G16_OBSERVATION_DIR='$remote_output' bash '$remote_output/$observe_script'" > "$local_output/observation.log" 2>&1
+if [ "$mode" != recovery ]; then observe_script=g16-capture-observe.sh; fi
+timeout 600 ssh "${ssh_options[@]}" "$mini" "G16_CAPTURE_STAGE='$mode' G16_OBSERVATION_DIR='$remote_output' bash '$remote_output/$observe_script'" > "$local_output/observation.log" 2>&1

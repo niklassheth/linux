@@ -103,7 +103,7 @@ for t in $tests; do
               mkdir -p "$R/driver-vatrace"
               cp "$observe/extra/libvulkan_asahi.vatrace.so" "$R/driver-vatrace/libvulkan_asahi.so"
               printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-vatrace/icd.json"
-              grep -qF 'vatrace) ' "$R/dota-inner.sh" || sed -i 's|case "\$variant" in |case "$variant" in vatrace) export VK_DRIVER_FILES="$root/driver-vatrace/icd.json" HK_APPLE9_DUMP_MODE=0 HK_VA_TRACE=1 HK_COPY_TRACE=1 HK_PASS_TRACE=1280x720 HK_META_DUMP="$out/meta"; mkdir -p "$out/meta";; |' "$R/dota-inner.sh"
+              grep -qF 'vatrace) ' "$R/dota-inner.sh" || sed -i 's|case "\$variant" in |case "$variant" in vatrace) export VK_DRIVER_FILES="$root/driver-vatrace/icd.json" HK_APPLE9_DUMP_MODE=0 HK_VA_TRACE=1 HK_COPY_TRACE=1 HK_PASS_TRACE=1280x720 HK_WSI_TRACE=1 HK_META_DUMP="$out/meta"; mkdir -p "$out/meta";; |' "$R/dota-inner.sh"
               chown -R nsheth:nsheth "$R/driver-vatrace" "$R/dota-inner.sh"
               grep -o 'vatrace)[^;]*' "$R/dota-inner.sh" >> "$observe/verdicts.txt"
           fi

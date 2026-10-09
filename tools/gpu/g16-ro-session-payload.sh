@@ -191,6 +191,21 @@ PY
                 k=$(( (k + 1) % 3 )); shot "last$k"; echo "last$k $(date +%T)" >> "$observe/shots/log"; sleep 4
             done ) > /dev/null 2>&1 &
           shotter=$!
+          # Steam quiet base (manager): offline mode pre-seeded in the per-boot overlay before run-variant starts Steam.
+          if [ "${G16_STEAM_OFFLINE:-}" = 1 ]; then
+              LU=/home/nsheth/.local/share/Steam/config/loginusers.vdf
+              sed -i -E 's/("WantsOfflineMode"[[:space:]]+)"0"/\1"1"/; s/("SkipOfflineModeWarning"[[:space:]]+)"0"/\1"1"/' "$LU"
+              echo "steam-offline $(grep -cE '"(WantsOfflineMode|SkipOfflineModeWarning)"[[:space:]]+"1"' "$LU")/2" >> "$observe/verdicts.txt"
+          fi
+          # Synthetic Steam-like load during loading (manager): 120 s of direct sequential reads from the external disk plus
+          # zstd -19 -T4 compression (download/decompress/stage stand-in), starting when the watcher starts.
+          if [ "${G16_SYNTH_LOAD:-}" = 1 ]; then
+              ( for i in $(seq 1 180); do systemctl is-active --quiet dota-watch && break; sleep 1; done
+                big=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
+                timeout 120 dd if="$big" of=/dev/null bs=4M iflag=direct status=none &
+                timeout 120 nice -n 5 zstd -q -19 -T4 -c "$big" > /dev/null &
+                wait; echo "synth-load done $(date +%T)" >> "$observe/verdicts.txt" ) &
+          fi
           # Optional loading-I/O throttle (manager): cap reads from the external disk for the Steam/muvm unit that serves
           # Dota's file I/O (G16_IO_THROTTLE, e.g. 50M).
           if [ -n "${G16_IO_THROTTLE:-}" ]; then
@@ -327,6 +342,23 @@ BURST
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;
+    steam-update)
+        # Dedicated update window (manager): Steam online alone, no Dota, until pending updates (CS2 730, any 570) are
+        # Fully Installed or ~12 min pass; then a clean Steam shutdown. Library left clean for the offline arms.
+        Rg=/home/nsheth/g16-games/dota-shader-identity-20261006
+        m4-steam-shutdown 45; systemctl stop g16-steam 2>/dev/null; sleep 3
+        systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash $Rg/steam-host.sh
+        CL=/home/nsheth/.local/share/Steam/logs/content_log.txt; t0=$(date +%s)
+        sleep 60
+        while [ $(( $(date +%s) - t0 )) -lt 720 ]; do
+            stalled && finish_stall "$t"
+            last730=$(grep -a "AppID 730 state changed" "$CL" | tail -1); last570=$(grep -a "AppID 570 state changed" "$CL" | tail -1)
+            case "$last730" in *"state changed : Fully Installed,"|*"state changed : Fully Installed, ") case "$last570" in *Update*) ;; *) break;; esac;; esac
+            sleep 20
+        done
+        echo "steam-update after $(( $(date +%s) - t0 )) s: 730=[$(grep -a 'AppID 730 state changed' "$CL" | tail -1 | cut -c1-110)] 570=[$(grep -a 'AppID 570 state changed' "$CL" | tail -1 | cut -c1-110)]" >> "$observe/verdicts.txt"
+        grep -aE "update started|starting commit|Fully Installed,|download rate" "$CL" | tail -30 > "$observe/steam-update-content.txt"
+        m4-steam-shutdown 45; systemctl stop g16-steam 2>/dev/null ;;
     replay-steam)
         # Replay loop with the Steam client running (manager, 2026-10-08): live Dota runs alongside Steam (g16-steam,
         # steam-host.sh, in the same muvm VM; its UI renders ~300x650 on another slot), the replay sessions did not.
@@ -334,6 +366,8 @@ BURST
         # x8 and native replays x6 alongside it; then stop Steam cleanly.
         Rg=/home/nsheth/g16-games/dota-shader-identity-20261006
         m4-steam-shutdown 45; systemctl stop g16-steam 2>/dev/null; sleep 3
+        if [ "${G16_STEAM_OFFLINE:-}" = 1 ]; then LU=/home/nsheth/.local/share/Steam/config/loginusers.vdf
+            sed -i -E 's/("WantsOfflineMode"[[:space:]]+)"0"/\1"1"/; s/("SkipOfflineModeWarning"[[:space:]]+)"0"/\1"1"/' "$LU"; echo "steam-offline $(grep -cE '"(WantsOfflineMode|SkipOfflineModeWarning)"[[:space:]]+"1"' "$LU")/2" >> "$observe/verdicts.txt"; fi
         systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash $Rg/steam-host.sh
         sleep 75
         pgrep -af "steamwebhelper|steam.sh|ubuntu12_32/steam" | cut -c1-150 | head -5 > "$observe/$t-steam-procs.txt"

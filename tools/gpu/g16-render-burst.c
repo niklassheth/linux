@@ -12,6 +12,7 @@
  *                [--work R] [--timeout-ms T] [--seconds S] [--instances N]
  *                [--burst B --idle-ms I]  (drain + sleep I ms after every B submits)
  *                [--pre-compute C --compute-iters N --compute-groups G]  (C compute Works right before each post-idle burst)
+ *                [--render-waits W] [--wait-compute]  (W already-signalled timeline waits per render; + wait on the last compute)
  * --instances N draws N overlapping full-screen triangles per pass, so tile
  * lists overflow the tiler heap and the firmware must do partial renders.
  */
@@ -41,7 +42,7 @@ int main(int argc, char **argv)
 {
    unsigned passes = 8, width = 1280, height = 720, inflight = 4, submits = 100000;
    unsigned work = 0, timeout_ms = 5000, seconds = 60, instances = 1, burst = 0, idle_ms = 0;
-   unsigned pre_compute = 0, compute_iters = 20000, compute_groups = 256;
+   unsigned pre_compute = 0, compute_iters = 20000, compute_groups = 256, render_waits = 0; bool wait_compute = false;
    bool clear = false, blend = true, srgb = true;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -57,6 +58,8 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--pre-compute") && i + 1 < argc) pre_compute = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--compute-iters") && i + 1 < argc) compute_iters = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--compute-groups") && i + 1 < argc) compute_groups = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--render-waits") && i + 1 < argc) render_waits = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--wait-compute")) wait_compute = true;
       else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
@@ -79,7 +82,9 @@ int main(int argc, char **argv)
    float prio = 1;
    VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
       .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
-   VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+   VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .timelineSemaphore = VK_TRUE };
+   VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &f12,
       .synchronization2 = VK_TRUE, .dynamicRendering = VK_TRUE };
    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13,
       .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
@@ -205,6 +210,22 @@ int main(int argc, char **argv)
          CHECK(vkEndCommandBuffer(ccb[c]));
       }
    }
+   /* Render waits (Dota's renders each carry 2 kernel-resolved waits): R timeline semaphores signalled to 1 up front, so
+    * every render submit waits on already-signalled points; --wait-compute adds a wait on this cycle's last compute. */
+   if (render_waits > 2) render_waits = 2;
+   VkSemaphore wsem[3]; uint64_t wval[3]; VkPipelineStageFlags wstage[3]; unsigned nwsem = 0;
+   VkSemaphore csem = VK_NULL_HANDLE; uint64_t cval = 0;
+   {
+      VkSemaphoreTypeCreateInfo stci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE };
+      VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &stci };
+      for (unsigned w = 0; w < render_waits; ++w) {
+         CHECK(vkCreateSemaphore(dev, &sci, NULL, &wsem[w]));
+         VkSemaphoreSignalInfo ssi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = wsem[w], .value = 1 };
+         CHECK(vkSignalSemaphore(dev, &ssi));
+         wval[w] = 1; wstage[w] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT; ++nwsem;
+      }
+      if (wait_compute && pre_compute) CHECK(vkCreateSemaphore(dev, &sci, NULL, &csem));
+   }
    VkFence fences[16];
    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
    for (unsigned f = 0; f < inflight; ++f) CHECK(vkCreateFence(dev, &fci, NULL, &fences[f]));
@@ -229,6 +250,10 @@ int main(int argc, char **argv)
          { struct timespec ts = { idle_ms / 1000, (long)(idle_ms % 1000) * 1000000L }; nanosleep(&ts, NULL); }
          for (unsigned c = 0; c < pre_compute; ++c) {
             VkSubmitInfo csi = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &ccb[c] };
+            uint64_t sv = cval + 1;
+            VkTimelineSemaphoreSubmitInfo ctsi = { .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+               .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &sv };
+            if (csem && c + 1 == pre_compute) { csi.pNext = &ctsi; csi.signalSemaphoreCount = 1; csi.pSignalSemaphores = &csem; cval = sv; }
             CHECK(vkQueueSubmit(q, 1, &csi, cfence[c]));
          }
          printf("burst %u after %u ms idle t=%.1f\n", k / burst, idle_ms, now() - t0); fflush(stdout);
@@ -278,6 +303,11 @@ int main(int argc, char **argv)
       }
       CHECK(vkEndCommandBuffer(cb));
       VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+      unsigned nw = nwsem;
+      if (csem && cval) { wsem[nw] = csem; wval[nw] = cval; wstage[nw] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT; ++nw; }
+      VkTimelineSemaphoreSubmitInfo tsi = { .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+         .waitSemaphoreValueCount = nw, .pWaitSemaphoreValues = wval };
+      if (nw) { si.pNext = &tsi; si.waitSemaphoreCount = nw; si.pWaitSemaphores = wsem; si.pWaitDstStageMask = wstage; }
       CHECK(vkQueueSubmit(q, 1, &si, fences[slot]));
       total_passes += passes;
       if (now() - last > 5) { last = now(); printf("t=%.1f submits=%u passes=%lu (%.0f passes/s)\n", last - t0, k + 1, total_passes, total_passes / (last - t0)); fflush(stdout); }

@@ -222,7 +222,7 @@ PY
           # GPU keepalive (manager power arm): a separate tiny client submits one 64x64 pass every ~20 ms for the whole run,
           # so the GPU never idles off between desktop frames. Dota's pinned ICD.
           if [ "${G16_KEEPALIVE:-}" = 1 ]; then
-              runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; unset ASAHI_MESA_DEBUG LD_PRELOAD; export HK_EXPERIMENTAL_APPLE9=1 MESA_SHADER_CACHE_DISABLE=true VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json; exec "$@"' _ \
+              runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; unset ASAHI_MESA_DEBUG LD_PRELOAD; export HK_EXPERIMENTAL_APPLE9=1 MESA_SHADER_CACHE_DISABLE=true; exec "$@"' _ \
                   "$rb" --passes 1 --inflight 1 --width 64 --height 64 --burst 1 --idle-ms 20 --seconds 900 --timeout-ms 30000 > "$observe/keepalive.log" 2>&1 &
               keepalive=$!; echo "keepalive pid $keepalive" >> "$observe/verdicts.txt"
           fi
@@ -276,11 +276,25 @@ PY
     # Dota loading-end shape (manager): after a drained idle, C compute Works (~ms each) back-to-back, then 4 renders.
     rb-cidle6|rb-cidle6x3|rb-cidle2)
         case $t in rb-cidle6) ms=6000 c=2 ;; rb-cidle6x3) ms=6000 c=3 ;; rb-cidle2) ms=2000 c=2 ;; esac
-        run_user $t 330 env VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json \
+        run_user $t 330 env \
             $rb --passes 2 --inflight 4 --burst 4 --idle-ms $ms --pre-compute $c --compute-iters 20000 --seconds 300 --timeout-ms 15000 ;;
+    # Block 62 (manager): the loading-end shape with Dota-like renders -- 2 kernel-resolved waits per render (already
+    # signalled), heavy TA (4000 fullscreen instances per pass), 2-3 computes right before, after a 6 s drained idle, under
+    # the synthetic host load (dd + zstd on the external disk, restarted every 120 s). rb-wlc6 = renders also wait on the
+    # last compute (RAC-like control: no overlap).
+    rb-wl6|rb-wl6x3|rb-wlc6)
+        case $t in rb-wl6) c=2 x= ;; rb-wl6x3) c=3 x= ;; rb-wlc6) c=2 x=--wait-compute ;; esac
+        big=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
+        mountpoint -q /mnt/g16-external || mount -o ro /dev/sda1 /mnt/g16-external
+        ( while :; do timeout 120 dd if="$big" of=/dev/null bs=4M iflag=direct status=none & timeout 120 nice -n 5 zstd -q -19 -T4 -c "$big" > /dev/null; wait; done ) &
+        loadpid=$!
+        run_user $t 280 env $rb --passes 2 --inflight 4 --burst 4 --idle-ms 6000 --pre-compute $c --compute-iters 20000 \
+            --render-waits 2 --instances 4000 $x --seconds 240 --timeout-ms 15000
+        kill $loadpid 2>/dev/null; pkill -f "zstd -q -19 -T4 -c $big"; pkill -f "dd if=$big"
+        echo "$t load stopped" >> "$observe/verdicts.txt" ;;
     rb-idle6|rb-idle2|rb-idle0)
         ms=${t#rb-idle}; ms=$((ms * 1000)); [ "$ms" = 0 ] && ms=1
-        run_user $t 330 env VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json \
+        run_user $t 330 env \
             $rb --passes 2 --inflight 4 --burst 4 --idle-ms $ms --seconds 300 --timeout-ms 15000 ;;
     rp-firstbig)
         # Partner renders a 1280x720 swapchain throughout (like KWin/Xwayland drawing that shape); 20 fresh

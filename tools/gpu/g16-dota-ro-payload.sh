@@ -44,13 +44,13 @@ chmod 1777 "$observe"
 sed 's/^loginctl enable-linger "$desktop_user"$/loginctl enable-linger "$desktop_user" || true/' /usr/local/bin/m4-post-boot > "$observe/post-boot.sh"
 # Desktop-driver A/B (manager): G16_DESKTOP_MESA=old bind-mounts the pre-eaa2141 system Mesa backup over the installed
 # files for this boot only (RO root untouched), before post-boot starts KWin/Xwayland.
-if [ "${G16_DESKTOP_MESA:-}" = old ]; then
-    B=/root/mesa-backup-before-eaa2141; nb=0
+if [ -n "${G16_DESKTOP_MESA:-}" ]; then
+    B=$G16_DESKTOP_MESA; [ "$B" = old ] && B=/root/mesa-backup-before-eaa2141; nb=0
     for a in aarch64 x86_64 i686 drirc-a64 drirc-x86; do
         [ -d $B/$a ] || continue
         while IFS= read -r f; do t=/${f#$B/$a/}; [ -e "$t" ] && mount --bind "$f" "$t" && nb=$((nb+1)); done < <(find $B/$a -type f)
     done
-    echo "desktop-mesa old: $nb files bind-mounted" >> "$observe/verdicts.txt"
+    echo "desktop-mesa $B: $nb files bind-mounted" >> "$observe/verdicts.txt"
 fi
 bash "$observe/post-boot.sh" > "$observe/post-boot.log" 2>&1
 echo "desktop-mesa libgallium $(sha256sum /usr/lib64/libgallium-26.3.0-devel.so | cut -c1-16) $(strings /usr/lib64/libgallium-26.3.0-devel.so | grep -m1 -oE 'git-[0-9a-f]+')" >> "$observe/verdicts.txt"

@@ -175,8 +175,32 @@ PY
           mount --bind "$overlay/results-fresh" "$R/results" || { echo "results bind failed" >> "$observe/verdicts.txt"; exit 1; }
           df -i /mnt/g16-external > "$observe/df-inodes-before.txt" 2>&1
           label=dota-ro-$(basename "$observe")
+          # Screenshots of the game's display (manager): the capture card sees only the blanked HDMI output, so grab the
+          # X display from session.env (Dota's Xwayland): one ~20 s into the game, rolling ones every 4 s (last 3 kept),
+          # and one when the stall detector fires. Each grab has a timeout (the compositor may be frozen).
+          mkdir -p "$observe/shots"; chmod 777 "$observe/shots"
+          shot() { runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env
+              o=$0; timeout 6 ffmpeg -loglevel error -y -f x11grab -i "$DISPLAY" -frames:v 1 "$o.png" 2>/dev/null && exit 0
+              timeout 6 xwd -root -silent > "$o.xwd" 2>/dev/null && [ -s "$o.xwd" ] && exit 0
+              rm -f "$o.xwd"; timeout 6 import -window root "$o.png" 2>/dev/null' "$observe/shots/$1" < /dev/null; }
+          ( for i in $(seq 1 120); do systemctl is-active --quiet dota-game && break; sleep 1; done
+            sleep 20; shot loading; k=0
+            while systemctl is-active --quiet dota-game; do
+                if stalled; then shot stall; echo "shot at stall $(date +%T)" >> "$observe/shots/log"; break; fi
+                k=$(( (k + 1) % 3 )); shot "last$k"; echo "last$k $(date +%T)" >> "$observe/shots/log"; sleep 4
+            done ) > /dev/null 2>&1 &
+          shotter=$!
+          # Optional loading-I/O throttle (manager): cap reads from the external disk for the Steam/muvm unit that serves
+          # Dota's file I/O (G16_IO_THROTTLE, e.g. 50M).
+          if [ -n "${G16_IO_THROTTLE:-}" ]; then
+              dev=/dev/$(lsblk -no PKNAME "$(findmnt -no SOURCE /mnt/g16-external)" 2>/dev/null | head -1)
+              ( for i in $(seq 1 120); do systemctl is-active --quiet g16-steam && break; sleep 1; done
+                systemctl set-property --runtime g16-steam.service "IOReadBandwidthMax=$dev $G16_IO_THROTTLE" \
+                  && echo "io-throttle g16-steam $dev $G16_IO_THROTTLE $(systemctl show -p IOReadBandwidthMax g16-steam.service)" >> "$observe/verdicts.txt" ) &
+          fi
           EXPECT_DRIVER=$drv/libvulkan_asahi.so WATCH_LIMIT=300 WATCH_MIN_KB=2097152 \
               timeout 600 bash $R/run-variant.sh "$label" "$variant" > "$observe/dota-harness.log" 2>&1
+          kill $shotter 2>/dev/null; ls "$observe/shots" | tr '\n' ' ' | sed 's/^/shots: /' >> "$observe/verdicts.txt"; echo >> "$observe/verdicts.txt"
           echo "dota variant=$variant rc=$?" >> "$observe/verdicts.txt"
           echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"
           sleep 5; dmesg | grep "G16: queue deps" > "$observe/dep-stats.txt" 2>/dev/null
@@ -184,6 +208,9 @@ PY
           grep -c "hk-va-quarantine pressure" "$R/results/$label/application.log" 2>/dev/null | sed 's/^/quarantine-pressure-lines=/' >> "$observe/verdicts.txt"
           cp -a "$R/results/$label" "$observe/dota-results" 2>/dev/null
           cp "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/console.log" "$observe/dota-console.log" 2>/dev/null
+          A=/mnt/g16-external/SteamLibrary/steamapps/appmanifest_570.acf
+          cp "$A" "$observe/appmanifest_570.acf" 2>/dev/null
+          echo "dota-build $(grep -oE '"(buildid|LastUpdated|TargetBuildID)"[[:space:]]+"[0-9]+"' "$A" 2>/dev/null | tr -s ' \t' ' ' | tr '\n' ' ') steam.inf=$(grep -hE 'PatchVersion|ClientVersion' "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/steam.inf" 2>/dev/null | tr '\n' ' ') shadercache=$(stat -c '%s@%y' "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/shadercache/vulkan/shaders.cache.blob" 2>/dev/null)" >> "$observe/verdicts.txt"
           mkdir -p "$observe/steam-logs"
           cp -a /home/nsheth/.local/share/Steam/logs/{stderr.txt,console_log.txt,connection_log.txt,bootstrap_log.txt} "$observe/steam-logs/" 2>/dev/null
           journalctl -b -u g16-steam -u dota-game -u dota-watch -u dota-collector --no-pager > "$observe/steam-logs/units.log" 2>&1

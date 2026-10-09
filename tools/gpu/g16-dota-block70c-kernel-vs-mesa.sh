@@ -18,9 +18,9 @@ r() { env G16_KEEP_LEASE=1 G16_DESKTOP_MESA=${DM:-} G16_STEAM_OFFLINE=$3 G16_TAG
 # Block 70c (18:55): #114 failed (k70-q114-2 blocked=0x2 at render 281 = offline-1's position). Third arm -> production #92
 # control under the same conditions (system Mesa ed7603d is also new today). Relaunched while k70-cd2-3 ran.
 K111=artifacts/m4-linux/bits-7.3-111-a4diag-on-108; U111=$(sed "s/ (.*//" $K111/UTS)
-SNAP="asahi_m4.diag_mask=0x04 asahi_m4.snap_from=270 asahi_m4.snap_to=300 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
+SNAP="asahi_m4.diag_mask=0x04 asahi_m4.snap_from=270 asahi_m4.snap_to=310 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
 # Manager 19:00: four arms per round. cd2 now on #111 (= #108 + diag line, same defaults) with worksnap/work logs over Dota
-# renders 270-300, so a blocked=0x2 run captures render 281 and neighbours; cd1 on #108; #92 + system Mesa ed7603d;
+# renders 270-310, so a blocked=0x2 run captures render 281 and neighbours; cd1 on #108; #92 + system Mesa ed7603d;
 # #92 + pre-ed7603d system Mesa (eaa2141 backup, bind-mounted for desktop and Dota's system ICD).
 res k70-cd2-3
 for n in 3 4 5; do

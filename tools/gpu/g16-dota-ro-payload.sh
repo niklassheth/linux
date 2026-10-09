@@ -222,10 +222,11 @@ PY
           # On-demand work-log dumps (#100, diag_mask&4): Dota's loading-end burst lands ~170-180 s after dota-game starts
           # (stalled runs: detection at +188..194 s, 10 s after the stuck submit). G16_WORKLOG_DUMP="175 185 195" = seconds.
           if [ -n "${G16_WORKLOG_DUMP:-}" ]; then
-              ( for i in $(seq 1 300); do systemctl is-active --quiet dota-game && break; sleep 1; done; t0=$(date +%s)
+              # dota-game exits right after launching; dota-watch starts with it and lives for the run.
+              ( for i in $(seq 1 300); do systemctl is-active --quiet dota-watch && break; sleep 1; done; t0=$(date +%s)
                 for t in $G16_WORKLOG_DUMP; do
                     while [ $(( $(date +%s) - t0 )) -lt "$t" ]; do sleep 0.5; done
-                    systemctl is-active --quiet dota-game || break
+                    systemctl is-active --quiet dota-watch || break
                     echo 1 > /sys/kernel/debug/asahi_g16/dump_retire && echo "worklog-dump +$t s $(date +%T.%N) uptime $(cut -d' ' -f1 /proc/uptime)" >> "$observe/verdicts.txt"
                 done ) &
           fi

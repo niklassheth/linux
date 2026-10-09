@@ -19,5 +19,6 @@ for n in 1 2 3 4 5; do
     r k66-cd1-$n asahi_m4.compute_deps=1
     echo "pair $n: cd2=$(n_st cd2) cd1=$(n_st cd1)"
 done
-$L release mini codex-dota
+# #108 ship check: the per-pass Dota timing (as k63-pass-1 on #92) on #108; releases the lease at its end.
+$S/block63b.sh
 echo "block 66 done at $(date -Is)"

@@ -23,13 +23,14 @@ SNAP="asahi_m4.diag_mask=0x04 asahi_m4.snap_from=270 asahi_m4.snap_to=310 asahi_
 # renders 270-310, so a blocked=0x2 run captures render 281 and neighbours; cd1 on #108; #92 + system Mesa ed7603d;
 # #92 + pre-ed7603d system Mesa (eaa2141 backup, bind-mounted for desktop and Dota's system ICD).
 res k70-cd2-3
+# Manager 19:20: cd1 dropped; #111 cd2 only until one blocked=0x2 capture; #92 new vs old Mesa x3 each.
+cap=0; [ "$NB" -gt 0 ] && cap=0   # k70-cd2-3 is #108 (no snaps): doesn't count as a capture
 for n in 3 4 5; do
-  [ $n = 3 ] || r k70-cd2d-$n $K111 1 "$U111" "$SNAP"
-  r k70-cd1-$n $K108 1 "$U108" asahi_m4.compute_deps=1
+  if [ $cap = 0 ]; then r k70-cd2d-$n $K111 1 "$U111" "$SNAP"; [ "$NB" -gt 0 ] && { cap=1; echo "CAPTURE: blocked=0x2 with snaps in k70-cd2d-$n"; }; fi
   r k70-p92-$n $K92 1 "$U92" ""
   DM=/root/mesa-backup-before-ed7603d r k70-p92old-$n $K92 1 "$U92" ""
   t() { grep -l 'hang flight.*blocked=0x2' $S/k70-$1-*/codex-dota-*/kernel.log 2>/dev/null | wc -l; }
-  echo "round $n: blocked=0x2 runs: cd2=$(( $(t cd2) + $(t cd2d) )) cd1=$(t cd1) p92=$(t p92) p92old=$(t p92old)"
+  echo "round $n: blocked=0x2 runs: cd2d=$(t cd2d) p92=$(t p92) p92old=$(t p92old); A4 runs: p92=$(grep -l 'hang flight.*blocked=0x0.*libkrun' $S/k70-p92-*/codex-dota-*/kernel.log 2>/dev/null | wc -l) p92old=$(grep -l 'hang flight.*blocked=0x0.*libkrun' $S/k70-p92old-*/codex-dota-*/kernel.log 2>/dev/null | wc -l)"
 done
 $L release mini codex-dota
 echo "block 70c done at $(date -Is)"

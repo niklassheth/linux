@@ -55,5 +55,12 @@ scp "${ssh_options[@]}" -q "$here/payload.sh" "$mini:$remote_output/payload.sh"
 scp "${ssh_options[@]}" -q "$here/../copy-burst/copy_burst.c" "$mini:$remote_output/copy_burst.c"
 [ -d "$here/extra" ] && scp "${ssh_options[@]}" -q -r "$here/extra" "$mini:$remote_output/"
 scp "${ssh_options[@]}" -q "$here/../render-burst/render_burst.c" "$here/../render-burst/render_present.c" "$here/../render-burst/spirv.h" "$mini:$remote_output/"
+# Host-staged desktop Mesa tree: sync to the external disk (before the payload, so no copy I/O during the run).
+if [ -n "${G16_DESKTOP_MESA_HOST:-}" ]; then
+    mesa_remote=/mnt/g16-external/codex-dota-mesa/$(basename "$G16_DESKTOP_MESA_HOST")
+    rsync -a --delete -e "ssh ${ssh_options[*]}" "$G16_DESKTOP_MESA_HOST/" "$mini:$mesa_remote/" > "$local_output/desktop-mesa-sync.log" 2>&1
+    ssh "${ssh_options[@]}" "$mini" "cd $mesa_remote && sha256sum -c --quiet SHA256SUMS" >> "$local_output/desktop-mesa-sync.log" 2>&1
+    G16_DESKTOP_MESA=$mesa_remote
+fi
 "$lease" renew mini codex-dota 30
 timeout 900 ssh "${ssh_options[@]}" "$mini" "G16_OVERLAY_BASE='${G16_OVERLAY_BASE:-}' G16_DOTA_MODE='${G16_DOTA_MODE:-}' G16_IO_THROTTLE='${G16_IO_THROTTLE:-}' G16_STEAM_OFFLINE='${G16_STEAM_OFFLINE:-}' G16_SYNTH_LOAD='${G16_SYNTH_LOAD:-}' G16_DESKTOP_MESA='${G16_DESKTOP_MESA:-}' bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true

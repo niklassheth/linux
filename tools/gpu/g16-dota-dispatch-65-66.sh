@@ -7,7 +7,7 @@ while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; do
 S=artifacts/dota-compute-stall-20261007/ro-session; H=tmp/leases/history.log; start=$(wc -l < $H); t0=$(date +%s)
 until tail -n +$((start + 1)) $H | grep -q "release mini claude-driver"; do [ $(( $(date +%s) - t0 )) -gt 3600 ] && break; sleep 30; done
 echo "claude-driver slot over $(date +%T)"
-echo "block 67 (render_preempt on #109) start $(date +%T)"; $S/block67.sh
+echo "block 67 (#110 defaults) start $(date +%T)"; $S/block67.sh; echo "block 68 (render_class=2 vs default) start $(date +%T)"; $S/block68.sh
 t1=$(date +%s); until [ -s $S/next-after-driver ]; do [ $(( $(date +%s) - t1 )) -gt 1800 ] && echo none > $S/next-after-driver; sleep 20; done
 d=$(cat $S/next-after-driver); echo "decision: $d ($(date +%T))"
 # Manager 15:05: block 65 (RAC) dropped.

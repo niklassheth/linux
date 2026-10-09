@@ -1,5 +1,5 @@
 #!/bin/bash
-# Block 67 (manager): defaults on #109 (worksnap + 3D-side snapshots: 3d_work, 3d_micro, 3d_queue,
+# Block 67 (manager): defaults on #110 (= #109 + render_class knob, off) (worksnap + 3D-side snapshots: 3d_work, 3d_micro, 3d_queue,
 # lane pointer pages), non-robust desktop, load repro. 3 pairs; any stall in either arm yields the 3D-side state.
 # record, buffer manager, support header and TA queue struct at retirement for Dota ordinals 2800-2840 and live at the
 # wedge). Non-robust desktop, load repro, diag_mask=0x04; dumps at +116/124/132 s give clean comparisons. Runs until >=2
@@ -9,7 +9,7 @@ cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x04 asahi_m4.snap_from=2800 asahi_m4.snap_to=2840 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
-K=artifacts/m4-linux/bits-7.3-109-worksnap3d; U="#109 SMP PREEMPT_DYNAMIC Fri Oct  9 14:15:51 EDT 2026"
+K=artifacts/m4-linux/bits-7.3-110-renderclass; U="#110 SMP PREEMPT_DYNAMIC Fri Oct  9 14:17:18 EDT 2026"
 # Manager 15:05: defaults only, until 2 stalls with 3D-side worksnaps + 1 clean run (cap 8).
 st=0; cl=0
 for n in 1 2 3 4 5 6 7 8; do

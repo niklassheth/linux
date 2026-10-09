@@ -7,6 +7,10 @@
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
+# claude-driver's ~12 min rmpB Lethal arm between blocks 67 and 68.
+H=tmp/leases/history.log; start=$(wc -l < $H); t0=$(date +%s)
+until tail -n +$((start + 1)) $H | grep -q "release mini claude-driver"; do [ $(( $(date +%s) - t0 )) -gt 1500 ] && break; sleep 20; done
+echo "claude-driver rmpB slot over $(date +%T)"
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x04 asahi_m4.snap_from=2800 asahi_m4.snap_to=2840 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
 K=${G16_K:?kernel artifact dir}; U=$(sed "s/ (.*//" $K/UTS)

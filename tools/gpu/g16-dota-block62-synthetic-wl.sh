@@ -13,4 +13,3 @@ for n in 1 2; do
     echo "k62-wl-$n: $(grep -hE 'STALL|TIMEOUT|NO-STALL' $v 2>/dev/null | tr '\n' ' ') bursts=$(grep -h 'burst .* idle' ${v%/verdicts.txt}/rb-wl*.log 2>/dev/null | wc -l)"
 done
 echo "block 62 done at $(date -Is)"
-tools/lease/lease.sh release mini codex-dota

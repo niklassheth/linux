@@ -23,17 +23,23 @@ chk() { local v k; v=$(ls -d $S/$1-*/codex-dota-*/verdicts.txt 2>/dev/null | tai
     case $1 in *-ka-*) n=$(grep -h '^keepalive:' "$v" | awk '{print $2}'); [ "${n:-0}" -gt 1000 ] || { echo "SETUP FAILURE in $1 (keepalive submits=${n:-0})"; tools/lease/lease.sh release mini codex-dota; exit 1; } ;; esac
     echo "$1 ok: $(grep -hE "STALL" "$v" | head -1) wakes=$(grep -c 'G16: worklog wake' "$k") held=$(grep -c 'held_us=[0-9]' "$k") $(grep -h '^keepalive:' "$v")"; }
 stalls() { local c=0; for d in $S/k61-$1-*; do grep -qs "STALL in" $d/codex-dota-*/verdicts.txt && c=$((c+1)); done; echo $c; }
-# Round 1 remainder (rac-1 on #103 was inert: VM match; ctrl-1 ran before the switch).
+# Manager plan (13:00): after round 1 only RAC vs CTRL; block 62 (synthetic) after round 2; a ~45 min claude-driver window
+# after round 4; any RAC stall stops the block at once.
+L=tools/lease/lease.sh; H=tmp/leases/history.log
+rac() { r k61-rac-$1 "asahi_m4.context_sticky=0 asahi_m4.render_after_compute=1"; chk k61-rac-$1
+    if grep -qs "STALL in" $S/k61-rac-$1-*/codex-dota-*/verdicts.txt; then echo "RAC STALLED in k61-rac-$1: hypothesis killed; stopping"; $L release mini codex-dota; exit 0; fi; }
 r k61-id-1 "asahi_m4.context_sticky=1 asahi_m4.event_affinity=2"; chk k61-id-1
 r k61-ka-1 "asahi_m4.context_sticky=0" G16_KEEPALIVE=1; chk k61-ka-1
 for n in 2 3 4 5 6 7 8; do
-    r k61-rac-$n "asahi_m4.context_sticky=0 asahi_m4.render_after_compute=1"; chk k61-rac-$n
+    rac $n
     r k61-ctrl-$n "asahi_m4.context_sticky=0"; chk k61-ctrl-$n
-    if [ $n -le 5 ]; then
-        r k61-id-$n "asahi_m4.context_sticky=1 asahi_m4.event_affinity=2"; chk k61-id-$n
-        r k61-ka-$n "asahi_m4.context_sticky=0" G16_KEEPALIVE=1; chk k61-ka-$n
-    fi
     echo "round $n: rac(#104, from 2)=$(stalls rac) ctrl=$(stalls ctrl) id=$(stalls id) ka=$(stalls ka)"
+    if [ $n = 2 ]; then echo "block 62 (synthetic) start $(date +%T)"; "$S/block62.sh" 2>&1 | sed 's/^/  [62] /'; fi
+    if [ $n = 4 ]; then
+        $L release mini codex-dota; start=$(wc -l < $H); t0=$(date +%s); echo "claude-driver window open $(date +%T)"
+        until tail -n +$((start + 1)) $H | grep -q "release mini claude-driver"; do [ $(( $(date +%s) - t0 )) -gt 3300 ] && break; sleep 30; done
+        echo "claude-driver window closed $(date +%T)"
+    fi
 done
 tools/lease/lease.sh release mini codex-dota
 echo "block 61 done at $(date -Is)"

@@ -1,20 +1,20 @@
 #!/bin/bash
-# Block 56 (manager): host-reply-latency dose-response on #91, NO load, Steam offline, diag_record=0, A4-prone behaviour:
+# Block 56 (manager): host-reply-latency dose-response on #93 (#91 + always-on kind-6/7 event log in the hang report), NO load, Steam offline, diag_record=0, A4-prone behaviour:
 #   event_delay_us = 0 / 10000 / 30000 / 100000, x4 each interleaved. Starts after block 55 and the morning hand-offs
-#   (claude-kernel Wi-Fi check, claude-driver-mesh capture, asahi-03's copy as claude-air): waits for each of their
+#   (claude-kernel Wi-Fi check, claude-driver-mesh capture; manager: before asahi-03's copy): waits for each of their
 #   releases after block 55 ends (max 2.5 h), then takes the lease.
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
 H=/home/nsheth/Projects/asahi/tmp/leases/history.log; start=$(wc -l < $H); t0=$(date +%s)
-for who in claude-kernel claude-driver-mesh claude-air; do
+for who in claude-kernel claude-driver-mesh; do
     until tail -n +$((start + 1)) $H | grep -q "release mini $who"; do
         [ $(( $(date +%s) - t0 )) -gt 9000 ] && { echo "hand-off wait timed out at $who"; break 2; }; sleep 60; done
     echo "$who done ($(date +%T))"
 done
 R=artifacts/dota-compute-stall-20261007/ro-session/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"
-K=artifacts/m4-linux/bits-7.3-91-hostlatency; U="#91 SMP PREEMPT_DYNAMIC Fri Oct  9 02:30:35 EDT 2026"
+K=artifacts/m4-linux/bits-7.3-93-eventlog; U="#93 SMP PREEMPT_DYNAMIC Fri Oct  9 04:22:43 EDT 2026"
 r() { env G16_KEEP_LEASE=1 G16_STEAM_OFFLINE=1 G16_TAG=$1 G16_KERNEL_ARTIFACT=$K "G16_EXPECT_UTS=$U" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$BEH asahi_m4.event_delay_us=$2" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$1 $R; }
 stalls() { local c=0; for d in artifacts/dota-compute-stall-20261007/ro-session/k56-$1-*; do grep -qs "STALL in" $d/codex-dota-*/verdicts.txt && c=$((c+1)); done; echo $c; }
 for n in 1 2 3 4; do

@@ -184,6 +184,15 @@ PY
               chown -R nsheth:nsheth "$R/driver-pass" "$R/dota-inner.sh"
               { grep -o "pass)[^;]*;[^;]*" "$R/dota-inner.sh"; grep -n "HK_GPU_BUSY_FILE_PASS:+" "$R/dota-inner.sh"; } >> "$observe/verdicts.txt" ;;
           esac
+          case "$variant" in x2)
+              # A Dota ICD staged from the host for this session (G16_EXTRA2 dir with libvulkan_asahi.so), no extra env.
+              mkdir -p "$R/driver-x2"
+              cp "$observe/extra2/libvulkan_asahi.so" "$R/driver-x2/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-x2/icd.json"
+              grep -qF "x2) " "$R/dota-inner.sh" || sed -i "s|case \"\\\$variant\" in |case \"\$variant\" in x2) export VK_DRIVER_FILES=\"\$root/driver-x2/icd.json\" HK_APPLE9_DUMP_MODE=0;; |" "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-x2" "$R/dota-inner.sh"
+              grep -o "x2)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
+          esac
           case "$variant" in stats)
               # claude-compiler's variant-stats build (8825824 + HK_APPLE9_VARIANT_STATS), not an A4 arm.
               mkdir -p "$R/driver-stats"
@@ -193,7 +202,7 @@ PY
               chown -R nsheth:nsheth "$R/driver-stats" "$R/dota-inner.sh"
               grep -o "stats)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
           esac
-          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; stats) drv=$R/driver-stats ;; pass) drv=$R/driver-pass ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; stats) drv=$R/driver-stats ;; pass) drv=$R/driver-pass ;; x2) drv=$R/driver-x2 ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"

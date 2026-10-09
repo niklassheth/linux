@@ -273,6 +273,11 @@ PY
     rb-ovf) run_user rb-ovf 90 $rb --passes 4 --inflight 3 --instances 4000 --seconds 60 ;;
     rb-ovf2) run_user rb-ovf2 90 $rb --passes 1 --inflight 6 --instances 20000 --seconds 60 ;;
     # Idle->busy (manager): bursts of 4 two-pass 1280x720 renders, GPU drained, then a multi-second idle; Dota's pinned ICD.
+    # Dota loading-end shape (manager): after a drained idle, C compute Works (~ms each) back-to-back, then 4 renders.
+    rb-cidle6|rb-cidle6x3|rb-cidle2)
+        case $t in rb-cidle6) ms=6000 c=2 ;; rb-cidle6x3) ms=6000 c=3 ;; rb-cidle2) ms=2000 c=2 ;; esac
+        run_user $t 330 env VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json \
+            $rb --passes 2 --inflight 4 --burst 4 --idle-ms $ms --pre-compute $c --compute-iters 20000 --seconds 300 --timeout-ms 15000 ;;
     rb-idle6|rb-idle2|rb-idle0)
         ms=${t#rb-idle}; ms=$((ms * 1000)); [ "$ms" = 0 ] && ms=1
         run_user $t 330 env VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json \

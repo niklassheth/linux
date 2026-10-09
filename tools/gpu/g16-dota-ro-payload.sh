@@ -282,8 +282,8 @@ PY
     # signalled), heavy TA (4000 fullscreen instances per pass), 2-3 computes right before, after a 6 s drained idle, under
     # the synthetic host load (dd + zstd on the external disk, restarted every 120 s). rb-wlc6 = renders also wait on the
     # last compute (RAC-like control: no overlap).
-    rb-wl6|rb-wl6x3|rb-wlc6)
-        case $t in rb-wl6) c=2 x= ;; rb-wl6x3) c=3 x= ;; rb-wlc6) c=2 x=--wait-compute ;; esac
+    rb-wl6|rb-wl6x3|rb-wlc6|rb-wl6d|rb-wl6dx3)
+        case $t in rb-wl6) c=2 x= ;; rb-wl6x3) c=3 x= ;; rb-wlc6) c=2 x=--wait-compute ;; rb-wl6d) c=2 x=--two-devices ;; rb-wl6dx3) c=3 x=--two-devices ;; esac
         big=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
         mountpoint -q /mnt/g16-external || mount -o ro /dev/sda1 /mnt/g16-external
         ( while :; do timeout 120 dd if="$big" of=/dev/null bs=4M iflag=direct status=none & timeout 120 nice -n 5 zstd -q -19 -T4 -c "$big" > /dev/null; wait; done ) &

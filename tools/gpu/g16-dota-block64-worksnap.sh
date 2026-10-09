@@ -6,6 +6,10 @@
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
+# claude-compiler's CTS rerun goes first (after claude-kernel's #106 boot check); wait for its release (cap 45 min).
+H=tmp/leases/history.log; t0=$(date +%s)
+until grep -q "release mini claude-compiler" <(tail -n +${HSTART:-$(wc -l < $H)} $H); do [ $(( $(date +%s) - t0 )) -gt 2700 ] && break; sleep 30; done
+echo "claude-compiler slot over $(date +%T)"
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x04 asahi_m4.snap_from=2800 asahi_m4.snap_to=2840 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
 K=artifacts/m4-linux/bits-7.3-106-worksnap-rac; U="#106 SMP PREEMPT_DYNAMIC Fri Oct  9 13:35:50 EDT 2026"

@@ -5,7 +5,7 @@
 #   M23: diag_mask=0x23 (stale classification + ktime/ring only)   M03: diag_mask=0x03 (classification, no ktime/ring)
 #   M1d: diag_mask=0x1d (#63-like: everything but classification)
 # Bits: 01 lane+stale counting, 02 stale classification, 04 retirement log, 08 slot history, 10 wedge detector, 20 ktime+ring.
-# 6 rounds, no early stop. If #76 fails to boot, fall back to #71 with D/S/R only. Ignores R48_* env.
+# 6 rounds (env R48C_ROUNDS; R48C_ONLY_ROUND + R48C_ONLY = arms to run in that round), no early stop. If #76 fails to boot, fall back to #71 with D/S/R only. Ignores R48_* env.
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 R=artifacts/dota-compute-stall-20261007/ro-session/ro-session.sh
@@ -15,19 +15,21 @@ K=artifacts/m4-linux/bits-7.3-76-diagmask; U="#76 SMP PREEMPT_DYNAMIC Thu Oct  8
 r() { env G16_KEEP_LEASE=1 G16_TAG=$1 G16_KERNEL_ARTIFACT=$K "G16_EXPECT_UTS=$U" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$2" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$1 $R; }
 last() { ls -td artifacts/dota-compute-stall-20261007/ro-session/$1-* 2>/dev/null | head -1; }
 stalls() { local c=0; for d in artifacts/dota-compute-stall-20261007/ro-session/k48c-$kn-$1-*; do grep -qs "STALL in" $d/codex-dota-*/verdicts.txt && c=$((c+1)); done; echo $c; }
-for n in 1 2 3 4 5 6; do
-    r k48c-$kn-d-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"
-    if [ $n = 1 ] && [ $kn = 76 ] && [ ! -s "$(last k48c-76-d-1)/loaded-kernel.txt" ]; then
+for n in ${R48C_ROUNDS:-1 2 3 4 5 6}; do
+    only=; [ "$n" = "${R48C_ONLY_ROUND:-}" ] && only=" ${R48C_ONLY:-} "
+    want() { [ -z "$only" ] || case "$only" in *" $1 "*) return 0;; *) return 1;; esac; }
+    want d && r k48c-$kn-d-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"
+    if want d && [ $n = 1 ] && [ $kn = 76 ] && [ ! -s "$(last k48c-76-d-1)/loaded-kernel.txt" ]; then
         echo "#76 failed to boot; falling back to #71 (D/S/R only)"
         K=artifacts/m4-linux/bits-7.3-71-diagoff; U="#71 SMP PREEMPT_DYNAMIC Thu Oct  8 18:27:11 EDT 2026"; kn=71; masks=0
         r k48c-$kn-d-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_record=0"
     fi
-    r k48c-$kn-s-$n "$BEH asahi_m4.ta_sel6=2 asahi_m4.diag_record=0"
-    r k48c-$kn-r-$n "$BEH $REC asahi_m4.ta_sel6=0"
+    want s && r k48c-$kn-s-$n "$BEH asahi_m4.ta_sel6=2 asahi_m4.diag_record=0"
+    want r && r k48c-$kn-r-$n "$BEH $REC asahi_m4.ta_sel6=0"
     if [ $masks = 1 ]; then
-        r k48c-$kn-m23-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x23"
-        r k48c-$kn-m03-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x03"
-        r k48c-$kn-m1d-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x1d"
+        want m23 && r k48c-$kn-m23-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x23"
+        want m03 && r k48c-$kn-m03-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x03"
+        want m1d && r k48c-$kn-m1d-$n "$BEH asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x1d"
     fi
     echo "after round $((n + 2)) (#$kn): d=$(stalls d) s=$(stalls s) r=$(stalls r) m23=$(stalls m23) m03=$(stalls m03) m1d=$(stalls m1d)"
 done

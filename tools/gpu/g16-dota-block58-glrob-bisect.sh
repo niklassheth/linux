@@ -6,11 +6,6 @@
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
-# Manager: claude-driver's ~30 min Metal mesh-variant slot runs between blocks 56 and 58 (owner claude-driver-mesh).
-H=tmp/leases/history.log; start=$(wc -l < $H); t1=$(date +%s)
-until tail -n +$((start + 1)) $H | grep -q "release mini claude-driver-mesh"; do
-    [ $(( $(date +%s) - t1 )) -gt 2700 ] && { echo "mesh slot wait timed out"; break; }; sleep 30; done
-echo "mesh slot done ($(date +%T))"
 M=/home/nsheth/Projects/asahi/artifacts/desktop-mesa
 t0=$(date +%s); until [ -s $M/mesa-6757a3d/SHA256SUMS ] && [ -s $M/mesa-13a77ea/SHA256SUMS ]; do
     [ $(( $(date +%s) - t0 )) -gt 7200 ] && { echo "trees not staged"; exit 1; }; sleep 60; done

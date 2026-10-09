@@ -180,12 +180,13 @@ PY
           # and one when the stall detector fires. Each grab has a timeout (the compositor may be frozen).
           mkdir -p "$observe/shots"; chmod 777 "$observe/shots"
           shot() { runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env
-              o=$0; timeout 6 ffmpeg -loglevel error -y -f x11grab -i "$DISPLAY" -frames:v 1 "$o.png" 2>/dev/null && exit 0
+              o=$0; timeout 10 spectacle -b -n -f -o "$o.png" >/dev/null 2>&1 && [ -s "$o.png" ] && exit 0
+              timeout 6 ffmpeg -loglevel error -y -f x11grab -i "$DISPLAY" -frames:v 1 "$o-x11.png" 2>/dev/null && exit 0
               timeout 6 xwd -root -silent > "$o.xwd" 2>/dev/null && [ -s "$o.xwd" ] && exit 0
               rm -f "$o.xwd"; timeout 6 import -window root "$o.png" 2>/dev/null' "$observe/shots/$1" < /dev/null; }
-          ( for i in $(seq 1 120); do systemctl is-active --quiet dota-game && break; sleep 1; done
-            sleep 20; shot loading; k=0
-            while systemctl is-active --quiet dota-game; do
+          ( for i in $(seq 1 180); do systemctl is-active --quiet dota-watch && break; sleep 1; done
+            sleep 25; shot loading; k=0
+            while systemctl is-active --quiet dota-watch; do
                 if stalled; then shot stall; echo "shot at stall $(date +%T)" >> "$observe/shots/log"; break; fi
                 k=$(( (k + 1) % 3 )); shot "last$k"; echo "last$k $(date +%T)" >> "$observe/shots/log"; sleep 4
             done ) > /dev/null 2>&1 &
@@ -212,7 +213,7 @@ PY
           cp "$A" "$observe/appmanifest_570.acf" 2>/dev/null
           echo "dota-build $(grep -oE '"(buildid|LastUpdated|TargetBuildID)"[[:space:]]+"[0-9]+"' "$A" 2>/dev/null | tr -s ' \t' ' ' | tr '\n' ' ') steam.inf=$(grep -hE 'PatchVersion|ClientVersion' "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/steam.inf" 2>/dev/null | tr '\n' ' ') shadercache=$(stat -c '%s@%y' "/mnt/g16-external/SteamLibrary/steamapps/common/dota 2 beta/game/dota/shadercache/vulkan/shaders.cache.blob" 2>/dev/null)" >> "$observe/verdicts.txt"
           mkdir -p "$observe/steam-logs"
-          cp -a /home/nsheth/.local/share/Steam/logs/{stderr.txt,console_log.txt,connection_log.txt,bootstrap_log.txt} "$observe/steam-logs/" 2>/dev/null
+          cp -a /home/nsheth/.local/share/Steam/logs/{stderr.txt,console_log.txt,connection_log.txt,bootstrap_log.txt,content_log.txt} "$observe/steam-logs/" 2>/dev/null
           journalctl -b -u g16-steam -u dota-game -u dota-watch -u dota-collector --no-pager > "$observe/steam-logs/units.log" 2>&1
           df -i /mnt/g16-external /tmp/codex-dota-loop > "$observe/df-inodes-end.txt" 2>&1
           df -h /mnt/g16-external /tmp > "$observe/df.txt"

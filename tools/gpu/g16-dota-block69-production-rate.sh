@@ -6,6 +6,12 @@
 set -uo pipefail
 cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
+# Manager: ~45 min macOS HV slot for claude-driver/claude-kernel (Metal kind-4 recovery capture, xspin) after block 68.
+# Wait for some other owner to acquire and then release the mini (cap 70 min).
+H=tmp/leases/history.log; start=$(wc -l < $H); t0=$(date +%s)
+until tail -n +$((start + 1)) $H | grep -E " acquire mini " | grep -vq " codex-dota " 2>/dev/null && tail -n +$((start + 1)) $H | grep -E " release mini " | grep -vq " codex-dota$"; do
+    [ $(( $(date +%s) - t0 )) -gt 4200 ] && { echo "HV slot wait capped"; break; }; sleep 30; done
+echo "HV capture slot over $(date +%T)"
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh; L=tools/lease/lease.sh
 K=artifacts/m4-linux/current; U="#108 SMP PREEMPT_DYNAMIC Fri Oct  9 14:05:12 EDT 2026"
 for n in 1 2 3; do

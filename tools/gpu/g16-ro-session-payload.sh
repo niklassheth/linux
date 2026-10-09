@@ -299,6 +299,44 @@ BURST
     rp-a) run_user rp-a 90 $rp --passes 3 --offscreen 4 --inflight 2 --mode fifo --seconds 60 ;;
     rp-b) run_user rp-b 90 $rp --passes 3 --offscreen 8 --inflight 3 --mode mailbox --seconds 60 ;;
     rp-c) run_user rp-c 90 $rp --passes 3 --offscreen 0 --inflight 3 --mode immediate --seconds 60 ;;
+    replay-steam)
+        # Replay loop with the Steam client running (manager, 2026-10-08): live Dota runs alongside Steam (g16-steam,
+        # steam-host.sh, in the same muvm VM; its UI renders ~300x650 on another slot), the replay sessions did not.
+        # Start Steam exactly as run-variant.sh does, wait 75 s, then x86 replays inside m4-muvm (joining Steam's VM)
+        # x8 and native replays x6 alongside it; then stop Steam cleanly.
+        Rg=/home/nsheth/g16-games/dota-shader-identity-20261006
+        m4-steam-shutdown 45; systemctl stop g16-steam 2>/dev/null; sleep 3
+        systemd-run --unit=g16-steam --collect --uid=nsheth --setenv=HOME=/home/nsheth /bin/bash $Rg/steam-host.sh
+        sleep 75
+        pgrep -af "steamwebhelper|steam.sh|ubuntu12_32/steam" | cut -c1-150 | head -5 > "$observe/$t-steam-procs.txt"
+        mkdir -p "$observe/driver-trace"
+        cp "$observe/extra/libvulkan_asahi.quar.so" "$observe/driver-trace/libvulkan_asahi.so"
+        printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$observe/driver-trace/icd.json"
+        chmod -R a+rX "$observe/driver-trace"; chmod 755 "$observe/extra/gfxrecon-replay.a64"; chmod a+rx "$observe" "$observe/extra"
+        trace=/mnt/g16-external/codex-dota-replay-20261008/dota_frames_1_through_1800.gfxr
+        cat > /home/nsheth/.cache/$t-x86.sh <<RL
+#!/bin/bash
+for i in \$(seq 1 8); do
+    echo "== replay \$i \$(date +%T)"
+    /opt/mesa-apple9-x86/gfxrecon-replay --wsi xcb -m rebind --sfa "$trace" > /home/nsheth/.cache/$t-last.log 2>&1
+    echo "rc=\$? \$(grep -oE 'Frame: [0-9]+' /home/nsheth/.cache/$t-last.log | tail -1)"
+done
+RL
+        cat > /home/nsheth/.cache/$t-a64.sh <<RL
+#!/bin/bash
+for i in \$(seq 1 6); do
+    echo "== replay \$i \$(date +%T)"
+    env VK_DRIVER_FILES="$observe/driver-trace/icd.json" VK_LOADER_LAYERS_DISABLE='~implicit~' HK_PERFTEST=batch \
+        "$observe/extra/gfxrecon-replay.a64" --wsi xcb -m rebind --sfa "$trace" > /home/nsheth/.cache/$t-a64-last.log 2>&1
+    echo "rc=\$? \$(grep -oE 'Frame: [0-9]+' /home/nsheth/.cache/$t-a64-last.log | tail -1)"
+done
+RL
+        chown nsheth:nsheth /home/nsheth/.cache/$t-x86.sh /home/nsheth/.cache/$t-a64.sh; chmod 755 /home/nsheth/.cache/$t-x86.sh /home/nsheth/.cache/$t-a64.sh; rm -f /home/nsheth/.cache/$t-guest.log
+        run_user $t-x86 400 m4-muvm /bin/bash -c "/home/nsheth/.cache/$t-x86.sh > /home/nsheth/.cache/$t-guest.log 2>&1"
+        cp /home/nsheth/.cache/$t-guest.log "$observe/$t-x86-guest.log" 2>/dev/null
+        run_user $t-a64 300 /home/nsheth/.cache/$t-a64.sh
+        m4-steam-shutdown 45; systemctl stop g16-steam 2>/dev/null
+        echo "$t: steam-procs=$(wc -l < "$observe/$t-steam-procs.txt") x86 replays=$(grep -c '^== replay' "$observe/$t-x86-guest.log" 2>/dev/null) ok=$(grep -c '^rc=0 Frame: 116' "$observe/$t-x86-guest.log" 2>/dev/null) a64 replays=$(grep -c '^== replay' "$observe/$t-a64.log") ok=$(grep -c '^rc=0 Frame: 116' "$observe/$t-a64.log")" >> "$observe/verdicts.txt" ;;
     replay-loop|replay-loop-x86)
         # Exposure loop (A4 is ~40% per live run): the full gfxr trace (116 frames, ~27 s) replayed back to back,
         # -m rebind --sfa, native trace driver (replay-loop) or x86 in m4-muvm (replay-loop-x86), up to 12 times,

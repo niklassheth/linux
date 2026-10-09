@@ -8,7 +8,8 @@ S=artifacts/dota-compute-stall-20261007/ro-session; H=tmp/leases/history.log; st
 until tail -n +$((start + 1)) $H | grep -q "release mini claude-driver"; do [ $(( $(date +%s) - t0 )) -gt 3600 ] && break; sleep 30; done
 echo "claude-driver slot over $(date +%T)"
 echo "block 67 (render_preempt on #109) start $(date +%T)"; $S/block67.sh
-t1=$(date +%s); until [ -s $S/next-after-driver ]; do [ $(( $(date +%s) - t1 )) -gt 1800 ] && echo 65 > $S/next-after-driver; sleep 20; done
+t1=$(date +%s); until [ -s $S/next-after-driver ]; do [ $(( $(date +%s) - t1 )) -gt 1800 ] && echo none > $S/next-after-driver; sleep 20; done
 d=$(cat $S/next-after-driver); echo "decision: $d ($(date +%T))"
-if [ "$d" = 66 ]; then $S/block66.sh; $S/block65.sh; else $S/block65.sh; fi
+# Manager 15:05: block 65 (RAC) dropped.
+if [ "$d" = 66 ]; then $S/block66.sh; else echo "block 66 skipped (#108 does not help Lethal)"; fi
 echo "dispatch done $(date -Is)"

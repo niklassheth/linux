@@ -64,4 +64,4 @@ if [ -n "${G16_DESKTOP_MESA_HOST:-}" ]; then
     G16_DESKTOP_MESA=$mesa_remote
 fi
 "$lease" renew mini codex-dota 30
-timeout 900 ssh "${ssh_options[@]}" "$mini" "G16_OVERLAY_BASE='${G16_OVERLAY_BASE:-}' G16_DOTA_MODE='${G16_DOTA_MODE:-}' G16_IO_THROTTLE='${G16_IO_THROTTLE:-}' G16_STEAM_OFFLINE='${G16_STEAM_OFFLINE:-}' G16_SYNTH_LOAD='${G16_SYNTH_LOAD:-}' G16_WORKLOG_DUMP='${G16_WORKLOG_DUMP:-}' G16_DESKTOP_MESA='${G16_DESKTOP_MESA:-}' bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true
+timeout 900 ssh "${ssh_options[@]}" "$mini" "G16_OVERLAY_BASE='${G16_OVERLAY_BASE:-}' G16_DOTA_MODE='${G16_DOTA_MODE:-}' G16_IO_THROTTLE='${G16_IO_THROTTLE:-}' G16_STEAM_OFFLINE='${G16_STEAM_OFFLINE:-}' G16_SYNTH_LOAD='${G16_SYNTH_LOAD:-}' G16_WORKLOG_DUMP='${G16_WORKLOG_DUMP:-}' G16_KEEPALIVE='${G16_KEEPALIVE:-}' G16_DESKTOP_MESA='${G16_DESKTOP_MESA:-}' bash '$remote_output/payload.sh' '$remote_output' '$G16_TESTS'" > "$local_output/payload-console.log" 2>&1 || true

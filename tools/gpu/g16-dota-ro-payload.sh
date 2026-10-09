@@ -219,6 +219,13 @@ PY
                 timeout 120 nice -n 5 zstd -q -19 -T4 -c "$big" > /dev/null &
                 wait; echo "synth-load done $(date +%T)" >> "$observe/verdicts.txt" ) &
           fi
+          # GPU keepalive (manager power arm): a separate tiny client submits one 64x64 pass every ~20 ms for the whole run,
+          # so the GPU never idles off between desktop frames. Dota's pinned ICD.
+          if [ "${G16_KEEPALIVE:-}" = 1 ]; then
+              runuser -u nsheth -- env HOME=/home/nsheth bash -c 'source /home/nsheth/.local/state/m4/session.env; unset ASAHI_MESA_DEBUG LD_PRELOAD; export HK_EXPERIMENTAL_APPLE9=1 MESA_SHADER_CACHE_DISABLE=true VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json; exec "$@"' _ \
+                  "$rb" --passes 1 --inflight 1 --width 64 --height 64 --burst 1 --idle-ms 20 --seconds 900 --timeout-ms 30000 > "$observe/keepalive.log" 2>&1 &
+              keepalive=$!; echo "keepalive pid $keepalive" >> "$observe/verdicts.txt"
+          fi
           # On-demand work-log dumps (#100, diag_mask&4): Dota's loading-end burst lands ~170-180 s after dota-game starts
           # (stalled runs: detection at +188..194 s, 10 s after the stuck submit). G16_WORKLOG_DUMP="175 185 195" = seconds.
           if [ -n "${G16_WORKLOG_DUMP:-}" ]; then
@@ -240,6 +247,7 @@ PY
           fi
           EXPECT_DRIVER=$drv/libvulkan_asahi.so WATCH_LIMIT=300 WATCH_MIN_KB=2097152 \
               timeout 600 bash $R/run-variant.sh "$label" "$variant" > "$observe/dota-harness.log" 2>&1
+          [ -n "${keepalive:-}" ] && { kill $keepalive 2>/dev/null; echo "keepalive: $(grep -c 'idle t=' "$observe/keepalive.log") submits, $(grep -h STALL "$observe/keepalive.log" | head -1)" >> "$observe/verdicts.txt"; }
           kill $shotter 2>/dev/null; ls "$observe/shots" | tr '\n' ' ' | sed 's/^/shots: /' >> "$observe/verdicts.txt"; echo >> "$observe/verdicts.txt"
           echo "dota variant=$variant rc=$?" >> "$observe/verdicts.txt"
           echo "driver-stamp $drv/libvulkan_asahi.so $(strings "$drv/libvulkan_asahi.so" | grep -m1 -oE 'git-[0-9a-f]+') $(sha256sum "$drv/libvulkan_asahi.so" | cut -c1-16)" >> "$observe/verdicts.txt"

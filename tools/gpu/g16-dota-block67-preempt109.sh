@@ -9,11 +9,11 @@ cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x04 asahi_m4.snap_from=2800 asahi_m4.snap_to=2840 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
-K=artifacts/m4-linux/bits-7.3-110-renderclass; U="#110 SMP PREEMPT_DYNAMIC Fri Oct  9 14:17:18 EDT 2026"
+K=${G16_K:?kernel artifact dir}; U=$(sed "s/ (.*//" $K/UTS)
 # Manager 15:05: defaults only, until 2 stalls with 3D-side worksnaps + 1 clean run (cap 8).
 st=0; cl=0
 for n in 1 2 3 4 5 6 7 8; do
-    t=k67-def-$n
+    t=k67b-def-$n
     env G16_KEEP_LEASE=1 G16_STEAM_OFFLINE=1 G16_SYNTH_LOAD=1 G16_IO_THROTTLE=50M "G16_WORKLOG_DUMP=116 124 132" G16_DESKTOP_MESA=old G16_TAG=$t G16_KERNEL_ARTIFACT=$K "G16_EXPECT_UTS=$U" G16_BASE_ARGS=asahi_m4.dependency_kind=0 "G16_BOOT_EXTRA=$BEH" G16_TESTS=dota-quar0 G16_OVERLAY_BASE=/mnt/g16-external/codex-dota-overlay/$t $R
     v=$(ls -d $S/$t-*/codex-dota-*/verdicts.txt 2>/dev/null | tail -1); k=${v%/verdicts.txt}/kernel.log
     if [ -z "$v" ] || ! grep -q "desktop-mesa libgallium c67094aff03da189" "$v" || ! grep -qE "STALL in|NO-STALL" "$v" || ! grep -q "G16: worklog" "$k"; then

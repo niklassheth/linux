@@ -9,7 +9,7 @@ cd /home/nsheth/Projects/asahi
 while [ -n "${WAIT_PID:-}" ] && kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
 S=artifacts/dota-compute-stall-20261007/ro-session; R=$S/ro-session.sh
 BEH="asahi_m4.context_sticky=0 asahi_m4.lifecycle=0 asahi_m4.cc_pattern=0 asahi_m4.ta_sel6=0 asahi_m4.diag_mask=0x04 asahi_m4.snap_from=2800 asahi_m4.snap_to=2840 asahi_m4.snap_comm=0x6e75726b62696c log_buf_len=8M loglevel=4"
-K=artifacts/m4-linux/bits-7.3-110-renderclass; U="#110 SMP PREEMPT_DYNAMIC Fri Oct  9 14:17:18 EDT 2026"
+K=${G16_K:?kernel artifact dir}; U=$(sed "s/ (.*//" $K/UTS)
 # Block 68 (claude-kernel's firmware-side switch control, after block 67): render_class=2 puts every new queue (KWin,
 # Xwayland, Dota) in one firmware priority class, so there is no class arbitration between their 3D. 3 pairs vs default.
 for n in 1 2 3; do

@@ -54,6 +54,7 @@ ssh "${ssh_options[@]}" "$mini" "mkdir -p '$remote_output'"
 scp "${ssh_options[@]}" -q "$here/payload.sh" "$mini:$remote_output/payload.sh"
 scp "${ssh_options[@]}" -q "$here/../copy-burst/copy_burst.c" "$mini:$remote_output/copy_burst.c"
 [ -d "$here/extra" ] && scp "${ssh_options[@]}" -q -r "$here/extra" "$mini:$remote_output/"
+[ -n "${G16_EXTRA2:-}" ] && scp "${ssh_options[@]}" -q -r "$G16_EXTRA2" "$mini:$remote_output/extra2"
 scp "${ssh_options[@]}" -q "$here/../render-burst/render_burst.c" "$here/../render-burst/render_present.c" "$here/../render-burst/spirv.h" "$here/../render-burst/spin.h" "$mini:$remote_output/"
 # Host-staged desktop Mesa tree: sync to the external disk (before the payload, so no copy I/O during the run).
 if [ -n "${G16_DESKTOP_MESA_HOST:-}" ]; then

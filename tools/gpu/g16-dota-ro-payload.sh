@@ -172,6 +172,18 @@ PY
               chown -R nsheth:nsheth "$R/driver-quar" "$R/dota-inner.sh"
               grep -o "quar$qms)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
           esac
+          case "$variant" in pass)
+              # Per-pass GPU timing for claude-compiler (claude-driver's pass-a64-ed7603d: ed7603d + perf + pass overlays,
+              # aarch64, loaded through the FEX Vulkan thunks). HK_GPU_PASS_SPLIT=1 times each dispatch on its own.
+              mkdir -p "$R/driver-pass"
+              cp "$observe/extra2/libvulkan_asahi.so" "$R/driver-pass/libvulkan_asahi.so"
+              printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "./libvulkan_asahi.so", "api_version": "1.4.0"}}\n' > "$R/driver-pass/icd.json"
+              grep -qF "pass) " "$R/dota-inner.sh" || sed -i "s|case \"\\\$variant\" in |case \"\$variant\" in pass) export VK_DRIVER_FILES=\"\$root/driver-pass/icd.json\" HK_APPLE9_DUMP_MODE=0 HK_GPU_PASS_SPLIT=1 HK_GPU_PASS_SHADER_DIR=\"\$out/shaders\" HK_GPU_BUSY_FILE_PASS=\"\$out/gpu-busy-%p.log\"; mkdir -p \"\$out/shaders\";; |" "$R/dota-inner.sh"
+              # dota-inner.sh unsets HK_GPU_BUSY_FILE after the variant case; set it after that line for this variant.
+              grep -qF 'HK_GPU_BUSY_FILE_PASS:+' "$R/dota-inner.sh" || sed -i 's|^unset HK_GPU_BUSY_FILE HK_TIMELINE_FILE$|unset HK_GPU_BUSY_FILE HK_TIMELINE_FILE; [ -n "${HK_GPU_BUSY_FILE_PASS:+x}" ] \&\& export HK_GPU_BUSY_FILE="$HK_GPU_BUSY_FILE_PASS"|' "$R/dota-inner.sh"
+              chown -R nsheth:nsheth "$R/driver-pass" "$R/dota-inner.sh"
+              { grep -o "pass)[^;]*;[^;]*" "$R/dota-inner.sh"; grep -n "HK_GPU_BUSY_FILE_PASS:+" "$R/dota-inner.sh"; } >> "$observe/verdicts.txt" ;;
+          esac
           case "$variant" in stats)
               # claude-compiler's variant-stats build (8825824 + HK_APPLE9_VARIANT_STATS), not an A4 arm.
               mkdir -p "$R/driver-stats"
@@ -181,7 +193,7 @@ PY
               chown -R nsheth:nsheth "$R/driver-stats" "$R/dota-inner.sh"
               grep -o "stats)[^;]*" "$R/dota-inner.sh" >> "$observe/verdicts.txt" ;;
           esac
-          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; stats) drv=$R/driver-stats ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
+          case "$variant" in mode0) drv=$R/driver ;; quar*) drv=$R/driver-quar ;; stats) drv=$R/driver-stats ;; pass) drv=$R/driver-pass ;; fb0|fb1) drv=$R/driver-fb-a64 ;; inst) drv=/usr/lib64 ;; vatrace) drv=$R/driver-vatrace ;; exportid|exporthash) drv=$R/driver-export ;; fixed) drv=$R/driver-fixed ;; *) echo "bad variant $variant" >> "$observe/verdicts.txt"; continue ;; esac
           # run-variant.sh chowns the whole results tree; over an overlay that
           # copies up thousands of old files (ENOSPC). Give it a fresh tree.
           mkdir -p "$overlay/results-fresh" && chown nsheth:nsheth "$overlay/results-fresh"

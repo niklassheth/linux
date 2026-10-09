@@ -1,3 +1,4 @@
+#include <unistd.h>
 // SPDX-License-Identifier: MIT
 /* render_burst: headless Vulkan test modelled on Dota's loading-phase stall:
  * chains of tiny dependent render passes on one queue. Each pass is one
@@ -9,6 +10,7 @@
  *   render_burst [--passes N] [--width W --height H] [--format srgb|unorm]
  *                [--clear] [--blend 0|1] [--inflight K] [--submits S]
  *                [--work R] [--timeout-ms T] [--seconds S] [--instances N]
+ *                [--burst B --idle-ms I]  (drain + sleep I ms after every B submits)
  * --instances N draws N overlapping full-screen triangles per pass, so tile
  * lists overflow the tiler heap and the firmware must do partial renders.
  */
@@ -36,7 +38,7 @@ static double now(void)
 int main(int argc, char **argv)
 {
    unsigned passes = 8, width = 1280, height = 720, inflight = 4, submits = 100000;
-   unsigned work = 0, timeout_ms = 5000, seconds = 60, instances = 1;
+   unsigned work = 0, timeout_ms = 5000, seconds = 60, instances = 1, burst = 0, idle_ms = 0;
    bool clear = false, blend = true, srgb = true;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = atoi(argv[++i]);
@@ -47,6 +49,8 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--blend") && i + 1 < argc) blend = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--submits") && i + 1 < argc) submits = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--burst") && i + 1 < argc) burst = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--idle-ms") && i + 1 < argc) idle_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--work") && i + 1 < argc) work = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
@@ -155,6 +159,13 @@ int main(int argc, char **argv)
    unsigned long total_passes = 0;
    for (unsigned k = 0; k < submits; ++k) {
       if (now() - t0 > seconds) break;
+      /* Idle mode: after every `burst` submits, drain the GPU and sleep idle_ms (first render after a long idle). */
+      if (burst && idle_ms && k && k % burst == 0) {
+         VkResult dr = vkWaitForFences(dev, inflight, fences, VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
+         if (dr != VK_SUCCESS) { printf("STALL draining before idle at submit %u result=%d t=%.3f\n", k, dr, now() - t0); fflush(stdout); return 1; }
+         usleep(idle_ms * 1000u);
+         printf("burst %u after %u ms idle t=%.1f\n", k / burst, idle_ms, now() - t0); fflush(stdout);
+      }
       unsigned slot = k % inflight;
       VkResult wr = vkWaitForFences(dev, 1, &fences[slot], VK_TRUE, (uint64_t)timeout_ms * 1000000ull);
       if (wr != VK_SUCCESS) {

@@ -264,6 +264,11 @@ PY
     rb-small) run_user rb-small 90 $rb --passes 8 --inflight 4 --width 64 --height 64 --seconds 60 ;;
     rb-ovf) run_user rb-ovf 90 $rb --passes 4 --inflight 3 --instances 4000 --seconds 60 ;;
     rb-ovf2) run_user rb-ovf2 90 $rb --passes 1 --inflight 6 --instances 20000 --seconds 60 ;;
+    # Idle->busy (manager): bursts of 4 two-pass 1280x720 renders, GPU drained, then a multi-second idle; Dota's pinned ICD.
+    rb-idle6|rb-idle2|rb-idle0)
+        ms=${t#rb-idle}; ms=$((ms * 1000)); [ "$ms" = 0 ] && ms=1
+        run_user $t 330 env VK_DRIVER_FILES=/home/nsheth/g16-games/dota-shader-identity-20261006/driver-quar/icd.json \
+            $rb --passes 2 --inflight 4 --burst 4 --idle-ms $ms --seconds 300 --timeout-ms 15000 ;;
     rp-firstbig)
         # Partner renders a 1280x720 swapchain throughout (like KWin/Xwayland drawing that shape); 20 fresh
         # processes each draw 60 small-only frames, then their first 1280x720 swapchain LOAD+blend pass.

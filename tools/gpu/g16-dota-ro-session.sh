@@ -58,8 +58,8 @@ scp "${ssh_options[@]}" -q "$here/../render-burst/render_burst.c" "$here/../rend
 # Host-staged desktop Mesa tree: sync to the external disk (before the payload, so no copy I/O during the run).
 if [ -n "${G16_DESKTOP_MESA_HOST:-}" ]; then
     mesa_remote=/mnt/g16-external/codex-dota-mesa/$(basename "$G16_DESKTOP_MESA_HOST")
-    ssh "${ssh_options[@]}" "$mini" "mkdir -p $mesa_remote"
-    rsync -a --delete -e "ssh ${ssh_options[*]}" "$G16_DESKTOP_MESA_HOST/" "$mini:$mesa_remote/" > "$local_output/desktop-mesa-sync.log" 2>&1
+    ssh "${ssh_options[@]}" "$mini" "{ mountpoint -q /mnt/g16-external && mount -o remount,rw /mnt/g16-external || mount -o rw /dev/sda1 /mnt/g16-external; } && mkdir -p $mesa_remote" > "$local_output/desktop-mesa-sync.log" 2>&1
+    rsync -a --delete -e "ssh ${ssh_options[*]}" "$G16_DESKTOP_MESA_HOST/" "$mini:$mesa_remote/" >> "$local_output/desktop-mesa-sync.log" 2>&1
     ssh "${ssh_options[@]}" "$mini" "cd $mesa_remote && sha256sum -c --quiet SHA256SUMS" >> "$local_output/desktop-mesa-sync.log" 2>&1
     G16_DESKTOP_MESA=$mesa_remote
 fi

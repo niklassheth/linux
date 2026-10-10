@@ -38,3 +38,11 @@ All runs were in asahi-03's RO boots, kernels #119 (= #92 + diag) and #121 (+ ho
 - **The separate-submit edge** goes through drm_sched (fence → scheduler worker → publish). It costs ~280 µs idle and becomes whole-millisecond (jiffy-quantized) under all-core CPU load. irq_notify doesn't help; pump_prio=2 helped the unbatched case in one run.
 - **Lethal on the mini** has ~23 in-submission R→C edges per frame at 0.44 ms mean under cd1 (0.07 ms under cd0/cd2). Its trace shows the notification ~23 µs before release but holds of ~1 ms, so there the firmware's completion notification itself is late.
 - Nothing on the Air reproduces a late notification. **Open:** Lethal on the Air (claude-driver's harness port) decides whether it's mini-specific or Lethal-specific.
+
+## Next, when the Air is back (claude-kernel's priority)
+
+1. #121 `asahi_m4.pump_prio=2 asahi_m4.sched_highpri=1`, all cores busy: `h121-arm.sh pumphp` (batch + nobatch).
+   - **Why:** the batched semaphore hop is a drm_sched run_job hop that pump_prio can't reach.
+2. A pump_prio=2 repeat (noise check on the 272 µs vs 2.7 ms split).
+3. If both semaphore hops collapse to idle level, `pump_prio=2 sched_highpri=1` is a cheap production candidate (scheduling priority only).
+4. Lethal on the Air (claude-driver) for the in-submission edge: is it mini-specific or Lethal-specific?

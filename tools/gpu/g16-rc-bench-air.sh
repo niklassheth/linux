@@ -17,7 +17,7 @@ ssh $A "command -v stress-ng || echo no-stress-ng; nproc" >> $out/setup.txt 2>&1
 IFS=';' read -ra cfgs <<< "${CONFIGS:-barrier 16;barrier 64;semaphore 16}"
 for cfg in "${cfgs[@]}"; do set -- $cfg; m=$1; e=$2; shift 2; x="$*"; nm="$m-$e$(echo "$x" | tr -d " -" | sed "s/^./-&/")"
   # Per-run kernel-log delta via a journal cursor (keeps the ring buffer intact for asahi-03's checks).
-  ssh $A "setsid bash -c '$lcmd; wait' >/dev/null 2>&1 & echo \$! > $rd/load.pid; sleep 3" ; ssh $A "cd $rd && cur=\$(journalctl -k -n1 --show-cursor | sed -n 's/^-- cursor: //p'); VK_DRIVER_FILES=$icd HK_EXPERIMENTAL_APPLE9=1 timeout 120 ./rc_bench --mode $m --edges $e --frames 1000 $x; sleep 1; journalctl -k --no-pager -o short-monotonic --after-cursor=\"\$cur\"" > $out/$nm.txt 2>&1
+  ssh $A "setsid bash -c '$lcmd; wait' >/dev/null 2>&1 & echo \$! > $rd/load.pid; sleep 3" ; ssh $A "cd $rd && cur=\$(journalctl -k -n1 --show-cursor | sed -n 's/^-- cursor: //p'); VK_DRIVER_FILES=$icd HK_EXPERIMENTAL_APPLE9=1 ${HKP:+HK_PERFTEST=$HKP} timeout 120 ./rc_bench --mode $m --edges $e --frames 1000 $x; sleep 1; journalctl -k --no-pager -o short-monotonic --after-cursor=\"\$cur\"" > $out/$nm.txt 2>&1
   ssh $A "pkill -P \$(cat $rd/load.pid) 2>/dev/null; kill -- -\$(cat $rd/load.pid) 2>/dev/null; pkill -f 'stress-n[g]|rclo[a]d|while [:]; do [:]' 2>/dev/null; uptime" >> $out/$nm.txt 2>&1
   echo "== $tag $nm: $(grep -E 'frames/s|render-end -> compute' $out/$nm.txt | tr '\n' ' ')  rc-release-lines=$(grep -c 'rc release after notification' $out/$nm.txt)"
 done

@@ -158,6 +158,13 @@ PY
               sed -i -E 's/("setting\.fullscreen"\s+)"[01]"/\1"1"/; s/("setting\.(coop_fullscreen|nowindowborder)"\s+)"[01]"/\1"0"/; s/("setting\.defaultres"\s+)"[0-9]+"/\1"1920"/; s/("setting\.defaultresheight"\s+)"[0-9]+"/\1"1080"/' "$V"
               sed -i 's/ -windowed -w 1280 -h 720 / -fullscreen -w 1920 -h 1080 /' "$R/dota-inner.sh" ;;
           esac
+          # Audio (manager 21:00: #68/#76 vs #92 differ only in MCA audio): record the audio devices, and optionally launch
+          # Dota with -nosound.
+          { echo "audio-cards $(aplay -l 2>/dev/null | grep -c '^card') $(aplay -l 2>/dev/null | grep '^card' | cut -c1-60 | tr '\n' ';')"; } >> "$observe/verdicts.txt"
+          if [ "${G16_DOTA_NOSOUND:-}" = 1 ]; then
+              sed -i 's| -novid | -novid -nosound |' "$R/dota-inner.sh"; chown nsheth:nsheth "$R/dota-inner.sh"
+              echo "dota-nosound $(grep -c -- '-nosound' "$R/dota-inner.sh")" >> "$observe/verdicts.txt"
+          fi
           if [ -n "${G16_DOTA_MODE:-}" ]; then
               chown nsheth:nsheth "$V" "$R/dota-inner.sh"
               { echo "dota-mode=$G16_DOTA_MODE"; grep -E 'setting\.(defaultres|defaultresheight|fullscreen|coop_fullscreen|nowindowborder)"' "$V"; grep -oE '\-(windowed|fullscreen) -w [0-9]+ -h [0-9]+' "$R/dota-inner.sh"; } >> "$observe/verdicts.txt"

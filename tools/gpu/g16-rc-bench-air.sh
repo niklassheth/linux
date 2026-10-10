@@ -7,7 +7,8 @@ out=$here/../rc-bench-air/$tag-$(date +%Y%m%d_%H%M%S); mkdir -p "$out"; rd=/tmp/
 ssh -o ConnectTimeout=5 $A "mkdir -p $rd" && scp -q $here/rc_bench.a64 $A:$rd/rc_bench || exit 1
 ssh $A "uname -v; cat /proc/cmdline; chmod +x $rd/rc_bench; sha256sum $rd/rc_bench" > $out/setup.txt 2>&1
 for cfg in "barrier 16" "barrier 64" "semaphore 16"; do set -- $cfg
-  ssh $A "cd $rd && dmesg -c >/dev/null; VK_DRIVER_FILES=$icd HK_EXPERIMENTAL_APPLE9=1 timeout 120 ./rc_bench --mode $1 --edges $2 --frames 1000; dmesg" > $out/$1-$2.txt 2>&1
+  # Per-run kernel-log delta via a journal cursor (keeps the ring buffer intact for asahi-03's checks).
+  ssh $A "cd $rd && cur=\$(journalctl -k -n0 --show-cursor | sed -n 's/^-- cursor: //p'); VK_DRIVER_FILES=$icd HK_EXPERIMENTAL_APPLE9=1 timeout 120 ./rc_bench --mode $1 --edges $2 --frames 1000; sleep 1; journalctl -k --no-pager -o short-monotonic --after-cursor=\"\$cur\"" > $out/$1-$2.txt 2>&1
   echo "== $tag $1 x$2: $(grep -E 'frames/s|render-end -> compute' $out/$1-$2.txt | tr '\n' ' ')  rc-release-lines=$(grep -c 'rc release after notification' $out/$1-$2.txt)"
 done
 echo "results: $out"

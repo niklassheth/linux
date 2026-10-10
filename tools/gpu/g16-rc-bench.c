@@ -10,7 +10,7 @@
  * compute-end -> next-render-start gap per edge; the report also gives frames/s and CPU frame time.
  *
  *   rc_bench [--mode barrier|semaphore] [--edges N] [--frames F] [--seconds S] [--width W --height H]
- *            [--compute-iters I] [--groups G] [--timestamps 0|1] [--timeout-ms T]
+ *            [--compute-iters I] [--groups G] [--timestamps 0|1] [--timeout-ms T] [--r2c-src color|fragment|all] [--event]
  */
 #include <vulkan/vulkan.h>
 #include <stdio.h>
@@ -55,7 +55,7 @@ int main(int argc, char **argv)
 {
    unsigned edges = 16, frames = 1000, seconds = 30, width = 256, height = 256, iters = 64, groups = 16;
    unsigned timeout_ms = 5000;
-   bool semaphore = false, timestamps = true;
+   bool semaphore = false, timestamps = true, use_event = false; const char *r2c_src = "color";
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--mode") && i + 1 < argc) semaphore = !strcmp(argv[++i], "semaphore");
       else if (!strcmp(argv[i], "--edges") && i + 1 < argc) edges = atoi(argv[++i]);
@@ -67,6 +67,8 @@ int main(int argc, char **argv)
       else if (!strcmp(argv[i], "--groups") && i + 1 < argc) groups = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timestamps") && i + 1 < argc) timestamps = atoi(argv[++i]);
       else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--r2c-src") && i + 1 < argc) r2c_src = argv[++i];
+      else if (!strcmp(argv[i], "--event")) use_event = true;
       else { fprintf(stderr, "bad arg %s\n", argv[i]); return 64; }
    }
    if (edges < 1) edges = 1;
@@ -84,6 +86,7 @@ int main(int argc, char **argv)
    if (timestamps && (!qfp.timestampValidBits || props.limits.timestampPeriod == 0)) {
       printf("timestamps unsupported on queue family 0; disabling\n"); timestamps = false;
    }
+   printf("r2c barrier: src=%s event=%d\n", r2c_src, use_event);
    printf("device %s driver 0x%x mode=%s edges/frame=%u size=%ux%u compute=%ux64 threads x %u iters ts_period=%.3f ns\n",
           props.deviceName, props.driverVersion, semaphore ? "semaphore" : "barrier", edges, width, height,
           groups, iters, props.limits.timestampPeriod);
@@ -209,6 +212,15 @@ int main(int argc, char **argv)
       .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT };
    VkDependencyInfo r2c_di = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &r2c };
+   /* Barrier-shape variants (to find what makes DXVK's in-submission R->C kernel-held): source stage = color output
+    * (default), fragment shader, or all graphics/commands; --event uses vkCmdSetEvent2/vkCmdWaitEvents2 (split barrier). */
+   if (!strcmp(r2c_src, "fragment")) { r2c.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+      r2c.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT; }
+   else if (!strcmp(r2c_src, "all")) { r2c.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; r2c.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+      r2c.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; r2c.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT; }
+   VkEvent ev = VK_NULL_HANDLE;
+   if (use_event) { VkEventCreateInfo eci = { .sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO, .flags = VK_EVENT_CREATE_DEVICE_ONLY_BIT };
+      CHECK(vkCreateEvent(dev, &eci, NULL, &ev)); }
 
 #define REC_RENDER(cb, e, f) do { \
       VkDependencyInfo di_ = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toatt }; \
@@ -254,7 +266,9 @@ int main(int argc, char **argv)
          CHECK(vkBeginCommandBuffer(cb, &bi));
          for (unsigned e = 0; e < edges; ++e) {
             REC_RENDER(cb, e, f);
-            vkCmdPipelineBarrier2(cb, &r2c_di);
+            if (use_event) { vkCmdSetEvent2(cb, ev, &r2c_di); vkCmdWaitEvents2(cb, 1, &ev, &r2c_di);
+               vkCmdResetEvent2(cb, ev, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT); }
+            else vkCmdPipelineBarrier2(cb, &r2c_di);
             REC_COMPUTE(cb, e, f);
          }
          CHECK(vkEndCommandBuffer(cb));

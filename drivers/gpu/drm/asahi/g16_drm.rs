@@ -156,6 +156,7 @@ pub(crate) struct Data {
     _early: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _dep_elide: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+    _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _debugfs: kernel::debugfs::Dir,
@@ -240,6 +241,14 @@ pub(crate) fn register<'a>(
         dir.read_write_file(c_str!("dep_elide"), crate::g16_timeline::FlagKnob::DEP_ELIDE),
         GFP_KERNEL,
     )?;
+    crate::g16_timeline::KICK_FIRST.store(
+        crate::module_parameters::kick_first.value().min(1),
+        Ordering::Relaxed,
+    );
+    let kick_first = KBox::pin_init(
+        dir.read_write_file(c_str!("kick_first"), crate::g16_timeline::FlagKnob::KICK_FIRST),
+        GFP_KERNEL,
+    )?;
     let dep_stats = KBox::pin_init(
         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
         GFP_KERNEL,
@@ -280,6 +289,7 @@ pub(crate) fn register<'a>(
         _early: early,
         _dep_elide: dep_elide,
         _dep_stats: dep_stats,
+        _kick_first: kick_first,
         _profile_knob: profile_knob,
         _lane_cap: lane_cap,
         _debugfs: dir, });
@@ -1627,6 +1637,19 @@ impl WorkItem for Execution {
                             // Experiment: one channel message per Work
                             // instead of one per lane for the whole pass.
                             runtime.flush()?;
+                        } else if admitted == 1
+                            && crate::g16_timeline::KICK_FIRST.load(Ordering::Relaxed) != 0
+                        {
+                            // Ring the doorbell for the pass's first Work so
+                            // an idle GPU starts it while the rest of the pass
+                            // (up to 63 more Works) is still being written.
+                            runtime.flush()?;
+                            if crate::module_parameters::timeline.value() >= 2 {
+                                let job = &mut engine.jobs[index];
+                                if job.kick == 0 {
+                                    job.kick = ticks();
+                                }
+                            }
                         }
                         if admitted == 64 {
                             break;

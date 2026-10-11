@@ -332,6 +332,7 @@ impl FlagKnob {
     pub(crate) const EARLY_SIGNAL: Self = Self { cell: &EARLY_SIGNAL, name: "early_signal", max: 2 };
     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
     pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
+    pub(crate) const KICK_FIRST: Self = Self { cell: &KICK_FIRST, name: "kick_first", max: 1 };
 }
 
 impl kernel::debugfs::Writer for FlagKnob {
@@ -396,3 +397,10 @@ impl kernel::debugfs::Writer for DepStats {
         )
     }
 }
+
+/// Ring the doorbell right after each pump pass's first admitted Work
+/// (asahi_m4.kick_first, runtime: debugfs `asahi_m4/kick_first`), besides the
+/// end-of-pass flush. A 64-Work submission otherwise waits for the whole pass
+/// to be written before its first Work can start (kick 411 µs after first
+/// publication, p50, start_lat --chain 64 batch on #165).
+pub(crate) static KICK_FIRST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

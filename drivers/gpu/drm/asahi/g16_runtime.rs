@@ -873,6 +873,7 @@ impl Bootstrap {
     /// Publish fully prepared rings together, then kick each used engine once
     /// per priority. No staged Work may remain when the worker sleeps.
     pub(crate) fn flush(&mut self) -> Result {
+        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_FLUSH);
         if self.publications.is_empty() {
             return Ok(());
         }
@@ -1891,6 +1892,7 @@ impl Bootstrap {
         timestamps: [u64; 4],
         dependencies: &[Option<Stamp>; 2],
     ) -> Result<Receipt> {
+        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_RENDER);
         let mut queue = queues.lock();
         let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies)?;
         let dependencies = &resolved;
@@ -2559,6 +2561,7 @@ impl Bootstrap {
         timestamps: [u64; 4],
         dependencies: &[Option<Stamp>; 2],
     ) -> Result<Receipt> {
+        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_COMPUTE);
         let mut queue = queues.lock();
         let mut client = owner.lock();
         let resolved = self.resolve_compute_dependencies(&mut queue, dependencies)?;

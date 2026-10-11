@@ -297,6 +297,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
         },
+        read_opt: u32 {
+            default: 1,
+            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, dep_elide's reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+        },
         kick_first: u32 {
             default: 0,
             description: "1 rings the doorbell after each pump pass's first admitted Work as well as at the end of the pass, so a large submission's first Work starts before the rest are written. Runtime: debugfs asahi_m4/kick_first",

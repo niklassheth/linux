@@ -164,6 +164,7 @@ pub(crate) struct Data {
     _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _read_opt: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _safety_poll: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+    _scratch_zero: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _debugfs: kernel::debugfs::Dir,
@@ -272,6 +273,14 @@ pub(crate) fn register<'a>(
         dir.read_write_file(c_str!("safety_poll_ms"), crate::g16_timeline::FlagKnob::SAFETY_POLL_MS),
         GFP_KERNEL,
     )?;
+    crate::g16_timeline::SCRATCH_ZERO.store(
+        crate::module_parameters::scratch_zero.value().min(2),
+        Ordering::Relaxed,
+    );
+    let scratch_zero = KBox::pin_init(
+        dir.read_write_file(c_str!("scratch_zero"), crate::g16_timeline::FlagKnob::SCRATCH_ZERO),
+        GFP_KERNEL,
+    )?;
     let dep_stats = KBox::pin_init(
         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
         GFP_KERNEL,
@@ -316,6 +325,7 @@ pub(crate) fn register<'a>(
         _kick_first: kick_first,
         _read_opt: read_opt,
         _safety_poll: safety_poll,
+        _scratch_zero: scratch_zero,
         _profile_knob: profile_knob,
         _lane_cap: lane_cap,
         _debugfs: dir, });

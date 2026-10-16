@@ -164,7 +164,6 @@ pub(crate) struct Data {
     _early: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _dep_elide: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
-    _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _read_opt: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _safety_poll: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
     _scratch_zero: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
@@ -252,14 +251,6 @@ pub(crate) fn register<'a>(
         dir.read_write_file(c_str!("dep_elide"), crate::g16_timeline::FlagKnob::DEP_ELIDE),
         GFP_KERNEL,
     )?;
-    crate::g16_timeline::KICK_FIRST.store(
-        crate::module_parameters::kick_first.value().min(1),
-        Ordering::Relaxed,
-    );
-    let kick_first = KBox::pin_init(
-        dir.read_write_file(c_str!("kick_first"), crate::g16_timeline::FlagKnob::KICK_FIRST),
-        GFP_KERNEL,
-    )?;
     crate::g16_timeline::READ_OPT.store(
         crate::module_parameters::read_opt.value().min(1),
         Ordering::Relaxed,
@@ -333,7 +324,6 @@ pub(crate) fn register<'a>(
         _early: early,
         _dep_elide: dep_elide,
         _dep_stats: dep_stats,
-        _kick_first: kick_first,
         _read_opt: read_opt,
         _safety_poll: safety_poll,
         _scratch_zero: scratch_zero,
@@ -1719,20 +1709,6 @@ impl WorkItem for Execution {
                         engine.cursor = index + 1;
                         progress = true;
                         admitted += 1;
-                        if admitted == 1
-                            && crate::g16_timeline::KICK_FIRST.load(Ordering::Relaxed) != 0
-                        {
-                            // Ring the doorbell for the pass's first Work so
-                            // an idle GPU starts it while the rest of the pass
-                            // (up to 63 more Works) is still being written.
-                            runtime.flush()?;
-                            if crate::module_parameters::timeline.value() >= 2 {
-                                let job = &mut engine.jobs[index];
-                                if job.kick == 0 {
-                                    job.kick = ticks();
-                                }
-                            }
-                        }
                         if admitted == 64 {
                             break;
                         }

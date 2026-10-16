@@ -1719,11 +1719,7 @@ impl WorkItem for Execution {
                         engine.cursor = index + 1;
                         progress = true;
                         admitted += 1;
-                        if crate::module_parameters::flush_each.value() != 0 {
-                            // Experiment: one channel message per Work
-                            // instead of one per lane for the whole pass.
-                            runtime.flush()?;
-                        } else if admitted == 1
+                        if admitted == 1
                             && crate::g16_timeline::KICK_FIRST.load(Ordering::Relaxed) != 0
                         {
                             // Ring the doorbell for the pass's first Work so

@@ -157,10 +157,6 @@ kernel::module_platform_driver! {
             default: 400,
             description: "Debug: at most this many renders are dumped per boot",
         },
-        unmap_full_inval: u32 {
-            default: 0,
-            description: "Experiment: on every VM bind and unbind, 1 also invalidates each bound context's whole ASID (not only the changed pages); 2 additionally invalidates all EL1 translations (tlbi vmalle1os). Both complete with dsb sy before the ioctl returns",
-        },
         event_affinity: u32 {
             default: 0,
             description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",

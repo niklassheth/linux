@@ -181,10 +181,6 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
         },
-        cc_pattern: u32 {
-            default: 0,
-            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 2: also the fragment work stamp Metal pairs with it (0x100 + 2k with completion 0, 0x510 + (n + 1) / 2 with completion 3). 3: also the tiling side's own phase from Metal (completion 0 when the ordinal % 5 == 3, stamps 0x100 + 2k or 0x50f + (n + 1) / 2). 0: completion_control as configured",
-        },
         ta3d_item: u32 {
             default: 0,
             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",

@@ -27,9 +27,6 @@ pub(crate) struct Parameters {
     /// Diagnostics: the submitting process, captured at ioctl time.
     pub(crate) tgid: i32,
     pub(crate) comm: [u8; 16],
-    /// Tiling-side completion_control when it differs from the fragment
-    /// side (Metal phases them independently).
-    pub(crate) tiling_completion_control: Option<u64>,
     pub(crate) context_base: u64,
     pub(crate) cycle: u64,
     pub(crate) deflake_1: u64,
@@ -265,7 +262,7 @@ impl Parameters {
             (0x10209, self.tiling_work_stamp),
             (0x1c9f0, self.tiling_work_stamp),
             (0x14320, self.tiling_work_stamp),
-            (0x14308, self.tiling_completion_control.unwrap_or(self.completion_control)),
+            (0x14308, self.completion_control),
             (0x14318, self.ta_status | 1),
             (0x01740, 1),
         ])

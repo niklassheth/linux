@@ -443,17 +443,6 @@ fn ring_room(tail: u32, read: u32, done: u32, entries: u32, capacity: u32) -> bo
             .all(|&cursor| (tail + capacity - cursor) % capacity + entries < capacity / 2)
 }
 
-/// First fragment-lane stamp of a render queue. Experiment ta3d_item=3
-/// numbers a render's fragment stamps like its tiling stamps, as Metal does,
-/// so its TA-to-3D wait carries the same value as its own (+0x24) and as the
-/// awaited one.
-fn fragment_stamp_base() -> u32 {
-    if crate::module_parameters::ta3d_item.value() >= 3 {
-        0xc00
-    } else {
-        0x100
-    }
-}
 
 impl Bootstrap {
     /// Report each exhausted resource once, without logging every retry or
@@ -776,7 +765,7 @@ impl Bootstrap {
             // target. This also permits qualification near stamp rollover.
             let (ordinal, first) = match stage {
                 0 => (owner.render_count, 0xc00),
-                1 => (owner.render_count, fragment_stamp_base()),
+                1 => (owner.render_count, 0x100),
                 _ => (owner.compute_count, 0x100),
             };
             let current = g16_stamp::previous(g16_stamp::value(ordinal, first));
@@ -2415,7 +2404,7 @@ impl Bootstrap {
         a.tiling_counter = a.fragment_counter.wrapping_add(1);
         // Firmware's dependency graph requires consecutive stamp updates
         // within each lane, even when other queues publish between them.
-        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, fragment_stamp_base()));
+        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
         a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
         let (va, aliased) = self.allocate_work(true)?;
         a.tiling_shared_tail = va + 0x10000;

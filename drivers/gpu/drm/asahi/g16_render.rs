@@ -1177,24 +1177,11 @@ impl Addresses {
         u32_at(&mut out, 0, 4);
         u64_at(&mut out, 4, self.tiling_firmware_stamp);
         u64_at(&mut out, 0xc, self.tiling_firmware_stamp);
-        // Experiment (ta3d_item): Metal's own-pass TA-to-3D wait repeats the
-        // awaited TA value at +0x24 (only its cross-queue kind-0 waits carry a
-        // different value there) and uses a per-command uuid with the context
-        // id in the high byte.
-        let form = crate::module_parameters::ta3d_item.value();
-        // Form 3 numbers fragment stamps like tiling stamps, so the
-        // render's own stamp already equals the awaited one.
-        let self_value = if form == 1 || form == 2 { self.tiling_stamp } else { self.fragment_stamp };
-        let uuid = if form >= 2 {
-            (self.context_id << 24) | ((self.fragment_counter >> 1) & 0xff_ffff)
-        } else {
-            self.fragment_uuid
-        };
         for (off, value) in [
             (0x14, self.tiling_stamp),
             (0x20, self.tiling_event),
-            (0x24, self_value),
-            (0x28, uuid),
+            (0x24, self.fragment_stamp),
+            (0x28, self.fragment_uuid),
         ] {
             u32_at(&mut out, off, value as u32);
         }

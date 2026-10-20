@@ -39,6 +39,24 @@ void nhi_shutdown(struct tb_nhi *nhi);
 extern const struct dev_pm_ops nhi_pm_ops;
 
 /**
+ * struct tb_nhi_ring_layout - Layout of the ring registers in the NHI MMIO space
+ * @tx_desc_base: Offset of the descriptor registers of the first TX ring
+ * @rx_desc_base: Offset of the descriptor registers of the first RX ring
+ * @desc_stride: Stride between the descriptor registers of neighboring rings
+ * @tx_options_base: Offset of the options registers of the first TX ring
+ * @rx_options_base: Offset of the options registers of the first RX ring
+ * @options_stride: Stride between the options registers of neighboring rings
+ */
+struct tb_nhi_ring_layout {
+	u32 tx_desc_base;
+	u32 rx_desc_base;
+	u32 desc_stride;
+	u32 tx_options_base;
+	u32 rx_options_base;
+	u32 options_stride;
+};
+
+/**
  * struct tb_nhi_ops - NHI specific optional operations
  * @init: NHI specific initialization
  * @suspend_noirq: NHI specific suspend_noirq hook
@@ -50,6 +68,15 @@ extern const struct dev_pm_ops nhi_pm_ops;
  * @post_nvm_auth: hook to run after Thunderbolt 3 NVM authentication
  * @request_ring_irq: NHI specific interrupt retrieval hook
  * @release_ring_irq: NHI specific interrupt release hook
+ * @ring_interrupt_active: NHI specific hook to activate/deactivate the
+ *			   interrupt of a single ring. If not set the
+ *			   standard USB4 NHI registers are used.
+ * @ring_interrupt_mask: NHI specific hook to mask/unmask the interrupt of a
+ *			 single ring. If not set the standard USB4 NHI
+ *			 registers are used.
+ * @ring_configure: NHI specific hook to program the ring options registers
+ *		    and enable the ring with the given flags. If not set
+ *		    the standard USB4 NHI registers are used.
  * @is_present: Whether the device is currently present on the parent bus
  * @init_interrupts: NHI specific interrupt initialization hook
  */
@@ -64,6 +91,9 @@ struct tb_nhi_ops {
 	void (*post_nvm_auth)(struct tb_nhi *nhi);
 	int (*request_ring_irq)(struct tb_ring *ring, bool no_suspend);
 	void (*release_ring_irq)(struct tb_ring *ring);
+	void (*ring_interrupt_active)(struct tb_ring *ring, bool active);
+	void (*ring_interrupt_mask)(struct tb_ring *ring, bool mask);
+	void (*ring_configure)(struct tb_ring *ring, u32 flags, u32 e2e_flags);
 	bool (*is_present)(struct tb_nhi *nhi);
 	int (*init_interrupts)(struct tb_nhi *nhi);
 };
@@ -119,8 +149,10 @@ struct tb_nhi_ops {
 #define PCI_CLASS_SERIAL_USB_USB4			0x0c0340
 
 /* Host interface quirks */
-#define QUIRK_AUTO_CLEAR_INT	BIT(0)
-#define QUIRK_E2E		BIT(1)
+#define QUIRK_AUTO_CLEAR_INT				BIT(0)
+#define QUIRK_E2E					BIT(1)
+#define QUIRK_NO_DMA_PORT				BIT(3)
+#define QUIRK_NO_USB3_BW_ALLOC				BIT(4)
 
 /*
  * Minimal number of vectors when we use MSI-X. Two for control channel

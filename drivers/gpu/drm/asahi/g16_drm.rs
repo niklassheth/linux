@@ -1720,8 +1720,9 @@ impl WorkItem for Execution {
                         let execution = job.execution.clone();
                         let compute =
                             matches!(execution.parameters[job.next], Parameters::Compute(_));
-                        // Intra-queue UAPI dependencies are encoded into firmware
-                        // rings; preparation does not read GPU-produced data.
+                        // Ordinary preparation leaves intra-queue waits to the
+                        // firmware. Paired mesh stream decoding waits for those
+                        // producer stamps before reading command words on CPU.
                         engine.issued.reserve(1, GFP_KERNEL)?;
                         let job = &mut engine.jobs[index];
                         crate::mem::sync();

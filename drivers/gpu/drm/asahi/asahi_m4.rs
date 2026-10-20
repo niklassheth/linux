@@ -11,6 +11,7 @@ mod g16_alloc;
 mod g16_compute;
 mod g16_drm;
 mod g16_fw;
+mod g16_mesh;
 mod g16_platform;
 mod g16_power;
 mod g16_render;
@@ -188,6 +189,10 @@ kernel::module_platform_driver! {
         debug_ctx: u32 {
             default: 0,
             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+        },
+        native_mesh: u32 {
+            default: 0,
+            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16 per-vertex one-group profile; no capability advertisement",
         },
         dependency_kind: u32 {
             default: 1,

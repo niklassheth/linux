@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright The Gravity Linux Contributors
+
+//! T8132 GPU driver, ported from the working Python DRM shim.
+
+#![recursion_limit = "2048"]
+
+mod float;
+mod g16;
+mod g16_alloc;
+mod g16_compute;
+mod g16_drm;
+mod g16_fw;
+mod g16_platform;
+mod g16_power;
+mod g16_render;
+mod g16_stamp;
+mod g16_timeline;
+mod g16_tvb;
+mod g16_vm;
+#[path = "m4_mem.rs"]
+mod mem;
+#[path = "m4_pgtable.rs"]
+mod pgtable;
+#[path = "m4_util.rs"]
+mod util;
+
+use kernel::io::{Io, IoBase};
+use kernel::{c_str, device::Core, drm, io::mem::DevresIoMem, of, platform, prelude::*};
+
+const SGX_SIZE: usize = 0x4000000;
+const ID_VERSION: usize = 0xd04000;
+const ID_COUNTS_1: usize = 0xd04010;
+const ID_COUNTS_2: usize = 0xd04014;
+const ID_CLUSTERS: usize = 0xd0401c;
+
+struct M4Gpu;
+
+struct M4GpuData<'bound> {
+    _sgx: Option<DevresIoMem<SGX_SIZE>>,
+    _drm: Option<drm::Registration<'bound, g16_drm::Driver>>,
+}
+
+kernel::of_device_table!(
+    OF_TABLE,
+    <M4Gpu as platform::Driver>::IdInfo,
+    [(of::DeviceId::new(c_str!("apple,agx-t8132")), ())]
+);
+
+impl platform::Driver for M4Gpu {
+    type IdInfo = ();
+    type Data<'bound> = M4GpuData<'bound>;
+    const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
+
+    fn probe<'bound>(
+        pdev: &'bound platform::Device<Core<'_>>,
+        _info: Option<&'bound Self::IdInfo>,
+    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+        let dev = pdev.as_ref();
+        if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value()) {
+            return Err(EINVAL);
+        }
+
+        if module_parameters::probe_only.value() == 0 {
+            return Ok(M4GpuData {
+                _sgx: None,
+                _drm: Some(g16_drm::register(pdev)?),
+            });
+        }
+        let request = pdev.io_request_by_name(c_str!("sgx")).ok_or(EINVAL)?;
+        let sgx = request.iomap_sized::<SGX_SIZE>()?.into_devres()?;
+        {
+            let regs = sgx.try_access().ok_or(ENODEV)?;
+            let version = regs.as_view().relaxed().read32(ID_VERSION);
+            if version == 0 || version == u32::MAX {
+                dev_err!(dev, "Invalid GPU ID {:#010x}\n", version);
+                return Err(ENODEV);
+            }
+            dev_info!(
+                dev,
+                "Apple M4 GPU recognized: ID={:#010x} counts={:#010x}/{:#010x} clusters={:#010x}\n",
+                version,
+                regs.as_view().relaxed().read32(ID_COUNTS_1),
+                regs.as_view().relaxed().read32(ID_COUNTS_2),
+                regs.as_view().relaxed().read32(ID_CLUSTERS),
+            );
+            dev_info!(
+                dev,
+                "Probe-only driver; GPU firmware execution is disabled\n"
+            );
+        }
+        g16::validate_boot_resources(pdev)?;
+        let platform = g16_platform::Platform::new(dev)?;
+        let hwdata = platform.hwdata()?;
+        let region_c = platform.region_c()?;
+        let bundle = platform.bundle(0)?;
+        dev_info!(dev,
+            "M4 source configuration: {} register windows, mask={:#x}, max-frequency={} MHz, max-power={} mW, period={}/{} ms/clocks, objects={}/{}/{} bytes\n",
+            platform.registers.len(), platform.core_mask, platform.max_frequency(),
+            platform.maximum_power, platform.period_ms, platform.period_clocks,
+            hwdata.len(), region_c.len(), bundle.len());
+        Ok(M4GpuData {
+            _sgx: Some(sgx),
+            _drm: None,
+        })
+    }
+}
+
+kernel::module_platform_driver! {
+    type: M4Gpu,
+    name: "asahi_m4",
+    authors: ["Gravity Linux Contributors"],
+    description: "Apple M4 GPU driver",
+    license: "GPL v2",
+    params: {
+        fw_counter_start: u64 {
+            default: 0,
+            description: "Initial submission counters for firmware rollover qualification (normally 0)",
+        },
+        fw_trace: u32 {
+            default: 0,
+            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump, 256=queue event index changes",
+        },
+        dep_stats: u32 {
+            default: 0,
+            description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
+        },
+        dump_render_from: u32 {
+            default: 0,
+            description: "Debug: with dump_render_to, log the register table and descriptor words of every render Work whose queue ordinal is in [from, to], at submission, for diffing against hang reports",
+        },
+        dump_render_to: u32 {
+            default: 0,
+            description: "Debug: last queue ordinal dumped (0 disables dump_render)",
+        },
+        dump_render_reg: u32 {
+            default: 0,
+            description: "Debug: dump_render only keeps renders whose 3D register table holds this register with value dump_render_value (0: no filter), e.g. 0x15211 = 0x2d000000500 for 1280x720",
+        },
+        dump_render_value: u64 {
+            default: 0,
+            description: "Debug: the value dump_render_reg must hold",
+        },
+        dump_render_context: u32 {
+            default: 0xffffffff,
+            description: "Debug: dump_render only keeps renders on this firmware context slot (default: any)",
+        },
+        dump_render_recent: u32 {
+            default: 0,
+            description: "Debug: N > 0 keeps the last N submitted renders of any shape in a second ring, printed in full by the hang report (each header names tgid, VM, context, size and stamps), for what ran just before a stuck render",
+        },
+        dump_render_buffered: u32 {
+            default: 0,
+            description: "Debug: N > 0 keeps the last N submitted renders (within dump_render_from/to if set, otherwise all) in a ring and prints them only in the hang report, with no printing on the submission path",
+        },
+        dump_render_max: u32 {
+            default: 400,
+            description: "Debug: at most this many renders are dumped per boot",
+        },
+        wedge_ms: u32 {
+            default: 2000,
+            description: "A4 wedge detection window: a render with TA done and all waits met whose 3D never starts, with all channels drained and no fragment progress on any lane for this long",
+        },
+        max_queue_entries: u32 {
+            default: 0,
+            description: "Maximum unretired Works plus their firmware dependency items per queue (all lanes together) before submissions back off; 0 (default): unlimited, with max_lane_entries bounding each lane (production #149 used 96). Runtime: debugfs asahi_m4/queue_cap",
+        },
+        max_lane_entries: u32 {
+            default: 120,
+            description: "Maximum unretired Works plus their firmware dependency items on one firmware lane (render TA or 3D, or compute) before submissions back off; 0: unlimited. Keeps dependency items below the firmware's 128-Work per-lane window. Keep it at 127 or less when firmware dependency items are enabled",
+        },
+        max_lane_works: u32 {
+            default: 64,
+            description: "Maximum unretired Works per firmware lane (render TA/3D and compute) before submissions back off; 0: unlimited. The firmware stops completing Works past a 128-Work window per lane, so keep this at 127 or less; Metal keeps at most 64 command buffers in flight per queue",
+        },
+        perf_base: u32 {
+            default: 0,
+            description: "Debug: GPU performance controller base pstate (0: ADT value; 10 is the top state)",
+        },
+        tvb_max_blocks: u32 {
+            default: 2193,
+            description: "Maximum retained 128 KiB TVB blocks per context (11 through 6579)",
+        },
+        probe_only: u32 {
+            default: 0,
+            description: "Identify the GPU without starting firmware or registering DRM",
+        },
+        debug_ctx: u32 {
+            default: 0,
+            description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+        },
+        dependency_kind: u32 {
+            default: 1,
+            description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
+        },
+        fault_control: u32 {
+            default: 3,
+            description: "Firmware fault control word (region C +0xe28): 3 as macOS; 0 hard faults",
+        },
+        soft_faults: u32 {
+            default: 1,
+            description: "1 advertises soft faults to userspace (needs fault_control=3; Mesa with hk 243c5ac0c43 and 31b9d1d5bfb); 0 hides them",
+        },
+        timeline: u32 {
+            default: 0,
+            description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+        },
+        fw_cache_maint: u32 {
+            default: 0,
+            description: "0 (default) skips CPU data-cache maintenance; 1 keeps it (#149 behaviour). 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
+        },
+        profile: u32 {
+            default: 0,
+            description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+        },
+        safety_poll_ms: u32 {
+            default: 50,
+            description: "With Work outstanding, recheck completion at least every this many ms, so a late or lost completion notification costs milliseconds (0: only the 250 ms render / 10 s watchdog windows). Counters poll_timeouts/poll_retired in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/safety_poll_ms",
+        },
+        scratch_zero: u32 {
+            default: 1,
+            description: "Reused render/compute scratch leases (tilemap, TPC, metadata pages; compute scratch and marker): 2 zeroes the whole lease, as fresh pages are; 1 (default; full VK CTS clean on #181, 2026-10-12) zeroes only the render metadata pages and the compute marker page; 0 zeroes nothing (upstream Apple8 never clears these per scene). Runtime: debugfs asahi_m4/scratch_zero",
+        },
+        read_opt: u32 {
+            default: 1,
+            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, the dependency-item reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+        },
+        timeline_records: u32 {
+            default: 131072,
+            description: "Debug: timeline ring capacity in records (160 bytes each), allocated at probe only when timeline is nonzero",
+        },
+    },
+}

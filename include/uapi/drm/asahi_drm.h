@@ -213,6 +213,22 @@ enum drm_asahi_feature {
 	 * userspace can speculate memory accesses more aggressively.
 	 */
 	DRM_ASAHI_FEATURE_SOFT_FAULTS = (1UL) << 0,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER: Render commands accept
+	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT to defer render dependencies
+	 * until the fragment stage.
+	 */
+	DRM_ASAHI_FEATURE_FRAGMENT_BARRIER = (1UL) << 1,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_FEW_PRIMITIVES: Render commands accept
+	 * @DRM_ASAHI_RENDER_FEW_PRIMITIVES.
+	 *
+	 * Downstream (G16) extension. Downstream-only bits are allocated from
+	 * bit 30 downwards to stay clear of upstream allocations.
+	 */
+	DRM_ASAHI_FEATURE_FEW_PRIMITIVES = (1UL) << 30,
 };
 
 /**
@@ -790,6 +806,17 @@ enum drm_asahi_render_flags {
 	DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING = (1U << 2),
 
 	/**
+	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT: Apply the command header's
+	 * vdm_barrier before fragment execution instead of before tiling.
+	 * The cdm_barrier and submission input fences still precede tiling.
+	 * Tiling commands on the same queue execute in submission order.
+	 * Userspace must ensure that this command's tiling accesses do not
+	 * depend on earlier fragment execution, including write-after-read
+	 * hazards. Requires @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.
+	 */
+	DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT = (1U << 3),
+
+	/**
 	 * @DRM_ASAHI_RENDER_DBIAS_IS_INT: Use integer depth bias formula.
 	 *
 	 * Graphics specifications contain two alternate formulas for depth
@@ -802,6 +829,20 @@ enum drm_asahi_render_flags {
 	 * so we match that here for efficiency.
 	 */
 	DRM_ASAHI_RENDER_DBIAS_IS_INT = (1U << 18),
+
+	/**
+	 * @DRM_ASAHI_RENDER_FEW_PRIMITIVES: The render's control streams submit
+	 * at most four primitives in total, counting every draw and instance,
+	 * all from draws whose primitive counts are known when the command is
+	 * built (no indirect draws, tessellation or geometry shaders).
+	 *
+	 * This selects a faster fragment-stage tile dispatch mode for such
+	 * passes. Setting it for a larger pass can hang the GPU. Requires
+	 * @DRM_ASAHI_FEATURE_FEW_PRIMITIVES.
+	 *
+	 * Downstream (G16) extension, allocated from the top of the flag space.
+	 */
+	DRM_ASAHI_RENDER_FEW_PRIMITIVES = (1U << 30),
 };
 
 /**

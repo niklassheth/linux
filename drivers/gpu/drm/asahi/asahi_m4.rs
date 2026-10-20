@@ -213,10 +213,6 @@ kernel::module_platform_driver! {
             default: 4,
             description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention)",
         },
-        micro_layout: u32 {
-            default: 0,
-            description: "Microsequence scene and Work counter fields: 0=original, 1=as macOS (scene slot, per-Work counters)",
-        },
         render_barrier: u32 {
             default: 0,
             description: "Debug render-to-render barriers: 1=apply every render's vdm_barrier at fragment, 2=omit fragment waits already ordered by the queue's fragment lane",

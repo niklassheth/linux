@@ -25,7 +25,7 @@ pub(crate) struct FirmwareQueues {
     storage: Option<QueueStorage>,
     priority: u32,
     events: Option<QueueEvents>,
-    /// The event index this queue held last (event_affinity).
+    /// The event index this queue held last (for fw_trace bit 256).
     last_event: Option<u32>,
     pending: usize,
     render_count: u64,
@@ -810,13 +810,8 @@ impl Bootstrap {
             }
         }
         if owner.events.is_none() {
-            // Bits 0-31 are the event indices in use. With event_affinity,
-            // bits 32-36 are a next-fit cursor: a queue retakes the index it
-            // last held, and otherwise takes the next free index after the
-            // last one handed out, so an index a queue just released is not
-            // immediately given to a different queue.
-            let affinity = crate::module_parameters::event_affinity.value() != 0;
-            let last = owner.last_event;
+            // Bits 0-31 are the event indices in use; a queue takes the
+            // lowest free one.
             let mut picked = 0u32;
             self.queue_events
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -824,16 +819,8 @@ impl Bootstrap {
                     if free == 0 {
                         return None;
                     }
-                    let cursor = ((value >> 32) & 31) as u32;
-                    picked = if !affinity {
-                        free.trailing_zeros()
-                    } else if let Some(last) = last.filter(|&l| free & (1 << l) != 0) {
-                        last
-                    } else {
-                        (free.rotate_right(cursor).trailing_zeros() + cursor) % 32
-                    };
-                    let cursor = if affinity { u64::from((picked + 1) % 32) } else { u64::from(cursor) };
-                    Some((value & 0xffff_ffff) | (1 << picked) | (cursor << 32))
+                    picked = free.trailing_zeros();
+                    Some(value | (1 << picked))
                 })
                 .map_err(|_| {
                     self.report_pressure(8, "events");
@@ -1669,7 +1656,7 @@ impl Bootstrap {
             }
             let mut owner = flight.owner.lock();
             owner.pending -= 1;
-            if owner.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+            if owner.pending == 0 {
                 owner.events = None;
             }
             drop(owner);
@@ -2220,7 +2207,7 @@ impl Bootstrap {
             timestamps,
             dependencies,
         );
-        if queue.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+        if queue.pending == 0 {
             queue.events = None;
         }
         result
@@ -2845,7 +2832,7 @@ impl Bootstrap {
             timestamps,
             dependencies,
         );
-        if queue.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+        if queue.pending == 0 {
             queue.events = None;
         }
         result

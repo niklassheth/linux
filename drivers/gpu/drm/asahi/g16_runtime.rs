@@ -1863,7 +1863,10 @@ impl Bootstrap {
         let mut page = KVec::new();
         page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
         page[..0x100].copy_from_slice(&pool.support(3 + u64::from(index), a.render_shared_state));
-        if crate::module_parameters::native_mesh.value() == 1 {
+        if g16_mesh::Mode::from_parameter(crate::module_parameters::native_mesh.value())
+            .ok_or(EINVAL)?
+            .enabled()
+        {
             render::initialize_native_support(&mut page[..0x100]);
         }
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
@@ -2159,7 +2162,10 @@ impl Bootstrap {
             return Err(EIO);
         }
         let mut mesh_params;
-        let params = if crate::module_parameters::native_mesh.value() == 1 {
+        let mesh_mode =
+            g16_mesh::Mode::from_parameter(crate::module_parameters::native_mesh.value())
+                .ok_or(EINVAL)?;
+        let params = if mesh_mode.enabled() {
             mesh_params = *params;
             let params = &mut mesh_params;
             // These are the raw producer dependencies, before same-lane wait
@@ -2171,7 +2177,7 @@ impl Bootstrap {
                 }
             }
             let mut client = owner.lock();
-            params.mesh = g16_mesh::decode(params.encoder, |va| client.command_word(va).ok())
+            params.mesh = g16_mesh::decode(params.encoder, mesh_mode, |va| client.command_word(va).ok())
                 .map_err(|error| match error {
                     g16_mesh::DecodeError::Unmapped => EFAULT,
                     g16_mesh::DecodeError::Unsupported => EOPNOTSUPP,

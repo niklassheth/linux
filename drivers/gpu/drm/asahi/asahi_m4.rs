@@ -201,10 +201,6 @@ kernel::module_platform_driver! {
             default: 0,
             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
         },
-        context_sticky: u32 {
-            default: 0,
-            description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
-        },
         dependency_kind: u32 {
             default: 1,
             description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",

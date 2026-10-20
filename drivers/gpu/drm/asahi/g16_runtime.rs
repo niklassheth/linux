@@ -1948,15 +1948,9 @@ impl Bootstrap {
 
     fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<u32> {
         let existing = (1..64).find(|&i| self.context_roots[i].is_some_and(|r| r.low == roots.low));
-        let sticky = crate::module_parameters::context_sticky.value() != 0;
         let slot = existing
             .or_else(|| {
-                if sticky {
-                    // Debug: never rebind a slot while an unbound one exists.
-                    (1..64)
-                        .find(|&i| self.context_roots[i].is_none())
-                        .or_else(|| (1..64).find(|&i| self.context_users[i] == 0))
-                } else if self.context_users[preferred] == 0 {
+                if self.context_users[preferred] == 0 {
                     Some(preferred)
                 } else {
                     (1..64).find(|&i| self.context_users[i] == 0)

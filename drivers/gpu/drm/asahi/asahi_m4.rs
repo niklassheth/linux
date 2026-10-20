@@ -213,10 +213,6 @@ kernel::module_platform_driver! {
             default: 4,
             description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention)",
         },
-        render_barrier: u32 {
-            default: 0,
-            description: "Debug render-to-render barriers: 1=apply every render's vdm_barrier at fragment, 2=omit fragment waits already ordered by the queue's fragment lane",
-        },
         render_preempt: u32 {
             default: 1,
             description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",

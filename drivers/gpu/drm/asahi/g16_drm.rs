@@ -2533,12 +2533,8 @@ impl Vm {
         p.tiling_work_stamp = 0x120;
         p.fragment_work_stamp = 0x121;
         // macOS writes 0-3 (3 solo, mostly 1 under contention); this driver's
-        // original value is 4. Debug: work_layout & 4 forces 3.
-        p.completion_control = if crate::module_parameters::work_layout.value() & 4 != 0 {
-            3
-        } else {
-            u64::from(crate::module_parameters::completion_control.value())
-        };
+        // original value is 4.
+        p.completion_control = u64::from(crate::module_parameters::completion_control.value());
         p.layermeta = p.heapmeta;
         if p.layers > 1 {
             p.heapmeta += 0x100;

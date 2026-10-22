@@ -235,6 +235,7 @@ pub(crate) fn register<'a>(
         (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
         (c_str!("safety_poll_ms"), FlagKnob::SAFETY_POLL_MS, crate::module_parameters::safety_poll_ms.value()),
         (c_str!("scratch_zero"), FlagKnob::SCRATCH_ZERO, crate::module_parameters::scratch_zero.value()),
+        (c_str!("native_mesh"), FlagKnob::NATIVE_MESH, crate::module_parameters::native_mesh.value()),
     ];
     let mut flags = KVec::with_capacity(knobs.len(), GFP_KERNEL)?;
     for (name, knob, value) in knobs {

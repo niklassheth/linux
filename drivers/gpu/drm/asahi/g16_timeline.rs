@@ -359,6 +359,11 @@ impl FlagKnob {
     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
     pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
     pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
+    pub(crate) const NATIVE_MESH: Self = Self {
+        cell: &crate::g16_mesh::NATIVE_MESH,
+        name: "native_mesh",
+        max: crate::g16_mesh::MAX_MODE,
+    };
 }
 
 impl kernel::debugfs::Writer for FlagKnob {

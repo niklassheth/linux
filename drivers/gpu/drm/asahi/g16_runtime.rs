@@ -1769,6 +1769,9 @@ pub(crate) struct Support {
     slots: Arc<AtomicU64>,
     index: u32,
     submissions: AtomicU64,
+    /// Initialized in native pool mode (native_mesh was nonzero when this VM
+    /// first rendered). Fixed for the support lifetime.
+    native: bool,
 }
 impl Support {
     pub(crate) fn address(&self) -> u64 {
@@ -1834,6 +1837,7 @@ impl Bootstrap {
         if self.render_failed {
             return Err(EIO);
         }
+        let native = g16_mesh::Mode::from_parameter(g16_mesh::mode()).ok_or(EINVAL)?.enabled();
         let mut used = self.render_support.load(Ordering::Acquire);
         let index = loop {
             let index = (!used).trailing_zeros();
@@ -1856,6 +1860,7 @@ impl Bootstrap {
             submissions: AtomicU64::new(
                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
             ),
+            native,
         };
         let mut a = render::Addresses::bootstrap();
         a.support = lease.address();
@@ -1863,10 +1868,7 @@ impl Bootstrap {
         let mut page = KVec::new();
         page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
         page[..0x100].copy_from_slice(&pool.support(3 + u64::from(index), a.render_shared_state));
-        if g16_mesh::Mode::from_parameter(crate::module_parameters::native_mesh.value())
-            .ok_or(EINVAL)?
-            .enabled()
-        {
+        if lease.native {
             render::initialize_native_support(&mut page[..0x100]);
         }
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
@@ -2162,9 +2164,7 @@ impl Bootstrap {
             return Err(EIO);
         }
         let mut mesh_params;
-        let mesh_mode =
-            g16_mesh::Mode::from_parameter(crate::module_parameters::native_mesh.value())
-                .ok_or(EINVAL)?;
+        let mesh_mode = g16_mesh::Mode::from_parameter(g16_mesh::mode()).ok_or(EINVAL)?;
         let params = if mesh_mode.enabled() {
             mesh_params = *params;
             let params = &mut mesh_params;
@@ -2184,6 +2184,11 @@ impl Bootstrap {
                 })?;
             drop(client);
             if params.mesh.is_some() && (params.samples != 1 || params.layers != 1) {
+                return Err(EOPNOTSUPP);
+            }
+            // A VM that first rendered with native_mesh=0 keeps its ordinary
+            // support header, which cannot run a native stream.
+            if params.mesh.is_some() && !support.native {
                 return Err(EOPNOTSUPP);
             }
             // The VM already owns and advertises all 24 operand buffers.

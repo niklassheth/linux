@@ -359,11 +359,28 @@ impl FlagKnob {
     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
     pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
     pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
-    pub(crate) const NATIVE_MESH: Self = Self {
-        cell: &crate::g16_mesh::NATIVE_MESH,
-        name: "native_mesh",
-        max: crate::g16_mesh::MAX_MODE,
-    };
+}
+
+/// debugfs `asahi_m4/native_mesh`: the runtime native mesh mode. Each write
+/// starts a new generation (see `g16_mesh::set_mode`).
+pub(crate) struct NativeMeshKnob;
+
+impl kernel::debugfs::Writer for NativeMeshKnob {
+    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(f, "{}", crate::g16_mesh::mode())
+    }
+}
+
+impl kernel::debugfs::Reader for NativeMeshKnob {
+    fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
+        let value = knob_u32(reader)?;
+        if value > crate::g16_mesh::MAX_MODE {
+            return Err(EINVAL);
+        }
+        let generation = crate::g16_mesh::set_mode(value);
+        pr_info!("G16: native_mesh={} (generation {})\n", value, generation);
+        Ok(())
+    }
 }
 
 impl kernel::debugfs::Writer for FlagKnob {

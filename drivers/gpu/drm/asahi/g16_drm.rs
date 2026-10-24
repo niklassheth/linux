@@ -97,6 +97,9 @@ struct Vm {
     draining: u32,
     reservation: ARef<Object>,
     render_support: Option<Arc<crate::g16::Support>>,
+    /// The native mesh mode when this VM was created. Its support header and
+    /// every decode of its streams use it, whatever the runtime mode is later.
+    native_mode: crate::g16_mesh::Mode,
     render_ready: bool,
     compute_ready: bool,
     render_broken: bool,
@@ -165,6 +168,7 @@ pub(crate) struct Data {
     _maint: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::MaintKnob>>>,
     _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _flags: KVec<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>>,
+    _native_mesh: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::NativeMeshKnob>>>,
     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _debugfs: kernel::debugfs::Dir,
@@ -235,13 +239,17 @@ pub(crate) fn register<'a>(
         (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
         (c_str!("safety_poll_ms"), FlagKnob::SAFETY_POLL_MS, crate::module_parameters::safety_poll_ms.value()),
         (c_str!("scratch_zero"), FlagKnob::SCRATCH_ZERO, crate::module_parameters::scratch_zero.value()),
-        (c_str!("native_mesh"), FlagKnob::NATIVE_MESH, crate::module_parameters::native_mesh.value()),
     ];
     let mut flags = KVec::with_capacity(knobs.len(), GFP_KERNEL)?;
     for (name, knob, value) in knobs {
         knob.init(value);
         flags.push(KBox::pin_init(dir.read_write_file(name, knob), GFP_KERNEL)?, GFP_KERNEL)?;
     }
+    crate::g16_mesh::init_mode(crate::module_parameters::native_mesh.value());
+    let native_mesh = KBox::pin_init(
+        dir.read_write_file(c_str!("native_mesh"), crate::g16_timeline::NativeMeshKnob),
+        GFP_KERNEL,
+    )?;
     let dep_stats = KBox::pin_init(
         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
         GFP_KERNEL,
@@ -285,6 +293,7 @@ pub(crate) fn register<'a>(
         _maint: maint,
         _queue_cap: queue_cap,
         _flags: flags,
+        _native_mesh: native_mesh,
         _dep_stats: dep_stats,
         _lane_cap: lane_cap,
         _debugfs: dir, });
@@ -606,6 +615,10 @@ impl File {
                 draining: 0,
                 reservation,
                 render_support: None,
+                // The module parameter was validated at probe and debugfs
+                // writes are bounded, so the mode always parses.
+                native_mode: crate::g16_mesh::Mode::from_parameter(crate::g16_mesh::snapshot().1)
+                    .unwrap_or(crate::g16_mesh::Mode::Disabled),
                 render_ready: false,
                 compute_ready: false,
                 render_broken: false,
@@ -2225,7 +2238,7 @@ impl File {
                 // Acquire scarce support and its Arc before editing this
                 // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
                 let support = Arc::new(
-                    runtime.acquire_render_support(&pool)?,
+                    runtime.acquire_render_support(&pool, vm.native_mode)?,
                     GFP_KERNEL,
                 )?;
                 if let Err(error) = vm.space.lock()

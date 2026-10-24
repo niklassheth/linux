@@ -1770,8 +1770,10 @@ pub(crate) struct Support {
     index: u32,
     submissions: AtomicU64,
     /// Initialized in native pool mode (native_mesh was nonzero when this VM
-    /// first rendered). Fixed for the support lifetime.
+    /// was created). Fixed for the support lifetime.
     native: bool,
+    /// The VM's latched native mesh mode, which decodes all its renders.
+    mode: g16_mesh::Mode,
 }
 impl Support {
     pub(crate) fn address(&self) -> u64 {
@@ -1833,11 +1835,12 @@ impl Bootstrap {
         self.render_failed
     }
 
-    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> Result<Support> {
+    /// `mode`: the VM's native mesh mode, latched when it was created.
+    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode: g16_mesh::Mode) -> Result<Support> {
         if self.render_failed {
             return Err(EIO);
         }
-        let native = g16_mesh::Mode::from_parameter(g16_mesh::mode()).ok_or(EINVAL)?.enabled();
+        let native = mode.enabled();
         let mut used = self.render_support.load(Ordering::Acquire);
         let index = loop {
             let index = (!used).trailing_zeros();
@@ -1861,6 +1864,7 @@ impl Bootstrap {
                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
             ),
             native,
+            mode,
         };
         let mut a = render::Addresses::bootstrap();
         a.support = lease.address();
@@ -2164,7 +2168,9 @@ impl Bootstrap {
             return Err(EIO);
         }
         let mut mesh_params;
-        let mesh_mode = g16_mesh::Mode::from_parameter(g16_mesh::mode()).ok_or(EINVAL)?;
+        // The VM's latched mode, not the current one: a VM created native keeps
+        // decoding its streams after a runtime switch to 0.
+        let mesh_mode = support.mode;
         // Peek at the first word without waiting for producers: an ordinary
         // header publishes as at native_mesh=0, with no stall behind earlier
         // work. Userspace writes a native header on the CPU before SUBMIT, and

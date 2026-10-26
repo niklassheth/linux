@@ -11,6 +11,22 @@
 #include <linux/huge_mm.h>
 #include <linux/pgtable.h>
 
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+bool p3s_wp_copy_into_sibling(struct vm_fault *vmf, struct folio *old_folio);
+bool p3s_cow_fault_read_first(struct vm_fault *vmf);
+#else
+static inline bool p3s_wp_copy_into_sibling(struct vm_fault *vmf,
+					    struct folio *old_folio)
+{
+	return false;
+}
+
+static inline bool p3s_cow_fault_read_first(struct vm_fault *vmf)
+{
+	return false;
+}
+#endif
+
 /*
  * vma_pte_add_slice - Apply subpage slice offset to a PTE value
  * @vma: Pointer to struct vm_area_struct

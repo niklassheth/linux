@@ -4068,6 +4068,13 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	if (unlikely(ret))
 		goto out;
 
+	if (p3s_wp_copy_into_sibling(vmf, old_folio)) {
+		if (old_folio)
+			folio_put(old_folio);
+		delayacct_wpcopy_end();
+		return 0;
+	}
+
 	pfn_is_zero = is_zero_pfn(pte_pfn(vmf->orig_pte));
 	new_folio = folio_prealloc(mm, vma, vmf->address, pfn_is_zero);
 	if (!new_folio)
@@ -6208,6 +6215,10 @@ static vm_fault_t do_cow_fault(struct vm_fault *vmf)
 		ret = vmf_anon_prepare(vmf);
 	if (ret)
 		return ret;
+
+	/* 4KB VMA: map read-only so that the write copies into a sibling */
+	if (p3s_cow_fault_read_first(vmf))
+		return do_read_fault(vmf);
 
 	folio = folio_prealloc(vma->vm_mm, vma, vmf->address, false);
 	if (!folio)

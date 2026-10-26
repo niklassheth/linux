@@ -236,6 +236,10 @@ impl PmpData {
             .cast_mut();
         // SAFETY: `raw_dev` points to the live PMP device, which `self.dev` keeps referenced.
         let domain = unsafe { bindings::iommu_get_domain_for_dev(raw_dev) };
+        if domain.is_null() {
+            dev_err!(self.dev, "PMP has no IOMMU domain");
+            return Err(ENODEV);
+        }
         for i in 0..n_entries {
             let host_addr = ranges[i * 2];
             let size = ranges[i * 2 + 1];
@@ -311,7 +315,8 @@ impl PmpData {
             dev_err!(self.dev, "Buffer too small");
             return Err(EIO);
         }
-        let ptr = unsafe { *(ptr_buf.as_ptr() as *const u64) };
+        // SAFETY: The buffer holds at least eight bytes, checked above.
+        let ptr = unsafe { core::ptr::read_unaligned(ptr_buf.as_ptr().cast::<u64>()) };
         state.value_buf = Some(ptr);
         let msg = (OPC_SET_BUF | OPC_ACK_MASK) << OPC_SHIFT;
         Ok(msg)
@@ -376,6 +381,9 @@ impl PmpData {
              * acknowledged with the correct size. */
             let val_buf_addr = state.value_buf.ok_or(EIO)?;
             let val_buf = state.get_buf(val_buf_addr).ok_or(EIO)?;
+            if val_buf.size() < mem::size_of::<u32>() {
+                return Err(EINVAL);
+            }
             unsafe {
                 val_buf.as_mut()[..mem::size_of::<u32>()]
                     .copy_from_slice(&1u32.to_le_bytes());
@@ -397,6 +405,10 @@ impl PmpData {
             };
             if node.property_present(&name_str) {
                 let len = node.property_count_elem::<u8>(&name_str)?;
+                if len > val_buf.size() {
+                    dev_err!(self.dev, "tunable {:?} does not fit the value buffer", name_str);
+                    return Err(EINVAL);
+                }
                 let data = node
                     .property_read_array_vec::<u8>(&name_str, len)?
                     .required_by(&self.dev)?;

@@ -258,7 +258,7 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
 	int ret;
 	const char *name;
 	struct of_phandle_iterator it;
-	bool always_on;
+	bool always_on, boot_on;
 
 	ent = devm_kzalloc(dev, sizeof(*ent), GFP_KERNEL);
 	if (!ent)
@@ -277,16 +277,22 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
 	always_on = of_property_read_bool(node, "apple,always-on");
 	if (always_on)
 		ent->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+	/*
+	 * An entry that is the parent of a pmgr domain must start on: genpd
+	 * refuses to add a powered subdomain under an off parent.  It drops
+	 * the vote again once nothing below it is on.
+	 */
+	boot_on = always_on || of_property_read_bool(node, "apple,boot-on");
 
 	ent->genpd.name = name;
 	ent->genpd.power_on = apple_pmp_report_entry_power_on;
 	ent->genpd.power_off = apple_pmp_report_entry_power_off;
 
-	ret = pm_genpd_init(&ent->genpd, NULL, !always_on);
+	ret = pm_genpd_init(&ent->genpd, NULL, !boot_on);
 	if (ret)
 		return dev_err_probe(dev, ret, "pm_genpd_init failed\n");
 
-	if (always_on) {
+	if (boot_on) {
 		ret = apple_pmp_report_set_state(&ent->genpd, true);
 		if (ret)
 			goto err_remove_genpd;

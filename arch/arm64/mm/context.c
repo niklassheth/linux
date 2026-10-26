@@ -376,7 +376,14 @@ void cpu_do_switch_mm(phys_addr_t pgd_phys, struct mm_struct *mm)
 
 	cpu_set_reserved_ttbr0_nosync();
 	write_sysreg(ttbr1, ttbr1_el1);
-	mm_switch_tcr(mm);
+	/*
+	 * As in check_and_switch_context(): the walker must see the reserved
+	 * TTBR0 before TCR_EL1 decodes TTBR0 with another granule.
+	 */
+	if (mm_tcr_needs_switch(mm)) {
+		isb();
+		mm_switch_tcr(mm);
+	}
 	write_sysreg(ttbr0, ttbr0_el1);
 	isb();
 	post_ttbr_update_workaround();

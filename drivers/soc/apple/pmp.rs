@@ -568,6 +568,12 @@ impl platform::Driver for PmpDriver {
         info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
         let cfg = info.ok_or(ENODEV)?;
+        // apple_pmp.enable=0 leaves PMP stopped: the system runs as without
+        // PMP (its report votes are written but nothing acts on them).
+        if crate::module_parameters::enable.value() == 0 {
+            dev_info!(pdev.as_ref(), "PMP disabled (apple_pmp.enable=0)\n");
+            return Err(ENODEV);
+        }
         // PMP DART IOVAs live in the 0x100_00000000 aperture on T8132, so
         // the default 32-bit coherent DMA mask cannot satisfy RTKit's shared
         // memory requests.
@@ -604,4 +610,10 @@ module_platform_driver! {
     name: "apple_pmp",
     description: "Apple Power Management Processor",
     license: "Dual MIT/GPL",
+    params: {
+        enable: u32 {
+            default: 1,
+            description: "1 (default) starts PMP; 0 leaves it stopped, as on kernels without PMP",
+        },
+    },
 }

@@ -14,8 +14,11 @@
 #include <linux/pm_domain.h>
 #include <linux/soc/apple/pmp-report.h>
 #include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 #define PMP_REPORT_READY 0x1
+/* How long the post-ready work waits for PMP before giving up. */
+#define PMP_READY_WAIT_MS 120000
 
 struct apple_pmp_report_offsets {
 	u32 tgt_read;
@@ -33,6 +36,7 @@ struct apple_pmp_report {
 	void __iomem *event_config;
 	spinlock_t lock;
 	struct delayed_work finalize_work;
+	unsigned long probed;
 };
 
 int apple_pmp_report_wait_ready(struct device *dev, unsigned long timeout_us)
@@ -59,6 +63,13 @@ static void apple_pmp_report_finalize_work(struct work_struct *work)
 
 	status = readq(rep->base + rep->offsets->status);
 	if (!(status & PMP_REPORT_READY)) {
+		/* PMP may never start (apple_pmp.enable=0): stop polling. */
+		if (time_after(jiffies, rep->probed + msecs_to_jiffies(PMP_READY_WAIT_MS))) {
+			dev_warn(rep->dev,
+				 "PMP not ready after %u ms; not finalizing (expected with apple_pmp.enable=0)\n",
+				 PMP_READY_WAIT_MS);
+			return;
+		}
 		schedule_delayed_work(&rep->finalize_work, msecs_to_jiffies(1));
 		return;
 	}
@@ -120,6 +131,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	rep->dev = dev;
+	rep->probed = jiffies;
 	spin_lock_init(&rep->lock);
 	rep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(rep->base))

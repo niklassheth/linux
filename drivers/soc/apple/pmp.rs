@@ -353,26 +353,28 @@ impl PmpData {
         let wire_index = u32::from_le_bytes(unsafe {
             <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x48..0x4c]).unwrap()
         });
-        dev_info!(
-            self.dev,
-            "PMP descriptor {} wire_index={:#x} {:?}: words30={:#010x} words34={:#010x} words38={:#010x} words3c={:#010x} size={:#x}",
-            advertisement_index,
-            wire_index,
-            name_str,
-            u32::from_le_bytes(unsafe {
-                <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x30..0x34]).unwrap()
-            }),
-            u32::from_le_bytes(unsafe {
-                <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x34..0x38]).unwrap()
-            }),
-            u32::from_le_bytes(unsafe {
-                <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x38..0x3c]).unwrap()
-            }),
-            u32::from_le_bytes(unsafe {
-                <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x3c..0x40]).unwrap()
-            }),
-            size
-        );
+        if verbose() {
+            dev_info!(
+                self.dev,
+                "PMP descriptor {} wire_index={:#x} {:?}: words30={:#010x} words34={:#010x} words38={:#010x} words3c={:#010x} size={:#x}",
+                advertisement_index,
+                wire_index,
+                name_str,
+                u32::from_le_bytes(unsafe {
+                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x30..0x34]).unwrap()
+                }),
+                u32::from_le_bytes(unsafe {
+                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x34..0x38]).unwrap()
+                }),
+                u32::from_le_bytes(unsafe {
+                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x38..0x3c]).unwrap()
+                }),
+                u32::from_le_bytes(unsafe {
+                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x3c..0x40]).unwrap()
+                }),
+                size
+            );
+        }
         if display_monitor && size == mem::size_of::<u32>() as u32 {
             /* The monitor descriptors carry their initial value through the
              * shared value buffer.  Native T8132 publishes all four display
@@ -388,7 +390,9 @@ impl PmpData {
                 val_buf.as_mut()[..mem::size_of::<u32>()]
                     .copy_from_slice(&1u32.to_le_bytes());
             }
-            dev_info!(self.dev, "initialized PMP monitor {:?} to 1", name_str);
+            if verbose() {
+                dev_info!(self.dev, "initialized PMP monitor {:?} to 1", name_str);
+            }
         } else if size == 0 {
             let name_str = CString::try_from_fmt(fmt!("apple,tunable-{name_str}"))?;
             let node = self.dev.fwnode().ok_or(EIO)?;
@@ -416,7 +420,7 @@ impl PmpData {
                     val_buf.as_mut()[0..len].copy_from_slice(&data);
                 }
                 size = len as u32;
-            } else {
+            } else if verbose() {
                 dev_info!(self.dev, "unknown property {:?}", name_str);
             }
         }
@@ -452,25 +456,29 @@ impl PmpData {
             .ioreg_entries
             .get(index as usize)
             .ok_or(EIO)? as u64;
-        dev_info!(
-            self.dev,
-            "PMP SetIOReg index={:#x} size={:#x} entries={}",
-            index,
-            len,
-            state.ioreg_advertisements
-        );
+        if verbose() {
+            dev_info!(
+                self.dev,
+                "PMP SetIOReg index={:#x} size={:#x} entries={}",
+                index,
+                len,
+                state.ioreg_advertisements
+            );
+        }
         let msg = (OPC_SET_IOREG | OPC_ACK_MASK) << OPC_SHIFT | len;
         Ok(msg)
     }
     fn advertise_done(&self, count: u64) -> u64 {
         let state = self.state.lock();
-        dev_info!(
-            self.dev,
-            "PMP AdvertiseDone count={:#x} advertisements={} wire_entries={} ack=8",
-            count,
-            state.ioreg_advertisements,
-            state.ioreg_entries.len()
-        );
+        if verbose() {
+            dev_info!(
+                self.dev,
+                "PMP AdvertiseDone count={:#x} advertisements={} wire_entries={} ack=8",
+                count,
+                state.ioreg_advertisements,
+                state.ioreg_entries.len()
+            );
+        }
         ((OPC_ADVERTISE_DONE | OPC_ACK_MASK) << OPC_SHIFT) | 8
     }
     fn recv_message(&self, msg: u64) -> Result<()> {
@@ -557,6 +565,11 @@ kernel::of_device_table!(
     ]
 );
 
+/// Whether to log PMP's start-up handshake (apple_pmp.verbose=1).
+fn verbose() -> bool {
+    crate::module_parameters::verbose.value() != 0
+}
+
 impl platform::Driver for PmpDriver {
     type IdInfo = &'static PmpHwConfig;
     type Data<'bound> = PmpDriver;
@@ -614,6 +627,10 @@ module_platform_driver! {
         enable: u32 {
             default: 1,
             description: "1 (default) starts PMP; 0 leaves it stopped, as on kernels without PMP",
+        },
+        verbose: u32 {
+            default: 0,
+            description: "1 logs every descriptor of PMP's start-up handshake",
         },
     },
 }

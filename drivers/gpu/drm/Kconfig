@@ -282,6 +282,13 @@ config RUST_DRM_GEM_SHMEM_HELPER
 	help
 	  Choose this if you need the GEM shmem helper functions In Rust
 
+config RUST_DRM_SCHED
+	bool
+	depends on DRM
+	select DRM_SCHED
+	help
+	  Choose this if you need the GPU scheduler in Rust
+
 config DRM_SUBALLOC_HELPER
 	tristate
 	depends on DRM
@@ -335,6 +342,8 @@ source "drivers/gpu/drm/omapdrm/Kconfig"
 source "drivers/gpu/drm/panel/Kconfig"
 source "drivers/gpu/drm/panfrost/Kconfig"
 source "drivers/gpu/drm/panthor/Kconfig"
+
+source "drivers/gpu/drm/asahi/Kconfig"
 source "drivers/gpu/drm/pl111/Kconfig"
 source "drivers/gpu/drm/qxl/Kconfig"
 source "drivers/gpu/drm/radeon/Kconfig"

@@ -65,6 +65,7 @@ impl platform::Driver for M4Gpu {
         let dev = pdev.as_ref();
         if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value())
             || module_parameters::dependency_kind.value() > 1
+            || module_parameters::cross_dependency_kind.value() > 1
             || (module_parameters::fast_die_limit_c.value() != 0
                 && module_parameters::extra0.value() == 0)
         {
@@ -186,6 +187,10 @@ kernel::module_platform_driver! {
         native_mesh: u32 {
             default: 0,
             description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16/T32 one-parent profile, 2=unqualified multiple-parent profile, 3=research admission of wider mesh state (not qualified); no capability advertisement. Runtime: debugfs asahi_m4/native_mesh (a VM keeps the support mode of its first render)",
+        },
+        cross_dependency_kind: u32 {
+            default: 0,
+            description: "Firmware kind of a render's dependency on compute: 0 (default) as the internal TA-to-fragment wait; 1 the dynamic dependency graph (before 2026-11-20; about 100 us more per dependent compute-to-render edge). A compute's dependency on a render always uses kind 1",
         },
         dependency_kind: u32 {
             default: 0,

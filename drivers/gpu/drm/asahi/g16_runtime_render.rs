@@ -631,6 +631,14 @@ impl Bootstrap {
         let mut item_counts = [0usize; 2];
         let mut entry_counts = [0usize; 2];
         let render_kind = crate::module_parameters::dependency_kind.value();
+        // Slot 1 waits on compute. As the internal TA-to-fragment wait (kind
+        // 0) the firmware starts the render as soon as the compute is done;
+        // in the dynamic dependency graph (kind 1) each such edge idled the
+        // GPU about 100 us. The reverse edge, a compute waiting on a render,
+        // stays kind 1: as kind 0 it releases the compute before the render's
+        // end timestamp is written, so a query copy after the render reads
+        // it unavailable.
+        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
         for stage in 0..2 {
             let (prelude, work) = if stage == 0 {
                 (a.tiling_prelude, a.tiling_work)
@@ -647,7 +655,7 @@ impl Bootstrap {
             let deps = stage_dependencies[stage]
                 .iter()
                 .enumerate()
-                .filter_map(|(slot, dep)| dep.map(|d| (if slot == 0 { render_kind } else { 1 }, d)));
+                .filter_map(|(slot, dep)| dep.map(|d| (if slot == 0 { render_kind } else { cross_kind }, d)));
             for (index, (kind, dep)) in deps.enumerate() {
                 items[stage][index] = g16_fw::queue::dependency(
                     dep.address, dep.value, dep.event, stamp as u32, uuid as u32, kind,

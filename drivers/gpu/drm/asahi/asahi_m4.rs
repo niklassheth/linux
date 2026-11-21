@@ -190,7 +190,7 @@ kernel::module_platform_driver! {
         },
         cross_dependency_kind: u32 {
             default: 0,
-            description: "Firmware kind of a render's dependency on compute: 0 (default) as the internal TA-to-fragment wait; 1 the dynamic dependency graph (before 2026-11-20; about 100 us more per dependent compute-to-render edge). A compute's dependency on a render always uses kind 1",
+            description: "Firmware kind of cross-engine dependencies (a render's on compute, a compute's on its queue's render): 0 (default) as the internal TA-to-fragment wait; 1 the dynamic dependency graph (before 2026-11-20; about 100 us more per dependent edge). A Work with user timestamps always waits with kind 1",
         },
         dependency_kind: u32 {
             default: 0,

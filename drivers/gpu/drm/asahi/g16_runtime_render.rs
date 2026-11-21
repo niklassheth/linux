@@ -634,11 +634,14 @@ impl Bootstrap {
         // Slot 1 waits on compute. As the internal TA-to-fragment wait (kind
         // 0) the firmware starts the render as soon as the compute is done;
         // in the dynamic dependency graph (kind 1) each such edge idled the
-        // GPU about 100 us. The reverse edge, a compute waiting on a render,
-        // stays kind 1: as kind 0 it releases the compute before the render's
-        // end timestamp is written, so a query copy after the render reads
-        // it unavailable.
+        // GPU about 100 us. A render with user timestamps waits with kind 1
+        // in either slot: released by a kind-0 item, a Work can have its
+        // timestamps written after a following query copy reads them.
         let cross_kind = crate::module_parameters::cross_dependency_kind.value();
+        let timestamped = a.tiling_user_timestamp_start != 0
+            || a.tiling_user_timestamp_end != 0
+            || a.fragment_user_timestamp_start != 0
+            || a.fragment_user_timestamp_end != 0;
         for stage in 0..2 {
             let (prelude, work) = if stage == 0 {
                 (a.tiling_prelude, a.tiling_work)
@@ -655,7 +658,18 @@ impl Bootstrap {
             let deps = stage_dependencies[stage]
                 .iter()
                 .enumerate()
-                .filter_map(|(slot, dep)| dep.map(|d| (if slot == 0 { render_kind } else { cross_kind }, d)));
+                .filter_map(|(slot, dep)| {
+                    dep.map(|d| {
+                        let kind = if timestamped {
+                            1
+                        } else if slot == 0 {
+                            render_kind
+                        } else {
+                            cross_kind
+                        };
+                        (kind, d)
+                    })
+                });
             for (index, (kind, dep)) in deps.enumerate() {
                 items[stage][index] = g16_fw::queue::dependency(
                     dep.address, dep.value, dep.event, stamp as u32, uuid as u32, kind,

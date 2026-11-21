@@ -215,6 +215,13 @@ impl Bootstrap {
         fw.write_live(a.threshold, &1u32.to_le_bytes())?;
         fw.write_live(a.driver_stamp, &g16_stamp::previous(a.stamp).to_le_bytes())?;
         let mut pos = first;
+        // A compute's items wait on its queue's render: cross_dependency_kind,
+        // or kind 1 when this Work has user timestamps (see the render side).
+        let kind = if timestamps[0] != 0 || timestamps[1] != 0 {
+            1
+        } else {
+            crate::module_parameters::cross_dependency_kind.value()
+        };
         for (index, dep) in dependencies.iter().flatten().enumerate() {
             // Between the threshold/timestamps and the CDM entry trampoline.
             let address = a.work + 0x1900 + index as u64 * 0x40;
@@ -226,7 +233,7 @@ impl Bootstrap {
                     dep.event,
                     a.stamp,
                     a.identity as u32,
-                    1,
+                    kind,
                 ),
             )?;
             fw.write_live(lane.ring + u64::from(pos) * 8, &address.to_le_bytes())?;

@@ -519,6 +519,10 @@ impl Bootstrap {
                     }),
                     Some(stamp),
                 ],
+                user_timestamps: a.tiling_user_timestamp_start != 0
+                    || a.tiling_user_timestamp_end != 0
+                    || a.fragment_user_timestamp_start != 0
+                    || a.fragment_user_timestamp_end != 0,
                 driver_stamps: [
                     Some(Stamp {
                         address: a.tiling_driver_stamp,

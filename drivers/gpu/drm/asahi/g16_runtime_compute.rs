@@ -35,6 +35,20 @@ impl Bootstrap {
     /// otherwise return EBUSY, and the submission worker publishes what it
     /// has staged and retries after the next completion, holding back the
     /// rest of this queue.
+    /// Whether `dep` covers a Work still in flight that has user timestamp
+    /// destinations. The firmware writes a Work's user timestamps after the
+    /// Work has ended, so the next Work on the same compute lane, which the
+    /// ring alone orders after the end of the previous one, can read them
+    /// before they are written. A kind-1 item on the lane waits for them.
+    pub(super) fn covers_timestamps(&self, dep: &Stamp) -> bool {
+        self.flights.iter().any(|f| {
+            f.user_timestamps
+                && f.stamps.iter().flatten().any(|s| {
+                    s.address == dep.address && g16_stamp::reached(dep.value, s.value)
+                })
+        })
+    }
+
     pub(super) fn resolve_compute_dependencies(
         &self,
         queue: &mut FirmwareQueues,
@@ -58,6 +72,12 @@ impl Bootstrap {
                 if !self.elide_item(queue, 2, dep, false, tally)? {
                     kept[slot] = Some(*dep);
                 }
+                continue;
+            }
+            // The compute lane orders its own Works by ring position alone,
+            // which does not wait for a previous Work's user timestamps.
+            if own_lane == Some(dep.address) && self.covers_timestamps(dep) {
+                kept[slot] = Some(*dep);
                 continue;
             }
             if own_lane != Some(dep.address) {
@@ -217,12 +237,13 @@ impl Bootstrap {
         let mut pos = first;
         // A compute's items wait on its queue's render: cross_dependency_kind,
         // or kind 1 when this Work has user timestamps (see the render side).
-        let kind = if timestamps[0] != 0 || timestamps[1] != 0 {
-            1
-        } else {
-            crate::module_parameters::cross_dependency_kind.value()
-        };
+        // An item on the own compute lane (kept only for timestamps, see
+        // covers_timestamps) is kind 1 as well.
+        let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
+        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
+        let own_lane = lane.firmware_stamp();
         for (index, dep) in dependencies.iter().flatten().enumerate() {
+            let kind = if timestamped || dep.address == own_lane { 1 } else { cross_kind };
             // Between the threshold/timestamps and the CDM entry trampoline.
             let address = a.work + 0x1900 + index as u64 * 0x40;
             fw.write_live(
@@ -277,6 +298,7 @@ impl Bootstrap {
                 blocked: 0,
                 dependencies: *dependencies,
                 stamps: [Some(stamp), None],
+                user_timestamps: timestamped,
                 driver_stamps: [
                     Some(Stamp {
                         address: a.driver_stamp,

@@ -239,6 +239,8 @@ pub(super) struct Flight {
     started: Instant<Monotonic>,
     stamps: [Option<Stamp>; 2],
     driver_stamps: [Option<Stamp>; 2],
+    /// The Work has user timestamp destinations (see `covers_timestamps`).
+    user_timestamps: bool,
     scratch: g16_vm::Scratch,
     client: Arc<Mutex<g16_vm::AddressSpace>>,
     queues: [(u64, u32); 2],

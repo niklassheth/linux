@@ -228,8 +228,9 @@ impl Bootstrap {
             let mut notifier_seen = None;
             // The notifier pass drops embedded JobMeta references and cleans
             // their cache lines before publishing these later driver stamps.
-            // Driver stamps are unique per Work, so read them directly without
-            // polluting the shared snapshot tables.
+            // Driver stamps live per Work (shared_notifier=0) or per
+            // submission notifier (shared_notifier=1), so read them directly
+            // without polluting the shared snapshot tables.
             for stamp in flight.driver_stamps.iter().flatten() {
                 done &= g16_stamp::reached(reader.read_u32_relaxed(stamp.address)?, stamp.value);
             }
@@ -239,13 +240,38 @@ impl Bootstrap {
             if done {
                 let notified = match flight.notifier_count {
                     // The shared notifier has counted this render's Works.
+                    // Before the final remaining render releases the owner's
+                    // Work slot, also require firmware's removal flag (+0x94
+                    // == 0) so the notifier header cannot be reused while
+                    // still linked in firmware.
                     Some((completed, total)) => {
                         let count =
                             retire_cache.read_with(completed, |a| reader.read_u32_relaxed(a))?;
                         notifier_seen = Some((count, total));
-                        (count.wrapping_sub(total) as i32) >= 0
+                        let counted = (count.wrapping_sub(total) as i32) >= 0;
+                        if counted
+                            && flight.job_notifier.is_some_and(|owner_va| {
+                                self.job_notifiers
+                                    .iter()
+                                    .find(|j| j.owner == owner_va)
+                                    .is_some_and(|j| j.refs == 1)
+                            })
+                        {
+                            // Order the +0x94 unlink load after the firmware
+                            // stamp, driver-stamp, and completed-count loads
+                            // so ARM64 cannot speculatively read a pre-link 0.
+                            reader.acquire_barrier();
+                            let notifier = completed - 0xc;
+                            reader.read_u32_relaxed(notifier + 0x94)? == 0
+                        } else {
+                            counted
+                        }
                     }
                     None => {
+                        // Order the +0x94 unlink load after the firmware and
+                        // driver-stamp loads so ARM64 cannot speculatively
+                        // observe a pre-link 0 before completion.
+                        reader.acquire_barrier();
                         let notifier = flight.id
                             + if flight.render.is_some() {
                                 0x200

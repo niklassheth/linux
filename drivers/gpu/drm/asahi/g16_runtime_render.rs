@@ -325,14 +325,21 @@ impl Bootstrap {
         a.tiling_driver_stamp = va + 0x18000;
         a.fragment_driver_stamp = va + 0x18040;
         // shared_notifier=1: renders of one submission staged in the same
-        // flush batch share the notifier of its first render (the owner), as
-        // Metal shares one per command buffer. Each render raises the
-        // notifier's Work count by its own two Works before flush() exposes
-        // the batch to firmware. Once flush() runs, firmware can complete and
-        // drain that notifier before the owner retires on the host CPU, so a
-        // later render split across a flush boundary by backpressure (EBUSY)
-        // starts a fresh notifier rather than re-arming one that may have
-        // drained.
+        // flush batch share the notifier AND uncached driver-stamp slots of
+        // its first render (the owner), as Metal shares one per command
+        // buffer. Firmware's per-notifier completion pass coalesces
+        // consecutive stage driver-stamp writes within a shared notifier:
+        // giving member renders distinct driver-stamp addresses leaves earlier
+        // renders' private slots unwritten (blocked=0x1) whenever firmware
+        // flushes only the later Work's address. Sharing owner_va+0x18000 /
+        // +0x18040 (initialized once by the owner to previous(first_stamp))
+        // lets monotonically rising coalesced writes satisfy every render in
+        // the notifier. Each render raises the notifier's Work count by its
+        // own two Works before flush() exposes the batch to firmware. Once
+        // flush() runs, firmware can complete and drain that notifier before
+        // the owner retires on the host CPU, so a later render split across a
+        // flush boundary by backpressure (EBUSY) starts a fresh notifier
+        // rather than re-arming one that may have drained.
         let job_owner = if crate::g16_timeline::shared_notifier() {
             let owner = self
                 .job_notifiers
@@ -342,6 +349,8 @@ impl Bootstrap {
             let owner_va = owner.unwrap_or(va);
             a.event_control = owner_va + 0x200;
             a.event_count_array = owner_va + 0x18080;
+            a.tiling_driver_stamp = owner_va + 0x18000;
+            a.fragment_driver_stamp = owner_va + 0x18040;
             Some((owner_va, owner.is_none()))
         } else {
             None
@@ -659,16 +668,20 @@ impl Bootstrap {
                 writer.write_u32_staged(a.event_control + 12, 0)?;
                 writer.write_u32_staged(a.event_control + 0x10, 0x50)?;
                 writer.write_u32_staged(a.event_control + 0x24, a.context_id as u32)?;
+                // Initialize shared driver stamps once on the owner to before
+                // the first render's stamps; member renders must not overwrite
+                // them with previous(later_stamp) or they would pre-satisfy
+                // earlier renders in the same batch.
+                writer.write_u32_staged(
+                    a.tiling_driver_stamp,
+                    g16_stamp::previous(a.tiling_stamp as u32),
+                )?;
+                writer.write_u32_staged(
+                    a.fragment_driver_stamp,
+                    g16_stamp::previous(a.fragment_stamp as u32),
+                )?;
             }
             writer.write_u32_staged(a.event_count_array, notifier_write.1)?;
-            writer.write_u32_staged(
-                a.tiling_driver_stamp,
-                g16_stamp::previous(a.tiling_stamp as u32),
-            )?;
-            writer.write_u32_staged(
-                a.fragment_driver_stamp,
-                g16_stamp::previous(a.fragment_stamp as u32),
-            )?;
 
             let preludes = [a.tiling_prelude(pool.blocks), a.fragment_prelude()];
             let tiling_micro = a.tiling_microsequence();

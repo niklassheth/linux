@@ -9,27 +9,32 @@ use super::*;
 impl Bootstrap {
     /// Count a firmware dependency item and decide whether to drop it as
     /// redundant: when this lane's previous Work already waited on that stamp
-    /// or a later one (Works on a lane start in order), or when the stamp has
-    /// already been reached at publish. An item on the same lane's earlier
+    /// or a later one with at least `kind` (Works on a lane start in order),
+    /// or when the stamp has already been reached at publish. Items covering
+    /// an in-flight timestamped producer not yet serialized by a kind-1 wait
+    /// on this lane are never dropped. An item on the same lane's earlier
     /// Work is only counted: lane order implies it, but it is kept.
     pub(super) fn elide_item(
         &self,
         queue: &FirmwareQueues,
         lane: usize,
         dep: &Stamp,
+        kind: u32,
         same_lane: bool,
+        uncovered_ts: bool,
         tally: &mut DepTally,
     ) -> Result<bool> {
         use crate::g16_timeline as t;
         tally.items += 1;
-        let drop = if same_lane {
+        let drop = if uncovered_ts {
+            if same_lane {
+                tally.same_lane += 1;
+            }
+            false
+        } else if same_lane {
             tally.same_lane += 1;
             false
-        } else if queue.waited[lane]
-            .iter()
-            .flatten()
-            .any(|w| w.address == dep.address && g16_stamp::reached(w.value, dep.value))
-        {
+        } else if queue.waited.covers(lane, dep.address, dep.value, kind) {
             tally.repeat += 1;
             true
         } else {
@@ -60,23 +65,37 @@ impl Bootstrap {
         &self,
         queue: &mut FirmwareQueues,
         params: &render::Parameters,
+        timestamped: bool,
         dependencies: &[Option<Stamp>; 2],
         tally: &mut DepTally,
-    ) -> Result<[Option<Stamp>; 2]> {
+    ) -> Result<[Option<ResolvedDep>; 2]> {
         let own_fragment = queue.lanes.as_ref().map(|lanes| lanes[1].firmware_stamp());
-        let mut kept = *dependencies;
+        let render_kind = crate::module_parameters::dependency_kind.value();
+        // Slot 1 waits on compute. As the internal TA-to-fragment wait (kind
+        // 0) the firmware starts the render as soon as the compute is done;
+        // in the dynamic dependency graph (kind 1) each such edge idled the
+        // GPU about 100 us. Waits on an in-flight producer with unwaited user
+        // timestamps (and renders carrying user timestamps themselves) stay
+        // kind 1 so user timestamp writes complete before the consumer starts.
+        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
+        let mut kept = [None; 2];
         for (slot, dep) in dependencies.iter().enumerate() {
             let Some(dep) = dep else { continue };
             let lane = Self::render_item_lane(params, slot);
             let same_lane = lane == 1 && own_fragment == Some(dep.address);
-            if !self.covers_timestamps(dep)
-                && self.elide_item(queue, lane, dep, same_lane, tally)?
-            {
-                kept[slot] = None;
+            let uncovered_ts = self.uncovered_timestamps(queue, lane, dep);
+            let kind = if timestamped || uncovered_ts {
+                1
+            } else if slot == 0 {
+                render_kind
+            } else {
+                cross_kind
+            };
+            if !self.elide_item(queue, lane, dep, kind, same_lane, uncovered_ts, tally)? {
+                kept[slot] = Some(ResolvedDep { stamp: *dep, kind });
             }
         }
         Ok(kept)
-
     }
 
     pub(crate) fn submit_render(
@@ -142,7 +161,9 @@ impl Bootstrap {
         };
         let mut queue = queues.lock();
         let mut tally = DepTally::default();
-        let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies, &mut tally)?;
+        let timestamped = timestamps.iter().any(|&t| t != 0);
+        let resolved =
+            self.resolve_render_dependencies(&mut queue, params, timestamped, dependencies, &mut tally)?;
         let dependencies = &resolved;
         let root = owner.lock().roots().low;
         let initbm = !self
@@ -187,7 +208,7 @@ impl Bootstrap {
         params: &render::Parameters,
         support: &Support,
         timestamps: [u64; 4],
-        dependencies: &[Option<Stamp>; 2],
+        dependencies: &[Option<ResolvedDep>; 2],
         job: u64,
     ) -> Result<Receipt> {
         let mut guard = owner.lock();
@@ -236,7 +257,7 @@ impl Bootstrap {
         owner: Arc<Mutex<g16_vm::AddressSpace>>,
         scene: u32,
         timestamps: [u64; 4],
-        dependencies: &[Option<Stamp>; 2],
+        dependencies: &[Option<ResolvedDep>; 2],
         job: u64,
     ) -> Result<Receipt> {
         if self.render_failed {
@@ -447,8 +468,9 @@ impl Bootstrap {
             .ok_or(EIO)?
             .write_live(a.render_shared_state, &use_count.to_le_bytes())?;
         pool.increment(self._firmware_space.as_mut().ok_or(EIO)?)?;
+        let dep_stamps = dependencies.map(|d| d.map(|r| r.stamp));
         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
-        self.note_dependency_events(dependencies, own);
+        self.note_dependency_events(&dep_stamps, own);
         let (heads, epochs, lane_items) = self.publish_render(
             &a, &ta, &frag, queue, initbm, pool.blocks, dependencies,
             params.vdm_barrier_fragment, notifier_write,
@@ -492,9 +514,15 @@ impl Bootstrap {
         };
         let receipt = Receipt { id: va, stamp };
         queue.last[0] = Some(stamp);
+        queue.waited.prune(stamp.address, stamp.value);
         for (slot, dep) in dependencies.iter().enumerate() {
             if let Some(dep) = dep {
-                FirmwareQueues::note_wait(&mut queue.waited, Self::render_item_lane(&params, slot), *dep);
+                queue.waited.note(
+                    Self::render_item_lane(&params, slot),
+                    dep.stamp.address,
+                    dep.stamp.value,
+                    dep.kind,
+                );
             }
         }
         queue.pending += 1;
@@ -512,7 +540,7 @@ impl Bootstrap {
                 job_notifier,
                 stamps_seen: None,
                 blocked: 0,
-                dependencies: *dependencies,
+                dependencies: dep_stamps,
                 stamps: [
                     Some(Stamp {
                         address: a.tiling_firmware_stamp,
@@ -565,7 +593,7 @@ impl Bootstrap {
         self.render_failed = false;
         self.batch_works += 1;
         self.trace_publication("render", va)?;
-        self.trace_dependencies("render", va, a.context_id as u32, dependencies)?;
+        self.trace_dependencies("render", va, a.context_id as u32, &dep_stamps)?;
         Ok(receipt)
     }
 
@@ -577,7 +605,7 @@ impl Bootstrap {
         queue: &FirmwareQueues,
         initbm: bool,
         blocks: u32,
-        dependencies: &[Option<Stamp>; 2],
+        dependencies: &[Option<ResolvedDep>; 2],
         vdm_barrier_fragment: bool,
         notifier_write: (bool, u32),
     ) -> Result<([u32; 2], [u32; 2], [u32; 2])> {
@@ -636,18 +664,6 @@ impl Bootstrap {
         let mut entries = [[[0u8; 8]; 4]; 2];
         let mut item_counts = [0usize; 2];
         let mut entry_counts = [0usize; 2];
-        let render_kind = crate::module_parameters::dependency_kind.value();
-        // Slot 1 waits on compute. As the internal TA-to-fragment wait (kind
-        // 0) the firmware starts the render as soon as the compute is done;
-        // in the dynamic dependency graph (kind 1) each such edge idled the
-        // GPU about 100 us. Waits on an in-flight producer with user timestamps
-        // (and renders carrying user timestamps themselves) stay kind 1 so user
-        // timestamp writes complete before the consumer starts.
-        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
-        let timestamped = a.tiling_user_timestamp_start != 0
-            || a.tiling_user_timestamp_end != 0
-            || a.fragment_user_timestamp_start != 0
-            || a.fragment_user_timestamp_end != 0;
         for stage in 0..2 {
             let (prelude, work) = if stage == 0 {
                 (a.tiling_prelude, a.tiling_work)
@@ -661,26 +677,17 @@ impl Bootstrap {
             };
             // The prelude page leaves +0x40..+0xc0 free before its
             // microsequence. All barrier bytes share the Work's lifetime.
-            let deps = stage_dependencies[stage]
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, dep)| {
-                    dep.map(|d| {
-                        let kind = if timestamped || self.covers_timestamps(&d) {
-                            1
-                        } else if slot == 0 {
-                            render_kind
-                        } else {
-                            cross_kind
-                        };
-                        (kind, d)
-                    })
-                });
-            for (index, (kind, dep)) in deps.enumerate() {
+            for (index, dep) in stage_dependencies[stage].iter().flatten().enumerate() {
                 items[stage][index] = g16_fw::queue::dependency(
-                    dep.address, dep.value, dep.event, stamp as u32, uuid as u32, kind,
+                    dep.stamp.address,
+                    dep.stamp.value,
+                    dep.stamp.event,
+                    stamp as u32,
+                    uuid as u32,
+                    dep.kind,
                 );
-                entries[stage][entry_counts[stage]] = (prelude + 0x40 + index as u64 * 0x40).to_le_bytes();
+                entries[stage][entry_counts[stage]] =
+                    (prelude + 0x40 + index as u64 * 0x40).to_le_bytes();
                 item_counts[stage] += 1;
                 entry_counts[stage] += 1;
             }

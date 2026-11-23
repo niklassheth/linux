@@ -35,26 +35,58 @@ impl Bootstrap {
     /// otherwise return EBUSY, and the submission worker publishes what it
     /// has staged and retries after the next completion, holding back the
     /// rest of this queue.
-    /// Whether `dep` covers a Work still in flight that has user timestamp
-    /// destinations. The firmware writes a Work's user timestamps after the
-    /// Work has ended, so neither same-lane ring order nor a kind-0 dependency
-    /// item (nor a firmware-stamp reach check) waits for them. Keeping the wait
-    /// as a kind-1 dependency item orders the consumer after those writes.
+    /// Iterate `(address, value)` stamps of all in-flight Works that have user
+    /// timestamp destinations.
+    pub(super) fn timestamp_flight_stamps(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.flights
+            .iter()
+            .filter(|f| f.user_timestamps)
+            .flat_map(|f| f.stamps.iter().flatten().map(|s| (s.address, s.value)))
+    }
+
+    /// Whether `dep` covers any Work still in flight that has user timestamp
+    /// destinations (used by the host CPU-hold path, which emits no kind-1 item).
     pub(super) fn covers_timestamps(&self, dep: &Stamp) -> bool {
-        self.flights.iter().any(|f| {
-            f.user_timestamps
-                && f.stamps.iter().flatten().any(|s| {
-                    s.address == dep.address && g16_stamp::reached(dep.value, s.value)
-                })
-        })
+        crate::g16_wait_state::latest_covered_timestamp(
+            self.timestamp_flight_stamps(),
+            dep.address,
+            dep.value,
+        )
+        .is_some()
+    }
+
+    /// Whether `dep` covers an in-flight Work with user timestamp destinations
+    /// that has not yet been serialized by a prior `kind = 1` wait on `lane`.
+    ///
+    /// The firmware writes a Work's user timestamps after the Work has ended,
+    /// so neither same-lane ring order nor a kind-0 dependency item (nor a
+    /// firmware-stamp reach check) waits for them. Keeping the first wait on
+    /// `lane` as a kind-1 dependency item orders `lane` after those writes;
+    /// once `lane` has emitted a kind-1 wait reaching the latest covered
+    /// timestamped flight, later Works on `lane` do not need to re-emit
+    /// redundant kind-1 items for that same flight.
+    pub(super) fn uncovered_timestamps(
+        &self,
+        queue: &FirmwareQueues,
+        lane: usize,
+        dep: &Stamp,
+    ) -> bool {
+        crate::g16_wait_state::has_uncovered_timestamps(
+            &queue.waited,
+            lane,
+            self.timestamp_flight_stamps(),
+            dep.address,
+            dep.value,
+        )
     }
 
     pub(super) fn resolve_compute_dependencies(
         &self,
         queue: &mut FirmwareQueues,
+        timestamped: bool,
         dependencies: &[Option<Stamp>; 2],
         tally: &mut DepTally,
-    ) -> Result<[Option<Stamp>; 2]> {
+    ) -> Result<[Option<ResolvedDep>; 2]> {
         let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
         // A wait on this queue's own render lanes (the
         // render -> compute edge inside one submission) stays a firmware
@@ -64,32 +96,44 @@ impl Bootstrap {
             .lanes
             .as_ref()
             .map(|lanes| [lanes[0].firmware_stamp(), lanes[1].firmware_stamp()]);
+        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
         let mut kept = [None; 2];
         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
         for (slot, dep) in dependencies.iter().enumerate() {
             let Some(dep) = dep else { continue };
             if own_render.is_some_and(|r| r.contains(&dep.address)) {
-                if self.covers_timestamps(dep)
-                    || !self.elide_item(queue, 2, dep, false, tally)?
-                {
-                    kept[slot] = Some(*dep);
+                let uncovered_ts = self.uncovered_timestamps(queue, 2, dep);
+                let kind = if timestamped || uncovered_ts {
+                    1
+                } else {
+                    cross_kind
+                };
+                if !self.elide_item(queue, 2, dep, kind, false, uncovered_ts, tally)? {
+                    kept[slot] = Some(ResolvedDep { stamp: *dep, kind });
                 }
                 continue;
             }
             // The compute lane orders its own Works by ring position alone,
-            // which does not wait for a previous Work's user timestamps.
-            if own_lane == Some(dep.address) && self.covers_timestamps(dep) {
-                kept[slot] = Some(*dep);
+            // which does not wait for a previous Work's user timestamps. Emit
+            // a kind-1 item until lane 2 has serialized past the latest
+            // covered timestamped flight.
+            if own_lane == Some(dep.address) {
+                if self.uncovered_timestamps(queue, 2, dep) {
+                    tally.items += 1;
+                    tally.same_lane += 1;
+                    kept[slot] = Some(ResolvedDep {
+                        stamp: *dep,
+                        kind: 1,
+                    });
+                }
                 continue;
             }
-            if own_lane != Some(dep.address) {
-                let now = fw.read_u32(dep.address)?;
-                let done = g16_stamp::reached(now, dep.value) && !self.covers_timestamps(dep);
-                self.hold_check("compute", dep, now, done)?;
-                if !done {
-                    crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
-                    return Err(EBUSY);
-                }
+            let now = fw.read_u32(dep.address)?;
+            let done = g16_stamp::reached(now, dep.value) && !self.covers_timestamps(dep);
+            self.hold_check("compute", dep, now, done)?;
+            if !done {
+                crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
+                return Err(EBUSY);
             }
         }
         Ok(kept)
@@ -107,7 +151,9 @@ impl Bootstrap {
         let mut queue = queues.lock();
         let mut client = owner.lock();
         let mut tally = DepTally::default();
-        let resolved = self.resolve_compute_dependencies(&mut queue, dependencies, &mut tally)?;
+        let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
+        let resolved =
+            self.resolve_compute_dependencies(&mut queue, timestamped, dependencies, &mut tally)?;
         let dependencies = &resolved;
         self.reserve_flight(
             &queue,
@@ -143,7 +189,7 @@ impl Bootstrap {
         owner: Arc<Mutex<g16_vm::AddressSpace>>,
         params: &compute::Parameters,
         timestamps: [u64; 4],
-        dependencies: &[Option<Stamp>; 2],
+        dependencies: &[Option<ResolvedDep>; 2],
     ) -> Result<Receipt> {
         let lane = queue.lanes.as_ref().ok_or(EIO)?[2];
         let priority = queue.priority;
@@ -195,8 +241,9 @@ impl Bootstrap {
         a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
         a.register_identity = (u64::from(a.context) << 32) | 1;
         self.render_failed = true;
+        let dep_stamps = dependencies.map(|d| d.map(|r| r.stamp));
         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
-        self.note_dependency_events(dependencies, own);
+        self.note_dependency_events(&dep_stamps, own);
         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
         let work = &mut self.encodings.compute;
         work.fill(0);
@@ -214,7 +261,6 @@ impl Bootstrap {
 
         let first = lane.head;
         let head = (first + 1 + dependencies.iter().flatten().count() as u32) % 0x500;
-        let dep_timestamps = dependencies.map(|d| d.is_some_and(|dep| self.covers_timestamps(&dep)));
         // The support's shared state counts every Work submitted against
         // it (render items included, when compute shares the render pool).
         let support = client.compute_support().ok_or(EIO)?;
@@ -238,32 +284,20 @@ impl Bootstrap {
         fw.write_live(a.threshold, &1u32.to_le_bytes())?;
         fw.write_live(a.driver_stamp, &g16_stamp::previous(a.stamp).to_le_bytes())?;
         let mut pos = first;
-        // A compute's items wait on its queue's render: cross_dependency_kind,
-        // or kind 1 when this Work or any awaited producer has user timestamps.
-        // An item on the own compute lane (kept only for timestamps, see
-        // covers_timestamps) is kind 1 as well.
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
-        let cross_kind = crate::module_parameters::cross_dependency_kind.value();
-        let own_lane = lane.firmware_stamp();
         let mut index = 0usize;
-        for (dep, covers_ts) in dependencies.iter().zip(dep_timestamps) {
-            let Some(dep) = dep else { continue };
-            let kind = if timestamped || dep.address == own_lane || covers_ts {
-                1
-            } else {
-                cross_kind
-            };
+        for dep in dependencies.iter().flatten() {
             // Between the threshold/timestamps and the CDM entry trampoline.
             let address = a.work + 0x1900 + index as u64 * 0x40;
             fw.write_live(
                 address,
                 &g16_fw::queue::dependency(
-                    dep.address,
-                    dep.value,
-                    dep.event,
+                    dep.stamp.address,
+                    dep.stamp.value,
+                    dep.stamp.event,
                     a.stamp,
                     a.identity as u32,
-                    kind,
+                    dep.kind,
                 ),
             )?;
             fw.write_live(lane.ring + u64::from(pos) * 8, &address.to_le_bytes())?;
@@ -288,8 +322,11 @@ impl Bootstrap {
         };
         let pointers = lane.pointers;
         queue.last[1] = Some(stamp);
+        queue.waited.prune(stamp.address, stamp.value);
         for dep in dependencies.iter().flatten() {
-            FirmwareQueues::note_wait(&mut queue.waited, 2, *dep);
+            queue
+                .waited
+                .note(2, dep.stamp.address, dep.stamp.value, dep.kind);
         }
         queue.pending += 1;
         self.flights.push_within_capacity(
@@ -306,7 +343,7 @@ impl Bootstrap {
                 job_notifier: None,
                 stamps_seen: None,
                 blocked: 0,
-                dependencies: *dependencies,
+                dependencies: dep_stamps,
                 stamps: [Some(stamp), None],
                 user_timestamps: timestamped,
                 driver_stamps: [
@@ -336,7 +373,7 @@ impl Bootstrap {
         self.render_failed = false;
         self.batch_works += 1;
         self.trace_publication("compute", a.work)?;
-        self.trace_dependencies("compute", a.work, a.context, dependencies)?;
+        self.trace_dependencies("compute", a.work, a.context, &dep_stamps)?;
         Ok(Receipt { id: a.work, stamp })
     }
 }

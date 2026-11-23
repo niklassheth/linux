@@ -60,8 +60,8 @@ pub(crate) struct FirmwareQueues {
     /// submissions are refused.
     pub(crate) rejected: bool,
     /// Per lane (TA, 3D, compute), the latest stamps its published Works
-    /// waited on as firmware items, keyed by address.
-    waited: [[Option<Stamp>; 2]; 3],
+    /// waited on as firmware items, keyed by address and wait kind.
+    waited: crate::g16_wait_state::LaneWaits,
     /// The last (read, done) cursors admission read per lane;
     /// u32::MAX until read. Cursors only advance, so a stale view
     /// underestimates room.
@@ -72,18 +72,6 @@ impl FirmwareQueues {
     /// Whether the queue's firmware rings exist (see `Runtime::provision_queue`).
     pub(crate) fn provisioned(&self) -> bool {
         self.lanes.is_some()
-    }
-
-    /// Remember that a published Work on `lane` waited on `dep` (a field-level
-    /// borrow, usable while the queue's lanes are borrowed).
-    fn note_wait(waited: &mut [[Option<Stamp>; 2]; 3], lane: usize, dep: Stamp) {
-        let slots = &mut waited[lane];
-        if let Some(s) = slots.iter_mut().find(|s| s.is_some_and(|w| w.address == dep.address)) {
-            *s = Some(dep);
-        } else {
-            slots[1] = slots[0];
-            slots[0] = Some(dep);
-        }
     }
 }
 
@@ -167,7 +155,7 @@ impl FirmwareQueues {
             compute_count: crate::module_parameters::fw_counter_start.value(),
             notified_works: 0,
             last: [None; 2],
-            waited: [[None; 2]; 3],
+            waited: crate::g16_wait_state::LaneWaits::new(),
             cursors: [const { core::cell::Cell::new((u32::MAX, u32::MAX)) }; 3],
             rejected: false,
         }
@@ -212,6 +200,14 @@ pub(crate) struct Stamp {
     pub(crate) address: u64,
     pub(crate) value: u32,
     pub(crate) event: u32,
+}
+
+/// A dependency kept by resolution together with the firmware wait kind
+/// (`0` internal wait, `1` dynamic dependency graph) it requires.
+#[derive(Clone, Copy)]
+pub(super) struct ResolvedDep {
+    pub(super) stamp: Stamp,
+    pub(super) kind: u32,
 }
 
 #[derive(Clone, Copy)]

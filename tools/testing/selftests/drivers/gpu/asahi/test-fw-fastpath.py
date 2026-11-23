@@ -157,4 +157,10 @@ for body in (sf_fn, dtr_fn):
     assert a_p < w_p < d_p
 checks += 1
 
+# 13. Fast headroom helpers never allocate.
+for name in ('cap_state', 'check_cap_headroom', 'check_queue_headroom'):
+    body = function(publish, name)
+    assert 'GFP_KERNEL' not in body and 'KVec::' not in body, name
+checks += 1
+
 print(f'test-fw-fastpath: {checks} checks passed')

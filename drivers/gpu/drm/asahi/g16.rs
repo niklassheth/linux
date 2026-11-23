@@ -286,6 +286,9 @@ pub(crate) struct Bootstrap {
     flights: KVec<render_runtime::Flight>,
     /// Flights retired by the latest scan, returned one per retire() call.
     retired: KVec<(u64, bool)>,
+    /// Monotonic counter bumped whenever a flight retires, used by the pump to
+    /// skip re-preparing capacity-blocked jobs until headroom can change.
+    retire_gen: u64,
     publications: KVec<render_runtime::Publication>,
     /// Admission's compact view of `flights` and cached channel cursors.
     ledger: KBox<render_runtime::Ledger>,
@@ -851,6 +854,7 @@ impl Bootstrap {
             render_failed: false,
             flights: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
             retired: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
+            retire_gen: 0,
             publications: KVec::with_capacity(2 * render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
             ledger: KBox::new(render_runtime::Ledger::with_capacity(render_runtime::MAX_FLIGHTS)?, GFP_KERNEL)?,
             progress: None,

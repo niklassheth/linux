@@ -7,6 +7,90 @@
 use super::*;
 
 impl Bootstrap {
+    /// Current capacity snapshot for the pump's O(1) fast-skip check.
+    pub(crate) fn cap_state(&self) -> crate::g16_headroom::CapBlock {
+        crate::g16_headroom::CapBlock {
+            retire_gen: self.retire_gen,
+            queue_cap: crate::g16_timeline::QUEUE_CAP.load(Ordering::Relaxed),
+            lane_cap: crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Fast O(1) lower-bound headroom check for `queue` using the caller's
+    /// `cap` snapshot (avoiding any TOCTOU mismatch between evaluated caps and
+    /// a latched `CapBlock`), before any VM lock, page-table walk, dependency
+    /// resolution, MMIO, or firmware read.
+    pub(super) fn check_cap_headroom(
+        &self,
+        queue: &FirmwareQueues,
+        render: bool,
+        cap: crate::g16_headroom::CapBlock,
+    ) -> Result {
+        if self.render_failed {
+            return Err(EIO);
+        }
+        let lanes = queue.lanes.map(|lanes| {
+            lanes.map(|lane| {
+                self.ledger
+                    .lane(lane.pointers)
+                    .map_or(crate::g16_headroom::LaneLoad::default(), |b| {
+                        crate::g16_headroom::LaneLoad {
+                            works: b.works as usize,
+                            load: b.load as usize,
+                            owned: b.owned as usize,
+                        }
+                    })
+            })
+        });
+        match crate::g16_headroom::check_headroom(
+            render,
+            self.work_space_left(render),
+            self.flights.len(),
+            MAX_FLIGHTS,
+            self.ledger.has_room(),
+            cap.queue_cap as usize,
+            crate::module_parameters::max_lane_works.value() as usize,
+            cap.lane_cap as usize,
+            lanes,
+        ) {
+            Ok(()) => Ok(()),
+            Err(crate::g16_headroom::HeadroomBlock::WorkSpaceExhausted) => Err(ENOSPC),
+            Err(crate::g16_headroom::HeadroomBlock::WorkSpaceBusy) => {
+                self.report_pressure(64, "Work storage");
+                Err(EBUSY)
+            }
+            Err(crate::g16_headroom::HeadroomBlock::FlightsFull) => {
+                self.report_pressure(128, "flights");
+                Err(EBUSY)
+            }
+            Err(crate::g16_headroom::HeadroomBlock::QueueCap) => {
+                self.report_pressure(16, "queue entries");
+                Err(EBUSY)
+            }
+            Err(crate::g16_headroom::HeadroomBlock::LaneWorks) => {
+                self.report_pressure(16, "workqueue");
+                Err(EBUSY)
+            }
+            Err(crate::g16_headroom::HeadroomBlock::LaneCap) => {
+                self.report_pressure(32, "lane entries");
+                Err(EBUSY)
+            }
+        }
+    }
+
+    /// Lock `queues` briefly to run `check_cap_headroom` from the pump loop
+    /// before barrier/dependency/mesh preparation, using the same `cap`
+    /// snapshot that the pump will latch on `EBUSY`.
+    pub(crate) fn check_queue_headroom(
+        &self,
+        queues: &Mutex<FirmwareQueues>,
+        render: bool,
+        cap: crate::g16_headroom::CapBlock,
+    ) -> Result {
+        let queue = queues.lock();
+        self.check_cap_headroom(&queue, render, cap)
+    }
+
     pub(super) fn reserve_flight(
         &mut self,
         queue: &FirmwareQueues,
@@ -25,6 +109,15 @@ impl Bootstrap {
                 return Err(ENOSPC);
             }
             self.report_pressure(64, "Work storage");
+            return Err(EBUSY);
+        }
+        let stages: &[usize] = if render { &[0, 1] } else { &[2] };
+        // Preallocated at init (MAX_FLIGHTS): at the cap, wait for retirement.
+        if self.flights.len() >= MAX_FLIGHTS
+            || !self.ledger.has_room()
+            || self.publications.capacity() - self.publications.len() < stages.len()
+        {
+            self.report_pressure(128, "flights");
             return Err(EBUSY);
         }
         // Check scarce resources before allocating any per-Work storage.
@@ -56,7 +149,45 @@ impl Bootstrap {
                 }
             }
         }
-        let stages: &[usize] = if render { &[0, 1] } else { &[2] };
+        // Check exact per-lane work and dependency-item caps in host memory
+        // BEFORE reading SGX MMIO channels or firmware lane cursors.
+        if let Some(lanes) = &queue.lanes {
+            let max_works = crate::module_parameters::max_lane_works.value() as usize;
+            let lane_cap = crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed) as usize;
+            for &stage in stages {
+                let lane = lanes[stage];
+                if max_works != 0
+                    && self
+                        .ledger
+                        .lane(lane.pointers)
+                        .map_or(0, |b| b.works as usize)
+                        >= max_works
+                {
+                    self.report_pressure(16, "workqueue");
+                    return Err(EBUSY);
+                }
+                // Dependency items on a lane deeper than its 128-Work window
+                // stall the firmware. Bound each lane's unretired Works plus
+                // the items queued on it (preludes are not Works).
+                if lane_cap != 0 {
+                    let load = self
+                        .ledger
+                        .lane(lane.pointers)
+                        .map_or(0, |b| b.load as usize);
+                    // Fragment always writes a prelude entry (not a Work)
+                    // before the fragment Work and any moved render item.
+                    let new = if stage == 1 {
+                        entries[stage].saturating_sub(1) as usize
+                    } else {
+                        entries[stage] as usize
+                    };
+                    if load + new > lane_cap {
+                        self.report_pressure(32, "lane entries");
+                        return Err(EBUSY);
+                    }
+                }
+            }
+        }
         for &stage in stages {
             let channel = queue.priority as usize * 3 + stage;
             let staged_count = self
@@ -116,6 +247,8 @@ impl Bootstrap {
                     let mut reader = fw.reader();
                     read = reader.read_u32_relaxed(lane.pointers)?;
                     done = reader.read_u32_relaxed(lane.pointers + 0x30)?;
+                    // Order lane-cursor loads explicitly before subsequent ring writes.
+                    reader.acquire_barrier();
                     queue.cursors[stage].set((read, done));
                 }
                 crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_ADMIT, before);
@@ -131,37 +264,6 @@ impl Bootstrap {
                 // a ring. Like the channel epochs above, never let the head
                 // run half a ring past an unretired flight on this lane, or
                 // that flight's ring check stays false and it never retires.
-                // The firmware reads up to 128 Works ahead on each lane. With
-                // more unretired Works than that on a lane it stops completing
-                // them (Dota 2 bursts: 127 in flight never stalled, 129 did).
-                // This applies to every lane (render TA and 3D as well as
-                // compute), so bound each well below the window, as Metal does
-                // with at most 64 command buffers in flight per queue.
-                let cap = crate::module_parameters::max_lane_works.value() as usize;
-                if cap != 0
-                    && self.ledger.lane(lane.pointers).map_or(0, |b| b.works as usize) >= cap
-                {
-                    self.report_pressure(16, "workqueue");
-                    return Err(EBUSY);
-                }
-                // Dependency items on a lane deeper than its 128-Work window
-                // stall the firmware. Bound each lane's unretired Works plus
-                // the items queued on it (preludes are not Works).
-                let cap = crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed) as usize;
-                if cap != 0 {
-                    let load = self.ledger.lane(lane.pointers).map_or(0, |b| b.load as usize);
-                    // Fragment always writes a prelude entry (not a Work)
-                    // before the fragment Work and any moved render item.
-                    let new = if stage == 1 {
-                        entries[stage].saturating_sub(1) as usize
-                    } else {
-                        entries[stage] as usize
-                    };
-                    if load + new > cap {
-                        self.report_pressure(32, "lane entries");
-                        return Err(EBUSY);
-                    }
-                }
                 let next = (lane.head + entries[stage]) % 0x500;
                 if self
                     .ledger
@@ -173,14 +275,6 @@ impl Bootstrap {
                     return Err(EBUSY);
                 }
             }
-        }
-        // Preallocated at init (MAX_FLIGHTS): at the cap, wait for retirement.
-        if self.flights.len() >= MAX_FLIGHTS
-            || !self.ledger.has_room()
-            || self.publications.capacity() - self.publications.len() < stages.len()
-        {
-            self.report_pressure(128, "flights");
-            return Err(EBUSY);
         }
         Ok(())
     }

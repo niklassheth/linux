@@ -154,6 +154,7 @@ impl Bootstrap {
     ) -> Result<Receipt> {
         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_COMPUTE);
         let mut queue = queues.lock();
+        self.check_cap_headroom(&queue, false, self.cap_state())?;
         let mut client = owner.lock();
         let mut tally = DepTally::default();
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;

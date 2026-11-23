@@ -216,11 +216,20 @@ impl WorkItem for Execution {
             let result = result.and_then(|progress| (|| -> Result<bool> {
                 let mut progress = progress || signalled;
                 let mut admitted = 0;
+                let cap_now = runtime.cap_state();
+                // Jobs that hit EBUSY in this admission pass cannot gain
+                // headroom before flush() + the next retire() pass; skip them
+                // on subsequent iterations of this loop (u128 covers all
+                // JOB_CREDITS = 128 slots).
+                let mut deferred_mask = 0u128;
                 loop {
                     let previous = admitted;
                     let start = engine.cursor;
                     for offset in 0..engine.jobs.len() {
                         let index = (start + offset) % engine.jobs.len();
+                        if index < 128 && deferred_mask & (1u128 << index) != 0 {
+                            continue;
+                        }
                         // Preserve submit-relative barrier index zero: all earlier
                         // submissions on this public queue must have published.
                         if engine.jobs[..index].iter().any(|earlier| {
@@ -254,11 +263,41 @@ impl WorkItem for Execution {
                                 history.push_within_capacity(stamp).map_err(|_| EIO)?;
                             }
                         }
+                        if crate::g16_headroom::CapBlock::still_blocked(job.cap_blocked, cap_now) {
+                            continue;
+                        }
+                        let compute =
+                            matches!(job.execution.parameters[job.next], Parameters::Compute(_));
+                        match runtime.check_queue_headroom(&job.execution.firmware, !compute, cap_now) {
+                            Ok(()) => {
+                                job.cap_blocked = None;
+                            }
+                            Err(EBUSY) if !runtime.render_failed() => {
+                                job.cap_blocked = Some(cap_now);
+                                if index < 128 {
+                                    deferred_mask |= 1u128 << index;
+                                }
+                                crate::g16_timeline::DEFERRED.fetch_add(1, Ordering::Relaxed);
+                                if crate::module_parameters::timeline.value() != 0 {
+                                    job.busy += 1;
+                                    job.why |= match runtime.take_pressure() {
+                                        0 => 0x100,
+                                        bits => bits,
+                                    };
+                                }
+                                continue;
+                            }
+                            Err(error) if runtime.render_failed() => return Err(error),
+                            Err(_) => {
+                                // Non-EBUSY (e.g. ENOSPC with nothing in flight):
+                                // fall through so the normal failure path rejects
+                                // this queue cleanly.
+                                job.cap_blocked = None;
+                            }
+                        }
                         let dependencies =
                             resolve_barriers(&job.history, job.execution.barriers[job.next])?;
                         let execution = job.execution.clone();
-                        let compute =
-                            matches!(execution.parameters[job.next], Parameters::Compute(_));
                         // Ordinary preparation leaves intra-queue waits to the
                         // firmware. Paired mesh stream decoding waits for those
                         // producer stamps before reading command words on CPU.
@@ -295,6 +334,9 @@ impl WorkItem for Execution {
                             Ok(receipt) => receipt,
                             Err(EBUSY) if !runtime.render_failed() => {
                                 crate::g16_timeline::DEFERRED.fetch_add(1, Ordering::Relaxed);
+                                if index < 128 {
+                                    deferred_mask |= 1u128 << index;
+                                }
                                 if crate::module_parameters::timeline.value() != 0 {
                                     job.busy += 1;
                                     job.why |= match runtime.take_pressure() {
@@ -466,6 +508,7 @@ impl sched::JobImpl for SubmissionJob {
                 seen: 0,
                 pending: 0,
                 error: None,
+                cap_blocked: None,
                 history,
             })
         })();

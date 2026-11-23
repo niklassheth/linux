@@ -113,6 +113,10 @@ impl Bootstrap {
         if self.render_failed {
             return Err(EIO);
         }
+        // Fast O(1) capacity check before VM locks, native-mesh page-table
+        // walks/decode, or dependency resolution (lock order: queues -> owner).
+        let mut queue = queues.lock();
+        self.check_cap_headroom(&queue, true, self.cap_state())?;
         let mut mesh_params;
         // The VM's latched mode, not the current one: a VM created native keeps
         // decoding its streams after a runtime switch to 0.
@@ -164,7 +168,6 @@ impl Bootstrap {
         } else {
             params
         };
-        let mut queue = queues.lock();
         let mut tally = DepTally::default();
         let timestamped = timestamps.iter().any(|&t| t != 0);
         let resolved =

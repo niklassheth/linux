@@ -406,6 +406,7 @@ impl Bootstrap {
             // a GPU reference nor performs MMIO/locking in this runtime context.
             unsafe { kernel::bindings::apple_pmp_cpu_vote_gpu_activity(self.flights.len() as u32) };
             self.ledger.remove(&flight)?;
+            self.retire_gen = self.retire_gen.wrapping_add(1);
             let root = match &flight.render {
                 Some(render) => render.root,
                 None => flight.client.lock().roots().low,

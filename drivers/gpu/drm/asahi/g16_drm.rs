@@ -1152,6 +1152,10 @@ struct Running {
     seen: u64,
     pending: usize,
     error: Option<Error>,
+    /// Capacity snapshot at which this job's next command hit an unconditional
+    /// QUEUE_CAP / LANE_CAP / flight / work-storage cap; skipped in O(1) until
+    /// a flight retires or a cap knob changes.
+    cap_blocked: Option<crate::g16_headroom::CapBlock>,
     history: [KVec<Option<crate::g16::Stamp>>; 2],
 }
 

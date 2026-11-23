@@ -10,6 +10,15 @@ pub(crate) fn sync() {
     unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
 }
 
+/// Outer-Shareable acquire barrier (matching ARM64 `dma_rmb()` / `dmb oshld`).
+/// Orders all prior Normal memory loads before any subsequent Normal memory
+/// loads or stores observed across CPUs and coherent DMA masters (GPU/ASC).
+#[inline(always)]
+pub(crate) fn dma_rmb() {
+    // SAFETY: A memory barrier changes no memory ownership.
+    unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
+}
+
 #[inline(always)]
 pub(crate) fn tlbi_asid(asid: u8) {
     // SAFETY: Invalidating a GPU ASID cannot expose stale translations.

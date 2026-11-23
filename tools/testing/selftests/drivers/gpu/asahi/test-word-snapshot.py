@@ -29,7 +29,7 @@ retire = (driver / 'g16_runtime_retire.rs').read_text()
 queues = (driver / 'g16_runtime_queues.rs').read_text()
 assert re.search(
     r'for stamp in flight\.driver_stamps\.iter\(\)\.flatten\(\) \{\s*'
-    r'done &= g16_stamp::reached\(fw\.read_u32\(stamp\.address\)\?, stamp\.value\);',
+    r'done &= g16_stamp::reached\(reader\.read_u32_relaxed\(stamp\.address\)\?, stamp\.value\);',
     retire,
 )
 assert 'self.last_scan.clear();' in retire

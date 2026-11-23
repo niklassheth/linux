@@ -99,6 +99,7 @@ impl Bootstrap {
         let cross_kind = crate::module_parameters::cross_dependency_kind.value();
         let mut kept = [None; 2];
         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+        let mut reader = None;
         for (slot, dep) in dependencies.iter().enumerate() {
             let Some(dep) = dep else { continue };
             if own_render.is_some_and(|r| r.contains(&dep.address)) {
@@ -128,13 +129,17 @@ impl Bootstrap {
                 }
                 continue;
             }
-            let now = fw.read_u32(dep.address)?;
+            let r = reader.get_or_insert_with(|| fw.reader());
+            let now = r.read_u32_relaxed(dep.address)?;
             let done = g16_stamp::reached(now, dep.value) && !self.covers_timestamps(dep);
             self.hold_check("compute", dep, now, done)?;
             if !done {
                 crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
                 return Err(EBUSY);
             }
+        }
+        if let Some(r) = reader {
+            r.acquire_barrier();
         }
         Ok(kept)
     }

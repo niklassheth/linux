@@ -451,21 +451,21 @@ impl Bootstrap {
     /// moves for wedge_ms. Firmware reports nothing for this state, so the
     /// kernel detects it and logs it once; the 10 s watchdog handles it.
     pub(super) fn check_wedge(&mut self) -> Result {
-        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+        let mut reader = self._firmware_space.as_ref().ok_or(EIO)?.reader();
         let mut stuck = None;
         let mut signature = 0u64;
         for (index, flight) in self.flights.iter().enumerate() {
             let (Some(_), Some(tiling), Some(fragment)) = (&flight.render, flight.stamps[0], flight.stamps[1]) else {
                 continue;
             };
-            let ta = fw.read_u32(tiling.address)?;
-            let frag = fw.read_u32(fragment.address)?;
+            let ta = reader.read_u32_relaxed(tiling.address)?;
+            let frag = reader.read_u32_relaxed(fragment.address)?;
             signature = signature.wrapping_mul(0x100_0000_01b3).wrapping_add(u64::from(frag));
             if stuck.is_none()
                 && g16_stamp::reached(ta, tiling.value)
                 && !g16_stamp::reached(frag, fragment.value)
                 && flight.dependencies.iter().flatten().all(|d| {
-                    fw.read_u32(d.address).is_ok_and(|v| g16_stamp::reached(v, d.value))
+                    reader.read_u32_relaxed(d.address).is_ok_and(|v| g16_stamp::reached(v, d.value))
                 })
             {
                 stuck = Some(index);

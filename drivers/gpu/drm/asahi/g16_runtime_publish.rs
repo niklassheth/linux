@@ -113,8 +113,9 @@ impl Bootstrap {
                     || done >= 0x500
                     || !ring_room(lane.head, read, done, entries[stage], 0x500)
                 {
-                    read = fw.read_u32(lane.pointers)?;
-                    done = fw.read_u32(lane.pointers + 0x30)?;
+                    let mut reader = fw.reader();
+                    read = reader.read_u32_relaxed(lane.pointers)?;
+                    done = reader.read_u32_relaxed(lane.pointers + 0x30)?;
                     queue.cursors[stage].set((read, done));
                 }
                 crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_ADMIT, before);

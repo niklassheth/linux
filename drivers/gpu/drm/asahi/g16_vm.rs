@@ -685,6 +685,7 @@ impl AddressSpace {
 
 struct FirmwareRegion {
     va: u64,
+    end: u64,
     pages: KVec<GpuPage>,
 }
 
@@ -783,7 +784,7 @@ impl FirmwareSpace {
         for _ in 0..size / UAT_PGSZ {
             pages.push(GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?, GFP_KERNEL)?;
         }
-        let node = RBTreeNode::new(va, FirmwareRegion { va, pages }, GFP_KERNEL)?;
+        let node = RBTreeNode::new(va, FirmwareRegion { va, end, pages }, GFP_KERNEL)?;
         self.regions.insert(node);
         let region = self.regions.get(&va).ok_or(EIO)?;
         for (i, page) in region.pages.iter().enumerate() {
@@ -926,7 +927,7 @@ impl FirmwareSpace {
         va >= region.va
             && va
                 .checked_add(size as u64)
-                .is_some_and(|end| end <= region.va + (region.pages.len() * UAT_PGSZ) as u64)
+                .is_some_and(|end| end <= region.end)
     }
 
     /// Update host-owned bytes in memory firmware may be reading, between one
@@ -1020,6 +1021,32 @@ impl FirmwareSpace {
         Ok(())
     }
 
+    /// Order subsequent coherent firmware loads after prior notification,
+    /// cursor, or status loads (`dmb oshld`, matching ARM64 `dma_rmb()`).
+    /// G16 firmware pages are Normal-WB coherent with the ASC/GPU fabric, so
+    /// no CPU cache invalidation (`dc ivac`) is needed.
+    #[inline(always)]
+    pub(crate) fn acquire_barrier(&self) {
+        crate::mem::dma_rmb();
+    }
+
+    /// Begin an acquire-scoped batch of coherent firmware reads.
+    ///
+    /// Issues one `dmb oshld` on entry and caches recently resolved regions so
+    /// a retire, event, or admission scan avoids both per-word `dsb sy` stalls
+    /// and repeated RBTree walks. Call `acquire_barrier()` between reading a
+    /// firmware-written producer index and reading the ring entries it
+    /// publishes (ARM64 control dependencies do not order loads), and before
+    /// reusing retired storage or reading GPU output.
+    pub(crate) fn reader(&self) -> FirmwareReader<'_> {
+        self.acquire_barrier();
+        FirmwareReader {
+            space: self,
+            cache: [None; 8],
+            next: 0,
+        }
+    }
+
     pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_READ);
         if va & 3 != 0 {
@@ -1053,10 +1080,91 @@ impl FirmwareSpace {
             None => *self.regions.cursor_back().ok_or(EINVAL)?.current().0,
         };
         let region = self.regions.get(&base).ok_or(EINVAL)?;
-        if end > base + (region.pages.len() * UAT_PGSZ) as u64 {
+        if end > region.end {
             return Err(EINVAL);
         }
         Ok(region)
+    }
+}
+
+/// Scoped acquire-ordered reader over coherent firmware memory.
+pub(crate) struct FirmwareReader<'a> {
+    space: &'a FirmwareSpace,
+    cache: [Option<&'a FirmwareRegion>; 8],
+    next: usize,
+}
+
+impl<'a> FirmwareReader<'a> {
+    /// Outer-Shareable acquire barrier (`dmb oshld`) separating a producer
+    /// cursor load from payload loads, or completion loads from storage reuse.
+    #[inline(always)]
+    pub(crate) fn acquire_barrier(&self) {
+        crate::mem::dma_rmb();
+    }
+
+    fn resolve(&mut self, va: u64, size: usize) -> Result<&'a FirmwareRegion> {
+        for region in self.cache.iter().flatten() {
+            if FirmwareSpace::holds(region, va, size) {
+                return Ok(region);
+            }
+        }
+        let region = self.space.region(va, size)?;
+        self.cache[self.next] = Some(region);
+        self.next = (self.next + 1) & 7;
+        Ok(region)
+    }
+
+    /// Read one aligned 32-bit coherent firmware word without a per-read barrier.
+    pub(crate) fn read_u32_relaxed(&mut self, va: u64) -> Result<u32> {
+        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_READ);
+        if va & 3 != 0 {
+            return Err(EINVAL);
+        }
+        let region = self.resolve(va, 4)?;
+        let offset = (va - region.va) as usize;
+        region.pages[offset / UAT_PGSZ].with_pointer_into_page(offset & (UAT_PGSZ - 1), 4, |p| {
+            // SAFETY: The aligned word lies in this live owned page, mapped
+            // coherently with firmware; volatile avoids tearing and stale
+            // register caching across the acquire-scoped scan.
+            Ok(u32::from_le(unsafe { p.cast::<u32>().read_volatile() }))
+        })
+    }
+
+    /// Read one 4-byte-aligned 64-bit coherent firmware word as two relaxed loads.
+    pub(crate) fn read_u64_relaxed(&mut self, va: u64) -> Result<u64> {
+        Ok(u64::from(self.read_u32_relaxed(va)?)
+            | (u64::from(self.read_u32_relaxed(va.checked_add(4).ok_or(EINVAL)?)?) << 32))
+    }
+
+    /// Read a 4-byte-aligned slice of coherent firmware words in one region
+    /// lookup without per-word barriers.
+    pub(crate) fn read_slice_relaxed(&mut self, va: u64, dst: &mut [u32]) -> Result {
+        if va & 3 != 0 {
+            return Err(EINVAL);
+        }
+        let bytes = dst.len().checked_mul(4).ok_or(EINVAL)?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_READ);
+        let region = self.resolve(va, bytes)?;
+        let mut offset = (va - region.va) as usize;
+        let mut remaining = dst;
+        while !remaining.is_empty() {
+            let within = offset & (UAT_PGSZ - 1);
+            let words = remaining.len().min((UAT_PGSZ - within) / 4);
+            region.pages[offset / UAT_PGSZ].with_pointer_into_page(within, words * 4, |p| {
+                for (i, slot) in remaining[..words].iter_mut().enumerate() {
+                    // SAFETY: Every aligned word lies within this checked page
+                    // range in coherent firmware RAM.
+                    *slot = u32::from_le(unsafe { p.add(i * 4).cast::<u32>().read_volatile() });
+                }
+                Ok(())
+            })?;
+            remaining = &mut remaining[words..];
+            offset += words * 4;
+        }
+        Ok(())
     }
 }
 

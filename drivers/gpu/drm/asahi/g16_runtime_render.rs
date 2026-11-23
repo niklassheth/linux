@@ -132,13 +132,17 @@ impl Bootstrap {
             let params = &mut mesh_params;
             // These are the raw producer dependencies, before same-lane wait
             // elision. A firmware barrier alone cannot protect a CPU read.
-            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+            let mut reader = self._firmware_space.as_ref().ok_or(EIO)?.reader();
             for dep in dependencies.iter().flatten() {
-                if !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value) {
+                if !g16_stamp::reached(reader.read_u32_relaxed(dep.address)?, dep.value) {
                     crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
                     return Err(EBUSY);
                 }
             }
+            // Order subsequent CPU decode reads of client command memory after
+            // observing all producer completion stamps.
+            reader.acquire_barrier();
+            drop(reader);
             let mut client = owner.lock();
             params.mesh = g16_mesh::decode(params.encoder, mesh_mode, |va| client.command_word(va).ok())
                 .map_err(|error| match error {

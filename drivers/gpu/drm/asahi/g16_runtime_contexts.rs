@@ -242,70 +242,88 @@ impl Bootstrap {
     }
 
     pub(super) fn drain_trace_rx(&mut self) -> Result {
-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        for (state, capacity) in [
-            (0xffff_fc20_0003_f3c0, 512),
-            (0xffff_fc20_0003_f400, 256),
-            (0xffff_fc20_0003_f200, 256),
-            (0xffff_fc20_0003_f230, 256),
-            (0xffff_fc20_0003_f260, 256),
-            (0xffff_fc20_0003_f290, 256),
-            (0xffff_fc20_0003_f2c0, 256),
-            (0xffff_fc20_0003_f2f0, 256),
-        ] {
-            let read = fw.read_u32(state)?;
-            let write = fw.read_u32(state + 0x20)?;
-            if read >= capacity || write >= capacity {
-                dev_err!(
-                    self.dev.as_ref(),
-                    "G16: invalid RX cursors at {:#x}: {}/{} capacity {}\n",
-                    state,
-                    read,
-                    write,
-                    capacity
-                );
-                return Err(EIO);
-            }
-            if read != write && crate::module_parameters::fw_trace.value() & 64 != 0 {
-                // SAFETY: ktime_get() has no preconditions.
-                let now = unsafe { kernel::bindings::ktime_get() };
-                let entry = if state == 0xffff_fc20_0003_f3c0 {
-                    0xffff_fc20_000e_5c40 + u64::from(read) * 0x48
-                } else {
-                    0
-                };
-                let (w0, w1) = if entry != 0 {
-                    (fw.read_u32(entry)?, fw.read_u32(entry + 4)?)
-                } else {
-                    (0, 0)
-                };
-                pr_info!(
-                    "G16: rxring {} {:#x} {}..{} first={:#x}/{:#x}\n",
-                    now, state, read, write, w0, w1
-                );
-            }
-            if read != write {
-                if state == 0xffff_fc20_0003_f3c0 {
-                    let mut cursor = read;
-                    while cursor != write {
-                        let base = 0xffff_fc20_000e_5c40 + u64::from(cursor) * 0x48;
-                        if fw.read_u32(base)? == 5
-                            && fw.read_u32(base + 0x2c)? & 0xffff == 4
-                            && fw.read_u64(base + 0x30)? == 0
-                            && fw.read_u64(base + 0x14)? != 0
-                        {
-                            crate::g16_timeline::PARTIAL_RENDERS
-                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            pr_info!(
-                                "G16: firmware Start3D partial render queue {:#x}\n",
-                                fw.read_u64(base + 0x24)?
-                            );
-                        }
-                        cursor = (cursor + 1) % capacity;
-                    }
+        let mut updates = [(0u64, [0u8; 4]); 8];
+        let mut update_count = 0usize;
+        {
+            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+            let mut reader = fw.reader();
+            for (state, capacity) in [
+                (0xffff_fc20_0003_f3c0, 512),
+                (0xffff_fc20_0003_f400, 256),
+                (0xffff_fc20_0003_f200, 256),
+                (0xffff_fc20_0003_f230, 256),
+                (0xffff_fc20_0003_f260, 256),
+                (0xffff_fc20_0003_f290, 256),
+                (0xffff_fc20_0003_f2c0, 256),
+                (0xffff_fc20_0003_f2f0, 256),
+            ] {
+                let read = reader.read_u32_relaxed(state)?;
+                let write = reader.read_u32_relaxed(state + 0x20)?;
+                if read >= capacity || write >= capacity {
+                    dev_err!(
+                        self.dev.as_ref(),
+                        "G16: invalid RX cursors at {:#x}: {}/{} capacity {}\n",
+                        state,
+                        read,
+                        write,
+                        capacity
+                    );
+                    return Err(EIO);
                 }
-                fw.write_live(state, &write.to_le_bytes())?;
+                if read != write {
+                    if state == 0xffff_fc20_0003_f3c0 {
+                        // Order trace-ring payload loads after reading producer
+                        // cursor `write` (ARM64 control deps do not order loads).
+                        reader.acquire_barrier();
+                    }
+                    if crate::module_parameters::fw_trace.value() & 64 != 0 {
+                        // SAFETY: ktime_get() has no preconditions.
+                        let now = unsafe { kernel::bindings::ktime_get() };
+                        let entry = if state == 0xffff_fc20_0003_f3c0 {
+                            0xffff_fc20_000e_5c40 + u64::from(read) * 0x48
+                        } else {
+                            0
+                        };
+                        let (w0, w1) = if entry != 0 {
+                            (
+                                reader.read_u32_relaxed(entry)?,
+                                reader.read_u32_relaxed(entry + 4)?,
+                            )
+                        } else {
+                            (0, 0)
+                        };
+                        pr_info!(
+                            "G16: rxring {} {:#x} {}..{} first={:#x}/{:#x}\n",
+                            now, state, read, write, w0, w1
+                        );
+                    }
+                    if state == 0xffff_fc20_0003_f3c0 {
+                        let mut cursor = read;
+                        while cursor != write {
+                            let base = 0xffff_fc20_000e_5c40 + u64::from(cursor) * 0x48;
+                            if reader.read_u32_relaxed(base)? == 5
+                                && reader.read_u32_relaxed(base + 0x2c)? & 0xffff == 4
+                                && reader.read_u64_relaxed(base + 0x30)? == 0
+                                && reader.read_u64_relaxed(base + 0x14)? != 0
+                            {
+                                crate::g16_timeline::PARTIAL_RENDERS
+                                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                pr_info!(
+                                    "G16: firmware Start3D partial render queue {:#x}\n",
+                                    reader.read_u64_relaxed(base + 0x24)?
+                                );
+                            }
+                            cursor = (cursor + 1) % capacity;
+                        }
+                    }
+                    updates[update_count] = (state, write.to_le_bytes());
+                    update_count += 1;
+                }
             }
+        }
+        if update_count != 0 {
+            let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+            fw.write_batch(update_count, |n| (updates[n].0, &updates[n].1[..]))?;
         }
         Ok(())
     }

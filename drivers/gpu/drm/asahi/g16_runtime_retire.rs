@@ -8,9 +8,9 @@ use super::*;
 
 impl Bootstrap {
     pub(super) fn stamps_done(&self, flight: &Flight) -> Result<bool> {
-        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+        let mut reader = self._firmware_space.as_ref().ok_or(EIO)?.reader();
         for stamp in flight.stamps.iter().flatten() {
-            if !g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value) {
+            if !g16_stamp::reached(reader.read_u32_relaxed(stamp.address)?, stamp.value) {
                 return Ok(false);
             }
         }
@@ -23,34 +23,102 @@ impl Bootstrap {
     pub(super) fn service_flights(&mut self) -> Result {
         const STATE: u64 = 0xffff_fc20_0003_f1c0;
         const RING: u64 = 0xffff_fc20_0003_f440;
-        for _ in 0..256 {
-            let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-            let cursor = fw.read_u32(STATE)?;
-            let end = fw.read_u32(STATE + 0x20)?;
-            if cursor >= 256 || end >= 256 {
-                return Err(EIO);
-            }
-            if cursor == end {
-                break;
-            }
-            let base = RING + u64::from(cursor) * 0x48;
-            let kind = fw.read_u32(base)?;
-            if kind == 1
-                || (kind == 13
-                    && self.opening_notification_pending
-                    && fw.read_u32(base + 4)? == 1
-                    && fw.read_u32(base + 8)? == 0
-                    && fw.read_u64(base + 12)? == g16_fw::CONTROL_DATA
-                    && fw.read_u64(base + 20)? == g16_fw::OPERAND_TABLE
-                    && fw.read_u64(base + 28)? == g16_fw::OPERAND_TABLE
-                    && fw.read_u32(base + 36)? == 20 * 8)
-            {
-                if kind == 13 {
-                    self.opening_notification_pending = false;
+        let mut steps = 0usize;
+        'outer: while steps < 256 {
+            let mut dirty_cursor: Option<u32> = None;
+            let action = {
+                let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+                let mut reader = fw.reader();
+                let mut cursor = reader.read_u32_relaxed(STATE)?;
+                let mut end = reader.read_u32_relaxed(STATE + 0x20)?;
+                if cursor >= 256 || end >= 256 {
+                    return Err(EIO);
                 }
-                fw.write_live(STATE, &((cursor + 1) & 255).to_le_bytes())?;
-                continue;
+                if cursor == end {
+                    break;
+                }
+                // Order event-ring entry loads after producer index `end`
+                // (ARM64 control dependencies do not order loads).
+                reader.acquire_barrier();
+                let mut non_simple = None;
+                while steps < 256 {
+                    if cursor == end {
+                        end = reader.read_u32_relaxed(STATE + 0x20)?;
+                        if end >= 256 {
+                            return Err(EIO);
+                        }
+                        if cursor == end {
+                            break;
+                        }
+                        reader.acquire_barrier();
+                    }
+                    steps += 1;
+                    let base = RING + u64::from(cursor) * 0x48;
+                    let kind = reader.read_u32_relaxed(base)?;
+                    let is_opening = if kind == 13 && self.opening_notification_pending {
+                        let mut words = [0u32; 9];
+                        reader.read_slice_relaxed(base + 4, &mut words)?;
+                        let w64 = |i: usize| u64::from(words[i]) | (u64::from(words[i + 1]) << 32);
+                        words[0] == 1
+                            && words[1] == 0
+                            && w64(2) == g16_fw::CONTROL_DATA
+                            && w64(4) == g16_fw::OPERAND_TABLE
+                            && w64(6) == g16_fw::OPERAND_TABLE
+                            && words[8] == 20 * 8
+                    } else {
+                        false
+                    };
+                    if kind == 1 || is_opening {
+                        if is_opening {
+                            self.opening_notification_pending = false;
+                        }
+                        cursor = (cursor + 1) & 255;
+                        dirty_cursor = Some(cursor);
+                        continue;
+                    }
+                    if kind == 0 || kind == 4 {
+                        non_simple = Some((base, kind, cursor, None));
+                        break;
+                    }
+                    let mut selected = None;
+                    for (index, flight) in self.flights.iter().enumerate() {
+                        if let Some(render) = &flight.render {
+                            let a = &render.addresses;
+                            let matches = match kind {
+                                6 => {
+                                    reader.read_u32_relaxed(base + 4)? == a.context_id as u32
+                                        && reader.read_u32_relaxed(base + 8)?
+                                            == a.buffer_manager_slot as u32
+                                        && reader.read_u32_relaxed(a.fragment_firmware_stamp)?
+                                            != a.fragment_stamp as u32
+                                }
+                                7 => {
+                                    reader.read_u32_relaxed(base + 12)? == a.fragment_event as u32
+                                        && reader.read_u32_relaxed(base + 16)?
+                                            == a.fragment_stamp as u32
+                                }
+                                _ => false,
+                            };
+                            if matches {
+                                selected = Some(index);
+                                break;
+                            }
+                        }
+                    }
+                    non_simple = Some((base, kind, cursor, selected));
+                    break;
+                }
+                non_simple
+            };
+            if let Some(next_cursor) = dirty_cursor {
+                self._firmware_space
+                    .as_mut()
+                    .ok_or(EIO)?
+                    .write_live(STATE, &next_cursor.to_le_bytes())?;
             }
+            let Some((base, kind, cursor, selected)) = action else {
+                break 'outer;
+            };
             if kind == 0 || kind == 4 {
                 // Firmware fault (0) or timeout (4) report, as upstream's
                 // EventMsg::Fault/Timeout. Upstream fails the pending work and
@@ -60,29 +128,6 @@ impl Bootstrap {
                 dev_err!(self.dev.as_ref(), "G16: firmware {} event\n", what);
                 self.report_failed_event(base, kind, cursor)?;
                 return Err(EIO);
-            }
-            let mut selected = None;
-            for (index, flight) in self.flights.iter().enumerate() {
-                if let Some(render) = &flight.render {
-                    let a = &render.addresses;
-                    let matches = match kind {
-                        6 => {
-                            fw.read_u32(base + 4)? == a.context_id as u32
-                                && fw.read_u32(base + 8)? == a.buffer_manager_slot as u32
-                                && fw.read_u32(a.fragment_firmware_stamp)?
-                                    != a.fragment_stamp as u32
-                        }
-                        7 => {
-                            fw.read_u32(base + 12)? == a.fragment_event as u32
-                                && fw.read_u32(base + 16)? == a.fragment_stamp as u32
-                        }
-                        _ => false,
-                    };
-                    if matches {
-                        selected = Some(index);
-                        break;
-                    }
-                }
             }
             let Some(index) = selected else {
                 self.report_failed_event(base, kind, cursor)?;
@@ -157,15 +202,16 @@ impl Bootstrap {
         // they never overflow either table.
         self.last_scan.clear();
         let mut retire_cache = crate::g16_snapshot::WordSnapshot::<64>::default();
+        let mut reader = self._firmware_space.as_ref().ok_or(EIO)?.reader();
         let mut index = self.flights.len();
         while index > 0 {
             index -= 1;
             let flight = &self.flights[index];
-            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
             let mut reached_all = true;
             for stamp in flight.stamps.iter().flatten() {
                 if !g16_stamp::reached(
-                    self.last_scan.read_with(stamp.address, |a| fw.read_u32(a))?,
+                    self.last_scan
+                        .read_with(stamp.address, |a| reader.read_u32_relaxed(a))?,
                     stamp.value,
                 ) {
                     reached_all = false;
@@ -183,7 +229,7 @@ impl Bootstrap {
             // Driver stamps are unique per Work, so read them directly without
             // polluting the shared snapshot tables.
             for stamp in flight.driver_stamps.iter().flatten() {
-                done &= g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value);
+                done &= g16_stamp::reached(reader.read_u32_relaxed(stamp.address)?, stamp.value);
             }
             blocked |= u32::from(!done);
             // A reusable Work has its own notifier and exact submitted count.
@@ -192,7 +238,8 @@ impl Bootstrap {
                 let notified = match flight.notifier_count {
                     // The shared notifier has counted this render's Works.
                     Some((completed, total)) => {
-                        let count = retire_cache.read_with(completed, |a| fw.read_u32(a))?;
+                        let count =
+                            retire_cache.read_with(completed, |a| reader.read_u32_relaxed(a))?;
                         notifier_seen = Some((count, total));
                         (count.wrapping_sub(total) as i32) >= 0
                     }
@@ -203,7 +250,7 @@ impl Bootstrap {
                             } else {
                                 0x1400
                             };
-                        fw.read_u32(notifier + 0x94)? == 0
+                        reader.read_u32_relaxed(notifier + 0x94)? == 0
                     }
                 };
                 blocked |= u32::from(!notified) << 1;
@@ -213,11 +260,12 @@ impl Bootstrap {
                 for &(pointers, head) in &flight.queues {
                     if pointers != 0 {
                         let lane = reached(
-                            retire_cache.read_with(pointers, |a| fw.read_u32(a))?,
+                            retire_cache.read_with(pointers, |a| reader.read_u32_relaxed(a))?,
                             head,
                             0x500,
                         ) && reached(
-                            retire_cache.read_with(pointers + 0x30, |a| fw.read_u32(a))?,
+                            retire_cache
+                                .read_with(pointers + 0x30, |a| reader.read_u32_relaxed(a))?,
                             head,
                             0x500,
                         );
@@ -407,6 +455,12 @@ impl Bootstrap {
             }
             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
         }
+        // Order completion loads BEFORE subsequent Work/scratch reuse stores
+        // and CPU reads of GPU output after fence signalling.
+        if !self.retired.is_empty() {
+            reader.acquire_barrier();
+        }
+        drop(reader);
         crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_SCAN, scan_before);
         if !self.retired.is_empty() {
             // Queued commands can legitimately wait longer than one Work's
@@ -512,23 +566,37 @@ impl Bootstrap {
         const STATE: u64 = 0xfffffc200003f1c0;
         const RING: u64 = 0xfffffc200003f440;
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        let mut cursor = fw.read_u32(STATE)?;
-        let end = fw.read_u32(STATE + 0x20)?;
-        if cursor >= 256 || end >= 256 {
-            return Err(EIO);
-        }
-        if cursor != end && crate::module_parameters::fw_trace.value() & 64 != 0 {
-            // SAFETY: ktime_get() has no preconditions.
-            let now = unsafe { kernel::bindings::ktime_get() };
-            let base = RING + u64::from(cursor) * 0x48;
-            pr_info!(
-                "G16: rxring {} event {}..{} first={:#x}/{:#x}\n",
-                now, cursor, end, fw.read_u32(base)?, fw.read_u32(base + 4)?
-            );
-        }
+        let (mut cursor, end) = {
+            let mut reader = fw.reader();
+            let cursor = reader.read_u32_relaxed(STATE)?;
+            let end = reader.read_u32_relaxed(STATE + 0x20)?;
+            if cursor >= 256 || end >= 256 {
+                return Err(EIO);
+            }
+            if cursor != end {
+                reader.acquire_barrier();
+                if crate::module_parameters::fw_trace.value() & 64 != 0 {
+                    // SAFETY: ktime_get() has no preconditions.
+                    let now = unsafe { kernel::bindings::ktime_get() };
+                    let base = RING + u64::from(cursor) * 0x48;
+                    pr_info!(
+                        "G16: rxring {} event {}..{} first={:#x}/{:#x}\n",
+                        now,
+                        cursor,
+                        end,
+                        reader.read_u32_relaxed(base)?,
+                        reader.read_u32_relaxed(base + 4)?
+                    );
+                }
+            }
+            (cursor, end)
+        };
         while cursor != end {
             let base = RING + u64::from(cursor) * 0x48;
-            let kind = fw.read_u32(base)?;
+            let kind = {
+                let mut reader = fw.reader();
+                reader.read_u32_relaxed(base)?
+            };
             let next = (cursor + 1) & 255;
             if kind == 1 {
                 fw.write_live(STATE, &next.to_le_bytes())?;
@@ -554,11 +622,19 @@ impl Bootstrap {
             }
             let mut reply = [0u8; 64];
             if kind == 6 {
-                let subpipe = fw.read_u32(base + 16)?;
-                let halt_count = fw.read_u64(base + 20)?;
-                if fw.read_u32(base + 4)? != a.context_id as u32
-                    || fw.read_u32(base + 8)? != pool.addresses.buffer_manager_slot as u32
-                    || fw.read_u32(base + 12)? != pool.counter
+                let (w1, w2, w3, subpipe, halt_count) = {
+                    let mut reader = fw.reader();
+                    (
+                        reader.read_u32_relaxed(base + 4)?,
+                        reader.read_u32_relaxed(base + 8)?,
+                        reader.read_u32_relaxed(base + 12)?,
+                        reader.read_u32_relaxed(base + 16)?,
+                        reader.read_u64_relaxed(base + 20)?,
+                    )
+                };
+                if w1 != a.context_id as u32
+                    || w2 != pool.addresses.buffer_manager_slot as u32
+                    || w3 != pool.counter
                     || subpipe >= 64
                 {
                     return Err(EIO);
@@ -630,12 +706,21 @@ impl Bootstrap {
                 pool.refused |= !grown;
                 pool.counter = pool.counter.checked_add(1).ok_or(EIO)?;
             } else {
+                let (w1, w2, w3, w4) = {
+                    let mut reader = fw.reader();
+                    (
+                        reader.read_u32_relaxed(base + 4)?,
+                        reader.read_u32_relaxed(base + 8)?,
+                        reader.read_u32_relaxed(base + 12)?,
+                        reader.read_u32_relaxed(base + 16)?,
+                    )
+                };
                 if !pool.refused
                     || service.memory_limit
-                    || fw.read_u32(base + 4)? != 0
-                    || fw.read_u32(base + 8)? != 1
-                    || fw.read_u32(base + 12)? != a.fragment_event as u32
-                    || fw.read_u32(base + 16)? != a.fragment_stamp as u32
+                    || w1 != 0
+                    || w2 != 1
+                    || w3 != a.fragment_event as u32
+                    || w4 != a.fragment_stamp as u32
                 {
                     return Err(EIO);
                 }

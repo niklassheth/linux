@@ -183,17 +183,16 @@ impl Bootstrap {
     }
 
     pub(super) fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<u32> {
-        let existing = (1..64).find(|&i| self.context_roots[i].is_some_and(|r| r.low == roots.low));
-        let slot = existing
-            .or_else(|| {
-                if self.context_users[preferred] == 0 {
-                    Some(preferred)
-                } else {
-                    (1..64).find(|&i| self.context_users[i] == 0)
-                }
-            })
-            .ok_or(EBUSY)?;
-        if existing.is_none() {
+        let root_lows = self.context_roots.map(|r| r.map(|v| v.low));
+        let (slot, existing) = crate::g16_context_slot::select_slot(
+            &root_lows,
+            &self.context_users,
+            roots.low,
+            preferred,
+            &mut self.context_evict_next,
+        )
+        .ok_or(EBUSY)?;
+        if !existing {
             let previous = self.context_roots[slot].map(|r| r.low);
             self.set_context(slot, Some(roots))?;
             if crate::module_parameters::debug_ctx.value() != 0 {

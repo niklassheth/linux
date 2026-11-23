@@ -294,6 +294,7 @@ pub(crate) struct Bootstrap {
     batch_works: usize,
     context_roots: [Option<crate::g16_vm::Roots>; 64],
     context_users: [u32; 64],
+    context_evict_next: u8,
     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
 }
 
@@ -851,6 +852,7 @@ impl Bootstrap {
             batch_works: 0,
             context_roots: [None; 64],
             context_users: [0; 64],
+            context_evict_next: 1,
             render_support: kernel::sync::Arc::new(
                 core::sync::atomic::AtomicU64::new(0),
                 GFP_KERNEL,

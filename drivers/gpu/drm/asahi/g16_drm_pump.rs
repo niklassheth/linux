@@ -262,8 +262,10 @@ impl WorkItem for Execution {
                         // Ordinary preparation leaves intra-queue waits to the
                         // firmware. Paired mesh stream decoding waits for those
                         // producer stamps before reading command words on CPU.
+                        // Userspace Normal-WB writes are ordered CPU-to-CPU by
+                        // inbox.lock() Acquire, and firmware publication is
+                        // ordered by flush()'s release + dsb sy barriers.
                         let job = &mut engine.jobs[index];
-                        crate::mem::sync();
                         let injected = crate::g16_timeline::take_injection(
                             &crate::g16_timeline::FAIL_PREP,
                             execution_tgid(&execution),

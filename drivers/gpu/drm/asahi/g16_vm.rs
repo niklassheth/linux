@@ -300,7 +300,12 @@ impl AddressSpace {
             }
         }
         self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
-        self.sync();
+        // Only clean page tables if lease_scratch allocated new mappings;
+        // Normal-WB metadata/aux_fb writes are ordered by flush() before the
+        // GPU can observe this render.
+        if self.has_pending_tables() {
+            self.sync();
+        }
         Ok(scratch)
     }
 
@@ -580,6 +585,14 @@ impl AddressSpace {
             bytes = &bytes[size..];
         }
         Ok(())
+    }
+
+    pub(crate) fn has_pending_tables(&self) -> bool {
+        self.low.has_pending_tables() || self.high.has_pending_tables()
+    }
+
+    pub(crate) fn has_invalidations(&self) -> bool {
+        self.low.has_invalidations() || self.high.has_invalidations()
     }
 
     /// Publish page-table edits. Owned client pages are cleaned when initialized;
@@ -879,6 +892,34 @@ impl FirmwareSpace {
         Ok(())
     }
 
+    /// Order prior staged coherent firmware writes before subsequent ring-head
+    /// or descriptor publication writes (`dmb oshst`, matching ARM64 `dma_wmb()`).
+    /// G16 firmware memory is Normal-WB coherent, so no `dc cvac` is needed.
+    #[inline(always)]
+    pub(crate) fn release_barrier(&self) {
+        crate::mem::dma_wmb();
+    }
+
+    /// Begin a barrier-free staging write batch over coherent firmware memory.
+    ///
+    /// Caches up to 8 recently resolved regions and records one `P_LIVE`
+    /// profile section for the batch. Callers must issue `release_barrier()`
+    /// (`dmb oshst`) before exposing lane write pointers and `crate::mem::sync()`
+    /// (`dsb sy`) before MMIO channel tail / doorbell writes (inside `flush()`),
+    /// or `dsb_oshst()` when publishing consumer RX cursors without a doorbell.
+    pub(crate) fn writer(&mut self) -> FirmwareWriter<'_> {
+        FirmwareWriter {
+            space: self,
+            cache: [None; 8],
+            next: 0,
+            _timer: crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE),
+        }
+    }
+
+    pub(crate) fn has_pending_tables(&self) -> bool {
+        self.table.has_pending_tables() || self.table.has_invalidations()
+    }
+
     /// Update host-owned bytes in memory firmware may be reading.
     pub(crate) fn write_live(&mut self, va: u64, bytes: &[u8]) -> Result {
         self.update_live(va, bytes.len(), |ptr, offset, size| {
@@ -902,24 +943,6 @@ impl FirmwareSpace {
         mut update: impl FnMut(*mut u8, usize, usize),
     ) -> Result {
         self.update_batch(1, |_| (va, size), |_, ptr, offset, size| update(ptr, offset, size))
-    }
-
-    /// Several host-owned writes with one barrier pair, the region resolved
-    /// again only when a destination leaves the previous one. Nothing in a
-    /// batch is visible to firmware before the queue publication that follows
-    /// it (flush), which has its own barrier.
-    /// `write(n)` is the destination and source of write `n` of `count`.
-    pub(crate) fn write_batch<'a>(&mut self, count: usize, write: impl Fn(usize) -> (u64, &'a [u8])) -> Result {
-        let range = |n| {
-            let (va, bytes) = write(n);
-            (va, bytes.len())
-        };
-        self.update_batch(count, range, |which, ptr, offset, size| {
-            let bytes = write(which).1;
-            // SAFETY: update_batch supplies an exclusively host-owned
-            // destination and a range within this write's source slice.
-            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), ptr, size) };
-        })
     }
 
     /// Whether `region` holds all of `va..va + size`.
@@ -1163,6 +1186,107 @@ impl<'a> FirmwareReader<'a> {
             })?;
             remaining = &mut remaining[words..];
             offset += words * 4;
+        }
+        Ok(())
+    }
+}
+
+/// Scoped barrier-free staging writer over coherent firmware memory.
+///
+/// Borrowing `&mut FirmwareSpace` exclusively on creation ensures no other
+/// host access aliases while allowing safe immutable region-cache references.
+pub(crate) struct FirmwareWriter<'a> {
+    space: &'a FirmwareSpace,
+    cache: [Option<&'a FirmwareRegion>; 8],
+    next: usize,
+    _timer: crate::g16_timeline::Timer,
+}
+
+impl<'a> FirmwareWriter<'a> {
+    fn resolve(&mut self, va: u64, size: usize) -> Result<&'a FirmwareRegion> {
+        for region in self.cache.iter().flatten() {
+            if FirmwareSpace::holds(region, va, size) {
+                return Ok(region);
+            }
+        }
+        let region = self.space.region(va, size)?;
+        self.cache[self.next] = Some(region);
+        self.next = (self.next + 1) & 7;
+        Ok(region)
+    }
+
+    /// Stage a byte slice into coherent firmware memory without per-write barriers.
+    pub(crate) fn write_staged(&mut self, va: u64, bytes: &[u8]) -> Result {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let region = self.resolve(va, bytes.len())?;
+        let start = (va - region.va) as usize;
+        let end = start + bytes.len();
+        for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
+            let base = index * UAT_PGSZ;
+            let within = start.saturating_sub(base);
+            let limit = (end - base).min(UAT_PGSZ);
+            let src_off = base + within - start;
+            let len = limit - within;
+            region.pages[index].with_page_mapped(|p| {
+                // SAFETY: `resolve` verified `[start, end)` lies within this
+                // owned region, and the caller holds exclusive host ownership.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr().add(src_off), p.add(within), len);
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Stage one aligned 32-bit word with a single-copy atomic volatile store.
+    pub(crate) fn write_u32_staged(&mut self, va: u64, value: u32) -> Result {
+        if va & 3 != 0 {
+            return Err(EINVAL);
+        }
+        let region = self.resolve(va, 4)?;
+        let offset = (va - region.va) as usize;
+        region.pages[offset / UAT_PGSZ].with_pointer_into_page(offset & (UAT_PGSZ - 1), 4, |p| {
+            // SAFETY: Aligned 32-bit destination in live coherent firmware RAM;
+            // volatile emits a single non-tearing `str w` for words firmware
+            // may read concurrently (heads, shared counters, RX cursors).
+            unsafe { p.cast::<u32>().write_volatile(value.to_le()) };
+            Ok(())
+        })
+    }
+
+    /// Stage one aligned 64-bit word with a single-copy atomic volatile store.
+    pub(crate) fn write_u64_staged(&mut self, va: u64, value: u64) -> Result {
+        if va & 7 != 0 {
+            return Err(EINVAL);
+        }
+        let region = self.resolve(va, 8)?;
+        let offset = (va - region.va) as usize;
+        region.pages[offset / UAT_PGSZ].with_pointer_into_page(offset & (UAT_PGSZ - 1), 8, |p| {
+            // SAFETY: Aligned 64-bit destination in live coherent firmware RAM.
+            unsafe { p.cast::<u64>().write_volatile(value.to_le()) };
+            Ok(())
+        })
+    }
+
+    /// Zero a byte range in coherent firmware memory without per-write barriers.
+    pub(crate) fn zero_staged(&mut self, va: u64, size: usize) -> Result {
+        if size == 0 {
+            return Ok(());
+        }
+        let region = self.resolve(va, size)?;
+        let start = (va - region.va) as usize;
+        let end = start + size;
+        for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
+            let base = index * UAT_PGSZ;
+            let within = start.saturating_sub(base);
+            let limit = (end - base).min(UAT_PGSZ);
+            region.pages[index].with_page_mapped(|p| {
+                // SAFETY: `resolve` verified `[start, end)` lies within this
+                // owned region, and the caller holds exclusive host ownership.
+                unsafe { core::ptr::write_bytes(p.add(within), 0, limit - within) };
+            });
         }
         Ok(())
     }

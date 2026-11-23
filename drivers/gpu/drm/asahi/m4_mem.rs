@@ -19,6 +19,24 @@ pub(crate) fn dma_rmb() {
     unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
 }
 
+/// Outer-Shareable store-release barrier (matching ARM64 `dma_wmb()` / `dmb oshst`).
+/// Orders all prior Normal memory stores before any subsequent Normal memory
+/// stores observed across CPUs and coherent DMA masters (GPU/ASC).
+#[inline(always)]
+pub(crate) fn dma_wmb() {
+    // SAFETY: A memory barrier changes no memory ownership.
+    unsafe { core::arch::asm!("dmb oshst", options(nostack, preserves_flags)) };
+}
+
+/// Outer-Shareable store completion barrier (`dsb oshst`).
+/// Completes prior Normal memory stores to the Outer-Shareable domain when no
+/// subsequent MMIO/doorbell `dsb sy` follows (e.g. RX consumer cursors).
+#[inline(always)]
+pub(crate) fn dsb_oshst() {
+    // SAFETY: A memory barrier changes no memory ownership.
+    unsafe { core::arch::asm!("dsb oshst", options(nostack, preserves_flags)) };
+}
+
 #[inline(always)]
 pub(crate) fn tlbi_asid(asid: u8) {
     // SAFETY: Invalidating a GPU ASID cannot expose stale translations.

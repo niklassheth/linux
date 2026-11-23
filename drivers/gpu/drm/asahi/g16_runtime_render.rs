@@ -365,7 +365,7 @@ impl Bootstrap {
         }
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         // A reused slot keeps its device alias, and its client alias when it
-        // returns to the same root: skip those page-table walks.
+        // returns to the same root: skip those page-table walks and no-op syncs.
         let client_mapped = aliased == Some(space.low);
         for stage in 0..2u64 {
             let work_page = va + stage * 0x8000;
@@ -379,9 +379,6 @@ impl Bootstrap {
                     client.map_work_alias(register_page, pa)?;
                 }
             }
-            for view in [self._address_space.as_mut().ok_or(EIO)?, &mut *client] {
-                view.sync();
-            }
             if stage == 0 {
                 a.tiling_work = work_page + (a.tiling_work & 0x3fff);
                 a.tiling_microsequence = work_page + 0x4000 + (a.tiling_microsequence & 0x3fff);
@@ -394,8 +391,19 @@ impl Bootstrap {
                 a.fragment_register_alias = register_page + (a.fragment_register_alias & 0x3fff);
             }
         }
-        fw.sync();
-        self.invalidate_client(self._address_space.as_ref().ok_or(EIO)?);
+        if fw.has_pending_tables() {
+            fw.sync();
+        }
+        if aliased.is_none() {
+            let dev_space = self._address_space.as_ref().ok_or(EIO)?;
+            if dev_space.has_pending_tables() {
+                dev_space.sync();
+            }
+            self.invalidate_client(dev_space);
+        }
+        if client.has_pending_tables() {
+            client.sync();
+        }
         self.invalidate_client(client);
         // A live context lease keeps these roots fixed through retirement.
         a.context_id = u64::from(self.acquire_context(space, 9)?);
@@ -472,16 +480,11 @@ impl Bootstrap {
         let use_count = next_submitted as u32;
         // From here an error conservatively quarantines the client root.
         self.render_failed = true;
-        self._firmware_space
-            .as_mut()
-            .ok_or(EIO)?
-            .write_live(a.render_shared_state, &use_count.to_le_bytes())?;
-        pool.increment(self._firmware_space.as_mut().ok_or(EIO)?)?;
         let dep_stamps = dependencies.map(|d| d.map(|r| r.stamp));
         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
         self.note_dependency_events(&dep_stamps, own);
         let (heads, epochs, lane_items) = self.publish_render(
-            &a, &ta, &frag, queue, initbm, pool.blocks, dependencies,
+            &a, &ta, &frag, queue, pool, initbm, use_count, dependencies,
             params.vdm_barrier_fragment, notifier_write,
         )?;
         pool.initialized = true;
@@ -613,8 +616,9 @@ impl Bootstrap {
         ta: &[u8],
         frag: &[u8],
         queue: &FirmwareQueues,
+        pool: &mut crate::g16_tvb::Tvb,
         initbm: bool,
-        blocks: u32,
+        use_count: u32,
         dependencies: &[Option<ResolvedDep>; 2],
         vdm_barrier_fragment: bool,
         notifier_write: (bool, u32),
@@ -637,117 +641,85 @@ impl Bootstrap {
                 % 0x500,
             (firsts[1] + 2 + stage_dependencies[1].iter().flatten().count() as u32) % 0x500,
         ];
-        // Every byte this render publishes, written as one batch: one region
-        // lookup per destination region and one barrier pair, rather than a
-        // lookup and two barriers for each of about twenty writes.
-        let context = (a.context_id as u32).to_le_bytes();
-        // The notifier header: the full header when this render owns the
-        // notifier (its own, or its submission's first), else only the raised
-        // Work count; then this render's driver stamps.
-        let count_array = a.event_count_array.to_le_bytes();
-        let fragment_stamp = (a.fragment_stamp as u32).to_le_bytes();
-        let zero = 0u32.to_le_bytes();
-        let flags = 0x50u32.to_le_bytes();
-        let count = notifier_write.1.to_le_bytes();
-        let tiling_previous = g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes();
-        let fragment_previous = g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes();
-        let own: [(u64, &[u8]); 8] = [
-            (a.event_control, &count_array[..]),
-            (a.event_control + 8, &fragment_stamp[..]),
-            (a.event_control + 12, &zero[..]),
-            (a.event_control + 0x10, &flags[..]),
-            (a.event_control + 0x24, &context[..]),
-            (a.event_count_array, &count[..]),
-            (a.tiling_driver_stamp, &tiling_previous[..]),
-            (a.fragment_driver_stamp, &fragment_previous[..]),
-        ];
-        let (own, header): (&[(u64, &[u8])], usize) = if notifier_write.0 {
-            (&own[..], own.len())
-        } else {
-            (&own[5..], 3)
-        };
-        let preludes = [a.tiling_prelude(blocks), a.fragment_prelude()];
-        let tiling_micro = a.tiling_microsequence();
-        let fragment_micro = a.fragment_microsequence();
-        // At most two dependency items and four ring entries per stage.
-        let mut items = [[[0u8; 0x40]; 2]; 2];
-        let mut entries = [[[0u8; 8]; 4]; 2];
-        let mut item_counts = [0usize; 2];
-        let mut entry_counts = [0usize; 2];
-        for stage in 0..2 {
-            let (prelude, work) = if stage == 0 {
-                (a.tiling_prelude, a.tiling_work)
-            } else {
-                (a.fragment_prelude, a.fragment_work)
-            };
-            let (stamp, uuid) = if stage == 0 {
-                (a.tiling_stamp, a.tiling_uuid)
-            } else {
-                (a.fragment_stamp, a.fragment_uuid)
-            };
-            // The prelude page leaves +0x40..+0xc0 free before its
-            // microsequence. All barrier bytes share the Work's lifetime.
-            for (index, dep) in stage_dependencies[stage].iter().flatten().enumerate() {
-                items[stage][index] = g16_fw::queue::dependency(
-                    dep.stamp.address,
-                    dep.stamp.value,
-                    dep.stamp.event,
-                    stamp as u32,
-                    uuid as u32,
-                    dep.kind,
-                );
-                entries[stage][entry_counts[stage]] =
-                    (prelude + 0x40 + index as u64 * 0x40).to_le_bytes();
-                item_counts[stage] += 1;
-                entry_counts[stage] += 1;
+        // Stage every byte this render publishes in one barrier-free writer
+        // pass with cached region lookups. Nothing becomes visible to firmware
+        // until flush() executes its release barrier before advancing lane
+        // heads and ringing the doorbell.
+        {
+            let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+            let mut writer = fw.writer();
+            writer.write_u32_staged(a.render_shared_state, use_count)?;
+            pool.increment_staged(&mut writer)?;
+            if notifier_write.0 {
+                writer.write_u64_staged(a.event_control, a.event_count_array)?;
+                writer.write_u32_staged(a.event_control + 8, a.fragment_stamp as u32)?;
+                writer.write_u32_staged(a.event_control + 12, 0)?;
+                writer.write_u32_staged(a.event_control + 0x10, 0x50)?;
+                writer.write_u32_staged(a.event_control + 0x24, a.context_id as u32)?;
             }
-            if stage == 1 || initbm {
-                entries[stage][entry_counts[stage]] = prelude.to_le_bytes();
-                entry_counts[stage] += 1;
+            writer.write_u32_staged(a.event_count_array, notifier_write.1)?;
+            writer.write_u32_staged(
+                a.tiling_driver_stamp,
+                g16_stamp::previous(a.tiling_stamp as u32),
+            )?;
+            writer.write_u32_staged(
+                a.fragment_driver_stamp,
+                g16_stamp::previous(a.fragment_stamp as u32),
+            )?;
+
+            let preludes = [a.tiling_prelude(pool.blocks), a.fragment_prelude()];
+            let tiling_micro = a.tiling_microsequence();
+            let fragment_micro = a.fragment_microsequence();
+            for stage in 0..2 {
+                let (prelude, work, micro, work_bytes, micro_bytes, stamp, uuid) = if stage == 0 {
+                    (
+                        a.tiling_prelude,
+                        a.tiling_work,
+                        a.tiling_microsequence,
+                        ta,
+                        &tiling_micro[..],
+                        a.tiling_stamp,
+                        a.tiling_uuid,
+                    )
+                } else {
+                    (
+                        a.fragment_prelude,
+                        a.fragment_work,
+                        a.fragment_microsequence,
+                        frag,
+                        &fragment_micro[..],
+                        a.fragment_stamp,
+                        a.fragment_uuid,
+                    )
+                };
+                writer.write_staged(prelude, &preludes[stage])?;
+                writer.write_staged(work, work_bytes)?;
+                writer.write_staged(micro, micro_bytes)?;
+                let mut pos = firsts[stage];
+                let ring = lanes[stage].ring;
+                // The prelude page leaves +0x40..+0xc0 free before its
+                // microsequence. All barrier bytes share the Work's lifetime.
+                for (index, dep) in stage_dependencies[stage].iter().flatten().enumerate() {
+                    let item_va = prelude + 0x40 + index as u64 * 0x40;
+                    let item = g16_fw::queue::dependency(
+                        dep.stamp.address,
+                        dep.stamp.value,
+                        dep.stamp.event,
+                        stamp as u32,
+                        uuid as u32,
+                        dep.kind,
+                    );
+                    writer.write_staged(item_va, &item)?;
+                    writer.write_u64_staged(ring + u64::from(pos) * 8, item_va)?;
+                    pos = (pos + 1) % 0x500;
+                }
+                if stage == 1 || initbm {
+                    writer.write_u64_staged(ring + u64::from(pos) * 8, prelude)?;
+                    pos = (pos + 1) % 0x500;
+                }
+                writer.write_u64_staged(ring + u64::from(pos) * 8, work)?;
             }
-            entries[stage][entry_counts[stage]] = work.to_le_bytes();
-            entry_counts[stage] += 1;
         }
-        // Write `n` of the batch, in order: the shared notifier's two words
-        // (firmware counts completions at +0xc and writes the lanes' driver
-        // stamps as they retire), then per stage the prelude, Work,
-        // microsequence, dependency items and ring entries (contiguous except
-        // where the ring wraps). Computed on demand: no list on the job
-        // worker's stack, and nothing to allocate.
-        let (ta, frag): (&[u8], &[u8]) = (ta, frag);
-        let preludes = &preludes;
-        let (tiling_micro, fragment_micro) = (&tiling_micro, &fragment_micro);
-        let (items, entries) = (&items, &entries);
-        let rings = [lanes[0].ring, lanes[1].ring];
-        let per_stage = move |stage: usize| 3 + item_counts[stage] + entry_counts[stage];
-        let count = header + per_stage(0) + per_stage(1);
-        let write = move |n: usize| {
-            if n < header {
-                return own[n];
-            }
-            let n = n - header + 2;
-            let (stage, k) = if n - 2 < per_stage(0) { (0, n - 2) } else { (1, n - 2 - per_stage(0)) };
-            let (prelude, work, micro) = if stage == 0 {
-                (a.tiling_prelude, a.tiling_work, a.tiling_microsequence)
-            } else {
-                (a.fragment_prelude, a.fragment_work, a.fragment_microsequence)
-            };
-            match k {
-                0 => (prelude, &preludes[stage][..]),
-                1 => (work, if stage == 0 { ta } else { frag }),
-                2 => (micro, if stage == 0 { &tiling_micro[..] } else { &fragment_micro[..] }),
-                k if k - 3 < item_counts[stage] => {
-                    let index = k - 3;
-                    (prelude + 0x40 + index as u64 * 0x40, &items[stage][index][..])
-                }
-                k => {
-                    let index = k - 3 - item_counts[stage];
-                    let pos = (firsts[stage] + index as u32) % 0x500;
-                    (rings[stage] + u64::from(pos) * 8, &entries[stage][index][..])
-                }
-            }
-        };
-        self._firmware_space.as_mut().ok_or(EIO)?.write_batch(count, write)?;
         let mut epochs = [0; 2];
         for stage in [1usize, 0] {
             let mut lane = lanes[stage];

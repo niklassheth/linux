@@ -312,6 +312,14 @@ impl UatPageTable {
         Ok(())
     }
 
+    pub(crate) fn has_pending_tables(&self) -> bool {
+        !self.pending_tables.borrow().is_empty()
+    }
+
+    pub(crate) fn has_invalidations(&self) -> bool {
+        !self.invalidations.borrow().is_empty()
+    }
+
     pub(crate) fn clear_invalidations(&self) {
         self.invalidations.borrow_mut().clear();
     }

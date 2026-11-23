@@ -162,6 +162,9 @@ impl Bootstrap {
     /// Invalidate only slots actually bound to this root. New roots need no
     /// shootdown: set_context invalidates the ASID before installing them.
     pub(crate) fn invalidate_client(&self, client: &g16_vm::AddressSpace) {
+        if !client.has_invalidations() {
+            return;
+        }
         let root = client.roots().low;
         if self
             ._address_space
@@ -242,7 +245,7 @@ impl Bootstrap {
     }
 
     pub(super) fn drain_trace_rx(&mut self) -> Result {
-        let mut updates = [(0u64, [0u8; 4]); 8];
+        let mut updates = [(0u64, 0u32); 8];
         let mut update_count = 0usize;
         {
             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
@@ -316,14 +319,22 @@ impl Bootstrap {
                             cursor = (cursor + 1) % capacity;
                         }
                     }
-                    updates[update_count] = (state, write.to_le_bytes());
+                    updates[update_count] = (state, write);
                     update_count += 1;
                 }
             }
         }
         if update_count != 0 {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-            fw.write_batch(update_count, |n| (updates[n].0, &updates[n].1[..]))?;
+            // Order trace-ring payload loads BEFORE advancing RX read cursors.
+            fw.acquire_barrier();
+            {
+                let mut writer = fw.writer();
+                for &(state, write) in &updates[..update_count] {
+                    writer.write_u32_staged(state, write)?;
+                }
+            }
+            crate::mem::dsb_oshst();
         }
         Ok(())
     }

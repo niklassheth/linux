@@ -268,26 +268,34 @@ impl Bootstrap {
         self.render_failed = true;
         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+        // Order all staged Normal-WB writes (Work descriptors, microsequences,
+        // preludes, notifiers, shared counts, driver stamps, dependency items,
+        // lane ring entries, and client scratch writes) BEFORE advancing lane
+        // write pointers (+0x40) and writing channel ring messages.
+        fw.release_barrier();
         let mut tails: [Option<u32>; 12] = [None; 12];
         let mut kicks = 0u32;
-        // Fragment transports must precede tiling, matching normal publication.
-        for stage in [1usize, 0, 2] {
-            for p in self.publications.iter().filter(|p| p.channel % 3 == stage) {
-                let route = &config.channels[p.channel];
-                fw.write_live(p.lane.pointers + 0x40, &p.lane.head.to_le_bytes())?;
-                fw.write_live(
-                    route.ring + u64::from(p.epoch) * 0x18,
-                    &g16_fw::queue::channel(
-                        p.lane.queue,
-                        p.lane.head as u16,
-                        p.event as u8,
-                        stage as u32,
-                        p.lane.new,
-                        p.sequence,
-                    ),
-                )?;
-                tails[p.channel] = Some((p.epoch + 1) & 255);
-                kicks |= 1 << ((p.channel / 3) * 2 + usize::from(stage == 2));
+        {
+            let mut writer = fw.writer();
+            // Fragment transports must precede tiling, matching normal publication.
+            for stage in [1usize, 0, 2] {
+                for p in self.publications.iter().filter(|p| p.channel % 3 == stage) {
+                    let route = &config.channels[p.channel];
+                    writer.write_u32_staged(p.lane.pointers + 0x40, p.lane.head)?;
+                    writer.write_staged(
+                        route.ring + u64::from(p.epoch) * 0x18,
+                        &g16_fw::queue::channel(
+                            p.lane.queue,
+                            p.lane.head as u16,
+                            p.event as u8,
+                            stage as u32,
+                            p.lane.new,
+                            p.sequence,
+                        ),
+                    )?;
+                    tails[p.channel] = Some((p.epoch + 1) & 255);
+                    kicks |= 1 << ((p.channel / 3) * 2 + usize::from(stage == 2));
+                }
             }
         }
         crate::mem::sync();

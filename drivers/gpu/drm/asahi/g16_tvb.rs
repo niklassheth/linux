@@ -4,7 +4,7 @@
 //! Context-owned TVB lists and retained growth backing, following g16g_tvb.py.
 use crate::{
     g16_fw, g16_render as render,
-    g16_vm::{AddressSpace, FirmwareSpace},
+    g16_vm::{AddressSpace, FirmwareSpace, FirmwareWriter},
     pgtable::prot,
 };
 use kernel::prelude::*;
@@ -115,9 +115,10 @@ impl Tvb {
 
     /// Count each render before publication, including renders on other queues
     /// sharing this pool. Firmware uses this count alongside its completed count.
-    pub(crate) fn increment(&mut self, fw: &mut FirmwareSpace) -> Result {
+    /// Staged inside the render's write batch; flush() orders it before firmware.
+    pub(crate) fn increment_staged(&mut self, writer: &mut FirmwareWriter<'_>) -> Result {
         let next = self.submissions.wrapping_add(1);
-        fw.write_live(self.addresses.buffer_manager_counter, &next.to_le_bytes())?;
+        writer.write_u32_staged(self.addresses.buffer_manager_counter, next)?;
         self.submissions = next;
         Ok(())
     }

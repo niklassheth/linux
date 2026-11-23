@@ -99,4 +99,62 @@ mesh_decode_pos = sr_fn.index('g16_mesh::decode(', mesh_acq_pos)
 assert mesh_stamp_pos < mesh_acq_pos < mesh_decode_pos
 checks += 1
 
+# 7. dma_wmb() and dsb_oshst() use Outer-Shareable store barriers without
+# nomem/readonly constraints.
+dma_wmb = function(mem, 'dma_wmb')
+assert '"dmb oshst"' in dma_wmb and 'nomem' not in dma_wmb and 'readonly' not in dma_wmb
+dsb_oshst = function(mem, 'dsb_oshst')
+assert '"dsb oshst"' in dsb_oshst and 'nomem' not in dsb_oshst and 'readonly' not in dsb_oshst
+checks += 1
+
+# 8. FirmwareWriter: zero per-write barriers, single-copy volatile stores for
+# aligned u32/u64, P_LIVE timed once per writer(), zero allocations.
+writer_fn = function(vm, 'writer')
+assert 'P_LIVE' in writer_fn
+for name in ('write_staged', 'write_u32_staged', 'write_u64_staged', 'zero_staged'):
+    body = function(vm, name)
+    assert 'dsb' not in body and 'dmb' not in body
+    assert 'GFP_KERNEL' not in body and 'KVec::' not in body
+assert 'va & 3 != 0' in function(vm, 'write_u32_staged')
+assert 'write_volatile' in function(vm, 'write_u32_staged')
+assert 'va & 7 != 0' in function(vm, 'write_u64_staged')
+assert 'write_volatile' in function(vm, 'write_u64_staged')
+checks += 1
+
+# 9. Hot submission & flush paths use staged writes with zero write_live/zero_live.
+for name, src in [('publish_render', render), ('submit_render_pool', render),
+                  ('submit_compute_queue', compute), ('flush', publish)]:
+    body = function(src, name)
+    assert 'write_live(' not in body and 'zero_live(' not in body, name
+checks += 1
+
+# 10. flush() orders release_barrier() -> lane heads & channel entries ->
+# crate::mem::sync() -> MMIO channel tails -> crate::mem::sync() -> RTKit kick.
+flush_fn = function(publish, 'flush')
+rel_pos = flush_fn.index('fw.release_barrier();')
+head_pos = flush_fn.index('writer.write_u32_staged(p.lane.pointers + 0x40, p.lane.head)?')
+sync1_pos = flush_fn.index('crate::mem::sync();', head_pos)
+mmio_pos = flush_fn.index('guard.try_write32(', sync1_pos)
+sync2_pos = flush_fn.index('crate::mem::sync();', mmio_pos)
+kick_pos = flush_fn.index('send_message(', sync2_pos)
+assert rel_pos < head_pos < sync1_pos < mmio_pos < sync2_pos < kick_pos
+checks += 1
+
+# 11. Compute save_area zeroing is skipped on fresh __GFP_ZERO slots and staged
+# inside the single writer batch on reused slots.
+scq_fn = function(compute, 'submit_compute_queue')
+assert re.search(
+    r'if aliased\.is_some\(\) \{\s*(?://[^\n]*\n\s*)*writer\.zero_staged\(a\.work \+ 0x2000, 0x2000\)\?;',
+    scq_fn,
+)
+checks += 1
+
+# 12. RX consumer cursor updates order acquire_barrier() -> write_u32_staged() -> dsb_oshst().
+for body in (sf_fn, dtr_fn):
+    a_p = body.rindex('fw.acquire_barrier();')
+    w_p = body.index('write_u32_staged(', a_p)
+    d_p = body.index('crate::mem::dsb_oshst();', w_p)
+    assert a_p < w_p < d_p
+checks += 1
+
 print(f'test-fw-fastpath: {checks} checks passed')

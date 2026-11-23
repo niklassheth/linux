@@ -111,10 +111,12 @@ impl Bootstrap {
                 non_simple
             };
             if let Some(next_cursor) = dirty_cursor {
-                self._firmware_space
-                    .as_mut()
-                    .ok_or(EIO)?
-                    .write_live(STATE, &next_cursor.to_le_bytes())?;
+                let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+                // Order event-ring entry loads BEFORE advancing consumer cursor
+                // STATE, then complete the store to Outer-Shareable memory.
+                fw.acquire_barrier();
+                fw.writer().write_u32_staged(STATE, next_cursor)?;
+                crate::mem::dsb_oshst();
             }
             let Some((base, kind, cursor, selected)) = action else {
                 break 'outer;

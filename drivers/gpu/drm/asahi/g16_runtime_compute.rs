@@ -218,7 +218,10 @@ impl Bootstrap {
         // The upper half of the zeroed Work page is GPU-addressable storage.
         params.save_area = alias + 0x2000;
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        // As for renders: reused slots skip aliases that already exist.
+        // As for renders: reused slots skip aliases that already exist and
+        // no-op PTE syncs. Fresh slots (aliased.is_none()) were allocated
+        // with __GFP_ZERO so their upper half save_area is already zeroed;
+        // reused slots clear save_area inside the single staged writer batch.
         if aliased.is_none() || aliased != Some(space.low) {
             let pa = fw.physical(work)?;
             if aliased.is_none() {
@@ -229,7 +232,6 @@ impl Bootstrap {
             }
             client.map_work_alias(alias, pa)?;
         }
-        fw.zero_live(work + 0x2000, 0x2000)?;
         let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
         let support = client.compute_support().ok_or(EIO)?;
         a.support = support.address();
@@ -237,10 +239,19 @@ impl Bootstrap {
         a.driver_stamp = work + 0x4000;
         a.firmware_stamp = lane.firmware_stamp();
         a.event = queue.event(2)?;
-        self._address_space.as_ref().ok_or(EIO)?.sync();
-        fw.sync();
-        client.sync();
-        self.invalidate_client(self._address_space.as_ref().ok_or(EIO)?);
+        if fw.has_pending_tables() {
+            fw.sync();
+        }
+        if aliased.is_none() {
+            let dev_space = self._address_space.as_ref().ok_or(EIO)?;
+            if dev_space.has_pending_tables() {
+                dev_space.sync();
+            }
+            self.invalidate_client(dev_space);
+        }
+        if client.has_pending_tables() {
+            client.sync();
+        }
         self.invalidate_client(client);
         a.context = self.acquire_context(space, 1)?;
         a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
@@ -250,9 +261,9 @@ impl Bootstrap {
         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
         self.note_dependency_events(&dep_stamps, own);
         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
-        let work = &mut self.encodings.compute;
-        work.fill(0);
-        if params.work(&a, work).is_none() {
+        let work_buf = &mut self.encodings.compute;
+        work_buf.fill(0);
+        if params.work(&a, work_buf).is_none() {
             pr_err!("G16: compute Work encoding failed for ioctl-validated parameters\n");
             return Err(EIO);
         }
@@ -270,46 +281,55 @@ impl Bootstrap {
         // it (render items included, when compute shares the render pool).
         let support = client.compute_support().ok_or(EIO)?;
         let submitted = support.submissions.load(Ordering::Relaxed).wrapping_add(1);
-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        fw.write_live(support.shared_state(), &(submitted as u32).to_le_bytes())?;
-        support.submissions.store(submitted, Ordering::Relaxed);
-        fw.write_live(a.work, &self.encodings.compute)?;
-        fw.write_live(a.work + compute::ENTRY_OFFSET, &compute::entry(params.cdm))?;
+        let support_shared = support.shared_state();
         let mut microsequence = params.microsequence(&a);
         for base in [0x1bc, 0x20c] {
             microsequence[base + 0x24..base + 0x2c].copy_from_slice(&user_timestamps.to_le_bytes());
         }
-        fw.write_live(user_timestamps, &timestamps[0].to_le_bytes())?;
-        fw.write_live(user_timestamps + 8, &timestamps[1].to_le_bytes())?;
-        fw.write_live(a.microsequence, &microsequence)?;
         let notifier = a.notifier(0);
-        // Retained notifier list links are firmware-owned even after completion.
-        fw.write_live(a.notifier, &notifier[..0x14])?;
-        fw.write_live(a.notifier + 0x24, &notifier[0x24..0x28])?;
-        fw.write_live(a.threshold, &1u32.to_le_bytes())?;
-        fw.write_live(a.driver_stamp, &g16_stamp::previous(a.stamp).to_le_bytes())?;
-        let mut pos = first;
+        let entry_bytes = compute::entry(params.cdm);
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
-        let mut index = 0usize;
-        for dep in dependencies.iter().flatten() {
-            // Between the threshold/timestamps and the CDM entry trampoline.
-            let address = a.work + 0x1900 + index as u64 * 0x40;
-            fw.write_live(
-                address,
-                &g16_fw::queue::dependency(
+        // Stage every byte of this compute Work in one barrier-free writer
+        // pass with cached region lookups; flush() executes the single release
+        // barrier before advancing lane.head and ringing the doorbell.
+        {
+            let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+            let mut writer = fw.writer();
+            if aliased.is_some() {
+                // Reused slot: clear the GPU-writable CDM save_area upper half
+                // (fresh slots are already zeroed by __GFP_ZERO).
+                writer.zero_staged(a.work + 0x2000, 0x2000)?;
+            }
+            writer.write_u32_staged(support_shared, submitted as u32)?;
+            writer.write_staged(a.work, &self.encodings.compute)?;
+            writer.write_staged(a.work + compute::ENTRY_OFFSET, &entry_bytes)?;
+            writer.write_u64_staged(user_timestamps, timestamps[0])?;
+            writer.write_u64_staged(user_timestamps + 8, timestamps[1])?;
+            writer.write_staged(a.microsequence, &microsequence)?;
+            // Retained notifier list links are firmware-owned even after completion.
+            writer.write_staged(a.notifier, &notifier[..0x14])?;
+            writer.write_staged(a.notifier + 0x24, &notifier[0x24..0x28])?;
+            writer.write_u32_staged(a.threshold, 1)?;
+            writer.write_u32_staged(a.driver_stamp, g16_stamp::previous(a.stamp))?;
+            let mut pos = first;
+            for (index, dep) in dependencies.iter().flatten().enumerate() {
+                // Between the threshold/timestamps and the CDM entry trampoline.
+                let address = a.work + 0x1900 + index as u64 * 0x40;
+                let item = g16_fw::queue::dependency(
                     dep.stamp.address,
                     dep.stamp.value,
                     dep.stamp.event,
                     a.stamp,
                     a.identity as u32,
                     dep.kind,
-                ),
-            )?;
-            fw.write_live(lane.ring + u64::from(pos) * 8, &address.to_le_bytes())?;
-            pos = (pos + 1) % 0x500;
-            index += 1;
+                );
+                writer.write_staged(address, &item)?;
+                writer.write_u64_staged(lane.ring + u64::from(pos) * 8, address)?;
+                pos = (pos + 1) % 0x500;
+            }
+            writer.write_u64_staged(lane.ring + u64::from(pos) * 8, a.work)?;
         }
-        fw.write_live(lane.ring + u64::from(pos) * 8, &a.work.to_le_bytes())?;
+        support.submissions.store(submitted, Ordering::Relaxed);
         let channel = priority as usize * 3 + 2;
         let mut pending_lane = lane;
         pending_lane.head = head;

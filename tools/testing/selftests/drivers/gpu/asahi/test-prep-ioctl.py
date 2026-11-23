@@ -36,7 +36,9 @@ checks = 0
 for source, name in [(runtime, 'submit_render_pool'), (runtime, 'publish_render'),
                      (runtime, 'submit_compute_queue'), (runtime, 'submit_render'),
                      (runtime, 'submit_render_queue'), (runtime, 'submit_compute'),
-                     (vm, 'write_batch'), (vm, 'update_batch')]:
+                     (vm, 'write_staged'), (vm, 'write_u32_staged'),
+                     (vm, 'write_u64_staged'), (vm, 'zero_staged'),
+                     (vm, 'update_batch')]:
     body = function(source, name)
     assert 'GFP_KERNEL' not in body, f'{name} allocates'
     assert not re.search(r'\bKVec::(new|with_capacity)\b', body), f'{name} builds a vector'

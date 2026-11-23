@@ -75,4 +75,21 @@ assert 'kind1_value' in wait_state
 assert 'g16_stamp::reached(value, entry.any_value)' in wait_state
 assert 'g16_stamp::reached(value, prev)' in wait_state
 
+# Fragment lane ring-room accounts for a moved vdm_barrier_fragment item
+# (3 entries on lanes[1], not 2), and same_lane does not block repeat/reached
+# elision while still keeping unwaited in-flight 3D->3D barriers.
+publish = (driver / 'g16_runtime_publish.rs').read_text()
+assert re.search(
+    r'let stage_deps = if params\.vdm_barrier_fragment \{[\s\S]*?'
+    r'\[1 \+ u32::from\(initbm\) \+ stage_deps\[0\], 2 \+ stage_deps\[1\], 0\]',
+    render,
+)
+assert 'entries[stage].saturating_sub(1)' in publish
+assert re.search(
+    r'if uncovered_ts \{[\s\S]*?'
+    r'\} else if queue\.waited\.covers\(lane, dep\.address, dep\.value, kind\) \{[\s\S]*?'
+    r'if reached \{\s*tally\.reached \+= 1;\s*\} else if same_lane \{\s*tally\.same_lane \+= 1;\s*\}',
+    render,
+)
+
 print('test-dependency-kind: ok')

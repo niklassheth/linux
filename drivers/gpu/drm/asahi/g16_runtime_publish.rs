@@ -149,8 +149,13 @@ impl Bootstrap {
                 let cap = crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed) as usize;
                 if cap != 0 {
                     let load = self.ledger.lane(lane.pointers).map_or(0, |b| b.load as usize);
-                    // A fragment Work may carry the render item it moved there.
-                    let new = if stage == 1 { 2 } else { entries[stage] as usize };
+                    // Fragment always writes a prelude entry (not a Work)
+                    // before the fragment Work and any moved render item.
+                    let new = if stage == 1 {
+                        entries[stage].saturating_sub(1) as usize
+                    } else {
+                        entries[stage] as usize
+                    };
                     if load + new > cap {
                         self.report_pressure(32, "lane entries");
                         return Err(EBUSY);

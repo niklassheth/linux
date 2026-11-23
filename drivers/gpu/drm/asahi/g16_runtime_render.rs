@@ -12,8 +12,10 @@ impl Bootstrap {
     /// or a later one with at least `kind` (Works on a lane start in order),
     /// or when the stamp has already been reached at publish. Items covering
     /// an in-flight timestamped producer not yet serialized by a kind-1 wait
-    /// on this lane are never dropped. An item on the same lane's earlier
-    /// Work is only counted: lane order implies it, but it is kept.
+    /// on this lane are never dropped. An in-flight, unwaited item on the
+    /// same lane's earlier 3D Work is kept and counted: `lanes[1]` uses the
+    /// preemptible/partial-render profile, so ring order alone is not assumed
+    /// to order 3D->3D visibility.
     pub(super) fn elide_item(
         &self,
         queue: &FirmwareQueues,
@@ -31,9 +33,6 @@ impl Bootstrap {
                 tally.same_lane += 1;
             }
             false
-        } else if same_lane {
-            tally.same_lane += 1;
-            false
         } else if queue.waited.covers(lane, dep.address, dep.value, kind) {
             tally.repeat += 1;
             true
@@ -46,6 +45,8 @@ impl Bootstrap {
             let reached = now.is_some_and(|v| g16_stamp::reached(v, dep.value));
             if reached {
                 tally.reached += 1;
+            } else if same_lane {
+                tally.same_lane += 1;
             }
             reached
         };
@@ -170,15 +171,19 @@ impl Bootstrap {
             .tvb_pools
             .iter()
             .any(|p| p.root == root && p.initialized);
+        let stage_deps = if params.vdm_barrier_fragment {
+            [
+                u32::from(dependencies[1].is_some()),
+                u32::from(dependencies[0].is_some()),
+            ]
+        } else {
+            [dependencies.iter().flatten().count() as u32, 0]
+        };
         self.reserve_flight(
             &queue,
             true,
             root,
-            [
-                1 + u32::from(initbm) + dependencies.iter().flatten().count() as u32,
-                2,
-                0,
-            ],
+            [1 + u32::from(initbm) + stage_deps[0], 2 + stage_deps[1], 0],
         )?;
         self.prepare_queues(&mut queue)?;
         let result = self.submit_render_queue(

@@ -274,9 +274,10 @@ pub(crate) struct Bootstrap {
     /// Queue storage returned by dropped queues, awaiting context destruction.
     /// It holds a reserved slot for every region, so dropping never allocates.
     retired_queues: Arc<kernel::sync::Mutex<KVec<u64>>>,
-    /// The last retire scan's firmware words, on the heap: this
-    /// struct is built by value on the probe stack.
-    pub(crate) last_scan: KBox<render_runtime::WordSnapshot>,
+    /// The last retire scan's lane firmware stamps, on the heap: this
+    /// struct is built by value on the probe stack. 128 slots cover all
+    /// 32 simultaneous active queues (96 lanes) without overflowing.
+    pub(crate) last_scan: KBox<crate::g16_snapshot::WordSnapshot<128>>,
     queue_regions: usize,
     /// Storage whose context destruction is published, with its control target.
     destroying_queues: KVec<(u64, u32)>,

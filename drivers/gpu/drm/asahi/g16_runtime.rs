@@ -166,35 +166,6 @@ impl FirmwareQueues {
     }
 }
 
-/// Firmware words read once per retirement scan (per-lane stamps and ring
-/// cursors are shared by every flight on the lane).
-/// A fixed table on the stack: no allocation per scan. Words beyond its
-/// capacity are read directly.
-#[derive(Default, Clone)]
-pub(crate) struct WordSnapshot {
-    words: [(u64, u32); 32],
-    len: usize,
-}
-
-impl WordSnapshot {
-    fn read(&mut self, fw: &g16_vm::FirmwareSpace, address: u64) -> Result<u32> {
-        if let Some(&(_, value)) = self.words[..self.len].iter().find(|(a, _)| *a == address) {
-            return Ok(value);
-        }
-        let value = fw.read_u32(address)?;
-        if self.len < self.words.len() {
-            self.words[self.len] = (address, value);
-            self.len += 1;
-        }
-        Ok(value)
-    }
-
-    /// A value seen by this snapshot, without reading.
-    fn peek(&self, address: u64) -> Option<u32> {
-        self.words[..self.len].iter().find(|(a, _)| *a == address).map(|&(_, v)| v)
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct Stamp {
     pub(crate) address: u64,

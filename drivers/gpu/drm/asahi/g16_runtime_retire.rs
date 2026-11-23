@@ -151,7 +151,12 @@ impl Bootstrap {
         // against the same snapshot: flights share a lane's stamp address
         // with rising values. A completion after the read is retired by the
         // pass its own notification triggers.
-        let mut snapshot = WordSnapshot::default();
+        // Keep only shared lane firmware stamps in `last_scan` (peeked by
+        // elide_item); keep shared notifiers and ring cursors in a separate
+        // scan-local cache, and read unique per-Work driver stamps directly so
+        // they never overflow either table.
+        self.last_scan.clear();
+        let mut retire_cache = crate::g16_snapshot::WordSnapshot::<64>::default();
         let mut index = self.flights.len();
         while index > 0 {
             index -= 1;
@@ -159,7 +164,10 @@ impl Bootstrap {
             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
             let mut reached_all = true;
             for stamp in flight.stamps.iter().flatten() {
-                if !g16_stamp::reached(snapshot.read(fw, stamp.address)?, stamp.value) {
+                if !g16_stamp::reached(
+                    self.last_scan.read_with(stamp.address, |a| fw.read_u32(a))?,
+                    stamp.value,
+                ) {
                     reached_all = false;
                     break;
                 }
@@ -172,8 +180,10 @@ impl Bootstrap {
             let mut notifier_seen = None;
             // The notifier pass drops embedded JobMeta references and cleans
             // their cache lines before publishing these later driver stamps.
+            // Driver stamps are unique per Work, so read them directly without
+            // polluting the shared snapshot tables.
             for stamp in flight.driver_stamps.iter().flatten() {
-                done &= g16_stamp::reached(snapshot.read(fw, stamp.address)?, stamp.value);
+                done &= g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value);
             }
             blocked |= u32::from(!done);
             // A reusable Work has its own notifier and exact submitted count.
@@ -182,7 +192,7 @@ impl Bootstrap {
                 let notified = match flight.notifier_count {
                     // The shared notifier has counted this render's Works.
                     Some((completed, total)) => {
-                        let count = snapshot.read(fw, completed)?;
+                        let count = retire_cache.read_with(completed, |a| fw.read_u32(a))?;
                         notifier_seen = Some((count, total));
                         (count.wrapping_sub(total) as i32) >= 0
                     }
@@ -202,8 +212,15 @@ impl Bootstrap {
             if done {
                 for &(pointers, head) in &flight.queues {
                     if pointers != 0 {
-                        let lane = reached(snapshot.read(fw, pointers)?, head, 0x500)
-                            && reached(snapshot.read(fw, pointers + 0x30)?, head, 0x500);
+                        let lane = reached(
+                            retire_cache.read_with(pointers, |a| fw.read_u32(a))?,
+                            head,
+                            0x500,
+                        ) && reached(
+                            retire_cache.read_with(pointers + 0x30, |a| fw.read_u32(a))?,
+                            head,
+                            0x500,
+                        );
                         blocked |= u32::from(!lane) << 2;
                         done &= lane;
                     }
@@ -391,7 +408,6 @@ impl Bootstrap {
             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
         }
         crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_SCAN, scan_before);
-        *self.last_scan = snapshot;
         if !self.retired.is_empty() {
             // Queued commands can legitimately wait longer than one Work's
             // timeout. Watch for a lack of retirement progress, rather than

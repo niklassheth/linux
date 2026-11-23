@@ -262,6 +262,11 @@ impl Bootstrap {
         fw.write_live(notifier + 0x10, &0x50u32.to_le_bytes())?;
         fw.write_live(count, &0u32.to_le_bytes())?;
         fw.sync();
+        if !fresh {
+            for lane in &lanes {
+                self.last_scan.forget(lane.firmware_stamp());
+            }
+        }
         Ok(lanes)
     }
 

@@ -20,6 +20,7 @@ mod g16_platform;
 mod g16_power;
 mod g16_queue_fail;
 mod g16_render;
+mod g16_snapshot;
 mod g16_stamp;
 mod g16_thermal;
 mod g16_timeline;

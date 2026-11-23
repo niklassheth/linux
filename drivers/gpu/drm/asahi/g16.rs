@@ -299,6 +299,10 @@ pub(crate) struct Bootstrap {
     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
 }
 
+// SAFETY: WordSnapshot holds only integer pairs and a length; all-zero is an
+// empty snapshot matching Default.
+unsafe impl<const N: usize> Zeroable for crate::g16_snapshot::WordSnapshot<N> {}
+
 // SAFETY: The session owns its mapped memory and page tables; none are
 // thread-local. Runtime access is exclusive (under the DRM frontend mutex).
 // RTKit callbacks access only their independently synchronized callback data.
@@ -840,7 +844,7 @@ impl Bootstrap {
             compute_publication: crate::module_parameters::fw_counter_start.value(),
             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
-            last_scan: KBox::new(Default::default(), GFP_KERNEL)?,
+            last_scan: KBox::zeroed(GFP_KERNEL)?,
             queue_regions: 0,
             destroying_queues: KVec::new(),
             free_queues: KVec::new(),

@@ -82,7 +82,7 @@ impl Bootstrap {
 
     pub(super) fn resolve_compute_dependencies(
         &self,
-        queue: &mut FirmwareQueues,
+        queue: &FirmwareQueues,
         timestamped: bool,
         dependencies: &[Option<Stamp>; 2],
         tally: &mut DepTally,
@@ -153,7 +153,7 @@ impl Bootstrap {
         let mut tally = DepTally::default();
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
         let resolved =
-            self.resolve_compute_dependencies(&mut queue, timestamped, dependencies, &mut tally)?;
+            self.resolve_compute_dependencies(&queue, timestamped, dependencies, &mut tally)?;
         let dependencies = &resolved;
         self.reserve_flight(
             &queue,

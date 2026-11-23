@@ -258,6 +258,12 @@ impl Bootstrap {
         if self.publications.is_empty() {
             return Ok(());
         }
+        // Seal every staged shared notifier before exposing its renders to
+        // firmware, so a later render of the same submission cannot raise
+        // event_count_array after firmware has already drained it.
+        for notifier in &mut self.job_notifiers {
+            notifier.flushed = true;
+        }
         self.render_failed = true;
         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;

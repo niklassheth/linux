@@ -317,20 +317,20 @@ impl Bootstrap {
         a.event_count_array = va + 0x18080;
         a.tiling_driver_stamp = va + 0x18000;
         a.fragment_driver_stamp = va + 0x18040;
-        // shared_notifier=1: the submission's renders share the notifier of
-        // its first published render (the owner), as Metal shares one per
-        // command buffer. Like Metal, each render raises the notifier's Work
-        // count by its own two Works as it is published: the owner writes
-        // the header with count 2, the others the new count and their driver
-        // stamps. The count never runs ahead of what was published. A render
-        // published after the owner has retired (a submission held back)
+        // shared_notifier=1: renders of one submission staged in the same
+        // flush batch share the notifier of its first render (the owner), as
+        // Metal shares one per command buffer. Each render raises the
+        // notifier's Work count by its own two Works before flush() exposes
+        // the batch to firmware. Once flush() runs, firmware can complete and
+        // drain that notifier before the owner retires on the host CPU, so a
+        // later render split across a flush boundary by backpressure (EBUSY)
         // starts a fresh notifier rather than re-arming one that may have
-        // drained, which Metal, publishing a command buffer at once, never does.
+        // drained.
         let job_owner = if crate::g16_timeline::shared_notifier() {
             let owner = self
                 .job_notifiers
                 .iter()
-                .find(|j| j.job == job && j.owner_root.is_none())
+                .find(|j| j.job == job && !j.flushed && j.owner_root.is_none())
                 .map(|j| j.owner);
             let owner_va = owner.unwrap_or(va);
             a.event_control = owner_va + 0x200;
@@ -495,6 +495,7 @@ impl Bootstrap {
                             job,
                             owner: owner_va,
                             owner_root: None,
+                            flushed: false,
                             works: 0,
                             refs: 0,
                         })

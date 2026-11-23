@@ -238,6 +238,10 @@ pub(crate) struct JobNotifier {
     owner: u64,
     /// The owner's free_work root, set once the owner itself has retired.
     owner_root: Option<u64>,
+    /// Set once `flush()` exposes this notifier's renders to firmware; later
+    /// renders of the same submission must not raise its Work count because
+    /// firmware may already have drained it.
+    flushed: bool,
     /// Works counted into the notifier so far (two per render).
     works: u32,
     /// Published renders using the notifier and not yet retired.

@@ -3,8 +3,9 @@
 """Host checks of asahi_m4.dependency_kind and cross_dependency_kind: kind 0 by
 default, range-checked at probe; dependency_kind applies to render-to-render
 items (a render's slot 0), cross_dependency_kind to cross-engine items (a
-render's slot 1, a compute's wait on its render); a Work with user timestamps
-waits with kind 1."""
+render's slot 1, a compute's wait on its render); waits covering an in-flight
+Work with user timestamps (and timestamped Works themselves) stay kind 1 and
+are not elided."""
 from pathlib import Path
 import re
 
@@ -19,11 +20,34 @@ assert re.search(r'\n        dependency_kind: u32 \{\s*default: 0,', m4)
 assert 'module_parameters::dependency_kind.value() > 1' in m4
 # Renders: slot 0 (render producer) takes dependency_kind; slot 1 (compute
 # producer) takes cross_dependency_kind, kind 0 by default and range-checked.
-assert re.search(r'if timestamped \{\s*1\s*\} else if slot == 0 \{\s*render_kind\s*\} else \{\s*cross_kind\s*\}', runtime)
+# Producer-side user timestamps force kind 1 and skip elision.
+render = (driver / 'g16_runtime_render.rs').read_text()
+assert re.search(
+    r'if timestamped \|\| self\.covers_timestamps\(&d\) \{\s*1\s*\} else if slot == 0 \{\s*render_kind\s*\} else \{\s*cross_kind\s*\}',
+    render,
+)
+assert re.search(
+    r'if !self\.covers_timestamps\(dep\)\s*&& self\.elide_item\(queue, lane, dep, same_lane, tally\)\?',
+    render,
+)
 assert re.search(r'\n        cross_dependency_kind: u32 \{\s*default: 0,', m4)
 assert 'module_parameters::cross_dependency_kind.value() > 1' in m4
-# A compute's items take cross_dependency_kind, kind 1 when it has timestamps.
+# A compute's items take cross_dependency_kind, kind 1 when it or any awaited
+# producer has user timestamps, and skip elision while producer timestamps are
+# in flight.
 compute = (driver / 'g16_runtime_compute.rs').read_text()
 assert re.search(r'a\.identity as u32,\s*kind,\s*\)', compute)
 assert 'module_parameters::cross_dependency_kind.value()' in compute
+assert re.search(
+    r'if self\.covers_timestamps\(dep\)\s*\|\| !self\.elide_item\(queue, 2, dep, false, tally\)\?',
+    compute,
+)
+assert re.search(
+    r'g16_stamp::reached\(now, dep\.value\) && !self\.covers_timestamps\(dep\)',
+    compute,
+)
+assert re.search(
+    r'if timestamped \|\| dep\.address == own_lane \|\| covers_ts \{\s*1\s*\} else \{\s*cross_kind\s*\}',
+    compute,
+)
 print('test-dependency-kind: ok')

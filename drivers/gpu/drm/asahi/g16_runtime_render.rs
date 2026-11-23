@@ -69,7 +69,9 @@ impl Bootstrap {
             let Some(dep) = dep else { continue };
             let lane = Self::render_item_lane(params, slot);
             let same_lane = lane == 1 && own_fragment == Some(dep.address);
-            if self.elide_item(queue, lane, dep, same_lane, tally)? {
+            if !self.covers_timestamps(dep)
+                && self.elide_item(queue, lane, dep, same_lane, tally)?
+            {
                 kept[slot] = None;
             }
         }
@@ -638,9 +640,9 @@ impl Bootstrap {
         // Slot 1 waits on compute. As the internal TA-to-fragment wait (kind
         // 0) the firmware starts the render as soon as the compute is done;
         // in the dynamic dependency graph (kind 1) each such edge idled the
-        // GPU about 100 us. A render with user timestamps waits with kind 1
-        // in either slot: released by a kind-0 item, a Work can have its
-        // timestamps written after a following query copy reads them.
+        // GPU about 100 us. Waits on an in-flight producer with user timestamps
+        // (and renders carrying user timestamps themselves) stay kind 1 so user
+        // timestamp writes complete before the consumer starts.
         let cross_kind = crate::module_parameters::cross_dependency_kind.value();
         let timestamped = a.tiling_user_timestamp_start != 0
             || a.tiling_user_timestamp_end != 0
@@ -664,7 +666,7 @@ impl Bootstrap {
                 .enumerate()
                 .filter_map(|(slot, dep)| {
                     dep.map(|d| {
-                        let kind = if timestamped {
+                        let kind = if timestamped || self.covers_timestamps(&d) {
                             1
                         } else if slot == 0 {
                             render_kind

@@ -192,6 +192,9 @@ struct RenderFlight {
     root: u64,
     events: RenderEvents,
     scene: u32,
+    /// A native object/mesh render: its refused TVB growths are counted
+    /// apart (a full pool loses work in mesh-mode TA).
+    native: bool,
 }
 pub(super) struct Flight {
     id: u64,

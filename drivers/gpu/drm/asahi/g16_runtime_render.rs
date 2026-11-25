@@ -625,6 +625,7 @@ impl Bootstrap {
                     root: space.low,
                     events: RenderEvents::default(),
                     scene,
+                    native: params.mesh.is_some(),
                 }),
             },
         )

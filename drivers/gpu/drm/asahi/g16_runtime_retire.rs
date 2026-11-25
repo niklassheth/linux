@@ -143,6 +143,11 @@ impl Bootstrap {
             };
             let flight_id = self.flights[index].id;
             let mut render = self.flights[index].render.take().ok_or(EIO)?;
+            let pool_has_native = render.native
+                || self
+                    .flights
+                    .iter()
+                    .any(|f| f.render.as_ref().is_some_and(|r| r.native && r.root == render.root));
             let pool_index = self
                 .tvb_pools
                 .iter()
@@ -154,6 +159,7 @@ impl Bootstrap {
                 &mut pool,
                 &render.addresses,
                 &mut render.events,
+                pool_has_native,
             );
             // Back into the slot swap_remove freed: no allocation.
             self.tvb_pools.push_within_capacity(pool).map_err(|_| EIO)?;
@@ -623,6 +629,7 @@ impl Bootstrap {
         pool: &mut crate::g16_tvb::Tvb,
         a: &render::Addresses,
         service: &mut RenderEvents,
+        native: bool,
     ) -> Result {
         const STATE: u64 = 0xfffffc200003f1c0;
         const RING: u64 = 0xfffffc200003f440;
@@ -734,6 +741,18 @@ impl Bootstrap {
                                     pool.addresses.buffer_manager_slot,
                                     pool.blocks,
                                     reason.name()
+                                );
+                            }
+                        }
+                        if native {
+                            // The firmware's handling of a full pool is correct for
+                            // ordinary TA but can lose geometry in a mesh-mode render.
+                            tl::NATIVE_TVB_REFUSED.fetch_add(1, Relaxed);
+                            if !tl::NATIVE_TVB_REFUSED_WARNED.swap(true, Relaxed) {
+                                dev_warn!(
+                                    self.dev.as_ref(),
+                                    "G16: TVB growth refused for a native mesh render at {} blocks; its output may be incomplete (once per boot)\n",
+                                    pool.blocks
                                 );
                             }
                         }

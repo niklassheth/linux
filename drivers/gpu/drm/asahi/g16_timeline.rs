@@ -451,7 +451,7 @@ impl kernel::debugfs::Writer for DepStats {
              tvb_refused_cap {}\ntvb_refused_va {}\ntvb_refused_memory {}\nsubmit_rejected {}\n\
              deferred {}\ndeferred_asids {}\ndeferred_channel {}\ndeferred_scenes {}\ndeferred_events {}\n\
              deferred_queue {}\ndeferred_lane_entries {}\ndeferred_work_storage {}\ndeferred_flights {}\n\
-             deferred_cpu_hold {}",
+             deferred_cpu_hold {}\nnative_tvb_refused {}",
             DEP_WORKS.load(Relaxed),
             DEP_ITEMS.load(Relaxed),
             DEP_SAME_LANE.load(Relaxed),
@@ -478,7 +478,8 @@ impl kernel::debugfs::Writer for DepStats {
             DEFERRED_BY[5].load(Relaxed),
             DEFERRED_BY[6].load(Relaxed),
             DEFERRED_BY[7].load(Relaxed),
-            DEFERRED_CPU_HOLD.load(Relaxed)
+            DEFERRED_CPU_HOLD.load(Relaxed),
+            NATIVE_TVB_REFUSED.load(Relaxed)
         )
     }
 }
@@ -522,6 +523,12 @@ pub(crate) static DEFERRED_BY: [core::sync::atomic::AtomicU64; 8] =
 /// Deferrals for a dependency held on the CPU, a host round trip each: a
 /// compute waiting on another queue's stamp, or a native render's producers.
 pub(crate) static DEFERRED_CPU_HOLD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Refused TVB growths on a pool with an in-flight native object/mesh render
+/// (also in `tvb_refused`). Because a TVB request belongs to the pool, this
+/// fires whenever any in-flight render on the refused pool is native.
+pub(crate) static NATIVE_TVB_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Set by the first native refusal of the boot, which alone is a warning.
+pub(crate) static NATIVE_TVB_REFUSED_WARNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Debug: read-only view of the firmware regions that live as long as the
 /// firmware (debugfs `asahi_m4/fw_mem`), for sampling the firmware's own

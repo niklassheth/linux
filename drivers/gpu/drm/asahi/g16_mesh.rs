@@ -75,21 +75,35 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Hardware `0x1ca48` per-cluster free-list DRAM aperture size (256 KiB per
+/// geometry cluster: Cluster 0 `[base+0x00000..+0x40000)`, Cluster 1
+/// `[base+0x40000..+0x80000)`).
+pub(crate) const CLUSTER_PAYLOAD_BYTES: usize = 0x40000;
+
+/// Number of geometry clusters on T8132 (G16G: 10 cores across 2 clusters).
+pub(crate) const NUM_CLUSTERS: usize = 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Profile {
-    /// Exclusive per-render storage, filled by prepare_render, never userspace.
+    /// Exclusive per-render storage, filled by `prepare_render`, never userspace.
     pub(crate) payload: u64,
 }
 
 impl Profile {
-    pub(crate) const PAYLOAD_BYTES: usize = 0x4000;
+    /// Total exclusive per-render `0x1ca48` UAT backing aperture across all
+    /// geometry clusters (`NUM_CLUSTERS * CLUSTER_PAYLOAD_BYTES` = 512 KiB on
+    /// 2-cluster T8132). Mapping less leaves Cluster 0 slots >= 16 and all of
+    /// Cluster 1 unmapped, silently corrupting to zero when evicted from L2.
+    pub(crate) const PAYLOAD_BYTES: usize = NUM_CLUSTERS * CLUSTER_PAYLOAD_BYTES;
     pub(crate) const TA_SIZE: u64 = 0x13300;
     pub(crate) const GATE: u64 = 0xec_0040_0020;
 
     pub(crate) fn payload_register(self) -> Option<u64> {
-        // Absolute-address interpretation, still requiring device qualification.
-        // Do not retain the research kernel's captured context-relative address.
-        (self.payload != 0 && self.payload < (1 << 40) && self.payload & 0x3fff == 0)
+        // Absolute-address interpretation: 16 KiB-aligned base VA whose full
+        // multi-cluster aperture `[payload, payload + PAYLOAD_BYTES)` stays
+        // within the 40-bit VA bound.
+        let end = self.payload.checked_add(Self::PAYLOAD_BYTES as u64)?;
+        (self.payload != 0 && self.payload & 0x3fff == 0 && end <= (1 << 40))
             .then_some(0x0200_0000_0000_0000 | self.payload)
     }
 }

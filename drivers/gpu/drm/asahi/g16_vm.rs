@@ -391,8 +391,13 @@ impl AddressSpace {
                 crate::g16_mesh::Profile::PAYLOAD_BYTES
             } else { 0 }))
             .ok_or(ENOMEM)?;
-        // Only the trailing metadata pages need clearing.
-        let scratch = self.lease_scratch(true, size, tilemap + tpc)?;
+        // Only the 5 metadata pages `[meta..meta + 5 * UAT_PGSZ)` need
+        // re-zeroing on same-VM reuse; the tilemap, TPC, and trailing
+        // hardware-written `0x1ca48` native mesh payload aperture (`512 KiB`)
+        // are zeroed once on initial VM page allocation (`__GFP_ZERO` in
+        // `alloc_low` / `provision_scratch_prealloc`), preserving cross-VM
+        // isolation without re-clearing 32 payload pages on every native submit.
+        let scratch = self.lease_scratch(true, size, tilemap + tpc, 5 * UAT_PGSZ)?;
         let base = scratch.range.start;
         p.tilemap = base;
         p.tpc = base + tilemap as u64;
@@ -407,12 +412,11 @@ impl AddressSpace {
         p.aux_fb = meta + 0x10000;
         let init_res: Result = (|| {
             if let Some(mesh) = &mut p.mesh {
+                // The lease lasts through both TA and fragment retirement; the
+                // full `Profile::PAYLOAD_BYTES` (512 KiB) aperture is backed
+                // with `__GFP_ZERO` pages on initial VM allocation and reused
+                // without CPU re-zeroing within the same VM.
                 mesh.payload = meta + 0x14000;
-                // The lease lasts through both TA and fragment retirement. Clear
-                // the entire payload, not only the metadata pages.
-                for offset in (0..crate::g16_mesh::Profile::PAYLOAD_BYTES).step_by(256) {
-                    self.write_low(mesh.payload + offset as u64, &[0; 256])?;
-                }
             }
             self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
             Ok(())
@@ -555,8 +559,9 @@ impl AddressSpace {
         // 0x00000..0x20000: compute scratch; 0x20000..0x24000: marker;
         // 0x24000..0x28000: GPU-writable CDM save_area (kept on separate client
         // backing so the firmware Work control page stays GPU read-only).
-        // `metadata = 0x20000` clears both marker and save_area on reuse.
-        let scratch = self.lease_scratch(false, 0x28000, 0x20000)?;
+        // `clear_from = 0x20000, clear_len = 2 * UAT_PGSZ` clears both marker
+        // and save_area on reuse.
+        let scratch = self.lease_scratch(false, 0x28000, 0x20000, 2 * UAT_PGSZ)?;
         let base = scratch.range.start;
         p.scratch = base;
         p.marker = base + 0x20000;
@@ -662,11 +667,22 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// `metadata`: the lease offset from which a reused lease is cleared.
-    /// Runs on the fence-signalling pump worker, so every allocation uses
-    /// `GFP_NOWAIT | __GFP_NOWARN` (never enters direct reclaim).
-    fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Result<Scratch> {
-        if size == 0 || size & (UAT_PGSZ - 1) != 0 {
+    /// `clear_from` and `clear_len`: lease-relative byte range zeroed when
+    /// reusing a previously freed range (fresh allocations come zeroed from
+    /// `__GFP_ZERO`). Runs on the fence-signalling pump worker, so every
+    /// allocation uses `GFP_NOWAIT | __GFP_NOWARN` (never enters direct reclaim).
+    fn lease_scratch(
+        &mut self,
+        render: bool,
+        size: usize,
+        clear_from: usize,
+        clear_len: usize,
+    ) -> Result<Scratch> {
+        let clear_end = clear_from.checked_add(clear_len).ok_or(EINVAL)?;
+        if size == 0
+            || clear_end > size
+            || (size | clear_from | clear_len) & (UAT_PGSZ - 1) != 0
+        {
             return Err(EINVAL);
         }
         let index = usize::from(render);
@@ -698,12 +714,15 @@ impl AddressSpace {
         let range = if let Some(slot) = free {
             let start = self.scratch_free[index][slot].start;
             let end = start + size as u64;
-            // All previous GPU writes have retired. Reinitialize the
-            // metadata pages of the leased range (the tilemap, TPC and compute
-            // scratch need no clearing; full VK CTS clean, #181) before
+            // All previous GPU writes have retired. Reinitialize only the
+            // metadata range `[clear_from..clear_from + clear_len)` of the
+            // leased range (the tilemap, TPC, compute scratch, and trailing
+            // hardware-written `0x1ca48` native mesh payload aperture need no
+            // clearing on same-VM reuse; full VK CTS clean, #181) before
             // mutating `scratch_free`, so a lookup error never orphans the slot.
-            let clear_from = (start + metadata as u64).min(end);
-            for va in (clear_from..end).step_by(UAT_PGSZ) {
+            let clear_va_start = start + clear_from as u64;
+            let clear_va_end = start + clear_end as u64;
+            for va in (clear_va_start..clear_va_end).step_by(UAT_PGSZ) {
                 let page = self.pages.get(&va).ok_or(EIO)?;
                 page.with_page_mapped(|ptr| {
                     // SAFETY: The lease owns this full page exclusively.

@@ -156,6 +156,10 @@ impl AddressSpace {
         self.work_pool.has_free(render)
     }
 
+    pub(crate) fn work_owned(&self, render: bool) -> usize {
+        self.work_pool.owned_count(render)
+    }
+
     pub(crate) fn work_leased(&self, render: bool) -> usize {
         self.work_pool.leased_count(render)
     }
@@ -176,20 +180,16 @@ impl AddressSpace {
         Ok(())
     }
 
-    pub(crate) fn record_fresh_work(&mut self, render: bool, va: u64) -> Result {
-        self.work_pool.record_fresh(render, va).map_err(|_| EIO)
+    pub(crate) fn record_idle_work(&mut self, render: bool, va: u64) -> Result {
+        self.work_pool.record_idle(render, va).map_err(|_| EIO)
     }
 
     pub(crate) fn release_work(&mut self, render: bool, va: u64) -> Result {
         self.work_pool.release(render, va).map_err(|_| EIO)
     }
 
-    pub(crate) fn peek_teardown_work(&self, render: bool) -> Option<u64> {
-        self.work_pool.peek_teardown(render)
-    }
-
-    pub(crate) fn complete_teardown_work(&mut self, render: bool, va: u64) -> Result {
-        self.work_pool.complete_teardown(render, va).map_err(|_| EIO)
+    pub(crate) fn take_teardown_work(&mut self, render: bool) -> Option<u64> {
+        self.work_pool.take_teardown(render)
     }
 
     /// Bytes of backing owned by this root (render private storage, scratch,
@@ -859,6 +859,11 @@ impl FirmwareSpace {
 
     pub(crate) fn physical(&mut self, va: u64) -> Result<u64> {
         self.table.translate(va)?.ok_or(EINVAL)
+    }
+
+    /// Whether a firmware region starting at `va` is currently retained.
+    pub(crate) fn has_region(&self, va: u64) -> bool {
+        self.regions.get(&va).is_some()
     }
 
     pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot) -> Result {

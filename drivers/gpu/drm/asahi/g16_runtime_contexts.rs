@@ -243,24 +243,34 @@ impl Bootstrap {
                 self.set_context(index, None)?;
             }
         }
-        // Detach and free every Work slot owned by this VM: unmap aliases from
-        // this root and context 0, invalidate context 0, release firmware
-        // backing pages, then return only the unbacked firmware VA for reuse.
+        // Detach and free every Work slot owned by this VM. Reserve
+        // invalidation entries before removing each slot from circulation, and
+        // take the slot out of `space`'s pool BEFORE the first destructive
+        // unmap so a partial teardown error can never leave a dismantled slot
+        // on the VM's idle list. Only fully cleaned slots return their
+        // unbacked firmware VA to `free_work_va`.
         for render in [false, true] {
             let index = usize::from(render);
             let priv_size = if render { 0x10000u64 } else { 0x4000u64 };
-            while let Some(va) = space.peek_teardown_work(render) {
-                let alias_range =
-                    crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, render)
-                        .ok_or(EIO)?;
+            while space.work_owned(render) != 0 {
                 space.low.reserve_invalidation()?;
                 self._address_space
                     .as_mut()
                     .ok_or(EIO)?
                     .low
                     .reserve_invalidation()?;
-                space.unmap_work_alias(alias_range.clone())?;
-                space.sync();
+                let Some(va) = space.take_teardown_work(render) else {
+                    return Err(EIO);
+                };
+                self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
+                let alias_range =
+                    crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, render)
+                        .ok_or(EIO)?;
+                let client_unmap = space.unmap_work_alias(alias_range.clone());
+                if space.has_pending_tables() {
+                    space.sync();
+                }
+                client_unmap?;
                 let dev_unmap = self
                     ._address_space
                     .as_mut()
@@ -276,11 +286,11 @@ impl Bootstrap {
                 let fw = self._firmware_space.as_mut().ok_or(EIO)?;
                 fw.release_region(va)?;
                 fw.release_region(va + priv_size)?;
-                space.complete_teardown_work(render, va)?;
-                self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
-                self.free_work_va[index]
-                    .push_within_capacity(va)
-                    .map_err(|_| EIO)?;
+                if !fw.has_region(va) && !fw.has_region(va + priv_size) {
+                    self.free_work_va[index]
+                        .push_within_capacity(va)
+                        .map_err(|_| EIO)?;
+                }
             }
         }
         if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root_low) {

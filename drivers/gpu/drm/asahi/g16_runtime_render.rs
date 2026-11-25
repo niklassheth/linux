@@ -328,7 +328,7 @@ impl Bootstrap {
             // within each lane, even when other queues publish between them.
             a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
             a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
-            let (va, _reused) = {
+            let va = {
                 let s = prep.sink_mut();
                 s.runtime.allocate_work(s.client, true)?
             };

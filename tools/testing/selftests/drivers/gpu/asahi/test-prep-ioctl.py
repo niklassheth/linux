@@ -36,6 +36,7 @@ checks = 0
 for source, name in [(runtime, 'submit_render_pool'), (runtime, 'publish_render'),
                      (runtime, 'submit_compute_queue'), (runtime, 'submit_render'),
                      (runtime, 'submit_render_queue'), (runtime, 'submit_compute'),
+                     (runtime, 'allocate_work'),
                      (vm, 'write_staged'), (vm, 'write_u32_staged'),
                      (vm, 'write_u64_staged'),
                      (vm, 'update_batch')]:
@@ -66,8 +67,9 @@ checks += 1
 submit = function(drm, 'submit')
 provision = submit.index('runtime.provision_queue(')
 tvb = submit.index('runtime.provision_tvb(')
+work = submit.index('runtime.provision_work(')
 job = submit.index('.new_job(')
-assert provision < job and tvb < job
+assert provision < job and tvb < job and work < job
 assert 'vm.tvb_ready = true' in submit[tvb:job]
 checks += 1
 

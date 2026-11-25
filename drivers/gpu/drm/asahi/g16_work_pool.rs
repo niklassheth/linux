@@ -92,6 +92,10 @@ impl<V: SlotVec> VmWorkPool<V> {
         !self.free[usize::from(render)].is_empty()
     }
 
+    pub(crate) fn owned_count(&self, render: bool) -> usize {
+        self.owned[usize::from(render)].len()
+    }
+
     pub(crate) fn leased_count(&self, render: bool) -> usize {
         self.leased[usize::from(render)]
     }
@@ -118,15 +122,19 @@ impl<V: SlotVec> VmWorkPool<V> {
         Some(va)
     }
 
-    /// Record a freshly allocated and mapped Work slot as owned and leased by this VM.
-    /// Caller must have reserved capacity in `owned` and `free` up front.
-    pub(crate) fn record_fresh(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
+    /// Record a freshly provisioned and mapped Work slot directly as owned and
+    /// idle in this VM (used by `SUBMIT` ioctl provisioning before fence
+    /// publication). Caller must have reserved capacity in `owned` and `free`.
+    pub(crate) fn record_idle(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
         let idx = usize::from(render);
         if self.owned[idx].contains_slot(va) {
             return Err(());
         }
         self.owned[idx].push_within(va).map_err(|_| ())?;
-        self.leased[idx] += 1;
+        if self.free[idx].push_within(va).is_err() {
+            self.owned[idx].remove_slot(va);
+            return Err(());
+        }
         Ok(())
     }
 
@@ -145,29 +153,21 @@ impl<V: SlotVec> VmWorkPool<V> {
         Ok(())
     }
 
-    /// Peek the next owned idle slot to tear down during VM detach.
-    /// Returns `None` when no slots of `render` remain or any slot is still leased.
-    pub(crate) fn peek_teardown(&self, render: bool) -> Option<u64> {
+    /// Remove the next owned idle slot from circulation BEFORE any destructive
+    /// teardown unmap or region release, so a partial teardown error can never
+    /// leave a dismantled slot on the VM's idle list.
+    pub(crate) fn take_teardown(&mut self, render: bool) -> Option<u64> {
         let idx = usize::from(render);
         if self.leased[idx] != 0 {
             return None;
         }
-        self.owned[idx].last_slot()
-    }
-
-    /// Remove a torn-down slot after its aliases and firmware pages were released.
-    pub(crate) fn complete_teardown(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
-        let idx = usize::from(render);
-        if self.leased[idx] != 0 {
-            return Err(());
+        let va = self.owned[idx].last_slot()?;
+        if !self.free[idx].contains_slot(va) {
+            return None;
         }
-        if !self.free[idx].contains_slot(va) || !self.owned[idx].contains_slot(va) {
-            return Err(());
-        }
-        if !self.free[idx].remove_slot(va) || !self.owned[idx].remove_slot(va) {
-            return Err(());
-        }
-        Ok(())
+        let _ = self.free[idx].remove_slot(va);
+        let _ = self.owned[idx].pop_slot();
+        Some(va)
     }
 }
 
@@ -215,10 +215,13 @@ impl<'a, S, T: LeaseSink<S>> PrepGuard<'a, S, T> {
 
     /// Transfer both leases out of the guard right before the point of no
     /// return (publication / quarantine boundary), disarming `Drop`.
+    /// Checks both fields before taking either so returning `None` still lets
+    /// `Drop` roll back whichever lease was held.
     pub(crate) fn commit(mut self) -> Option<(S, u64)> {
-        let scratch = self.scratch.take()?;
-        let work = self.work.take()?;
-        Some((scratch, work))
+        if self.scratch.is_none() || self.work.is_none() {
+            return None;
+        }
+        Some((self.scratch.take()?, self.work.take()?))
     }
 }
 

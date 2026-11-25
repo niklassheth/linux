@@ -225,7 +225,7 @@ impl Bootstrap {
             let mut prep = crate::g16_work_pool::PrepGuard::new(&mut sink, false);
             let scratch = prep.sink_mut().client.prepare_compute(&mut params)?;
             prep.set_scratch(scratch);
-            let (work, _reused) = {
+            let work = {
                 let s = prep.sink_mut();
                 s.runtime.allocate_work(s.client, false)?
             };

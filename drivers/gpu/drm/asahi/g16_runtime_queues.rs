@@ -7,43 +7,40 @@
 use super::*;
 
 impl Bootstrap {
-    /// Whether unbacked firmware VA space remains in the 4 GiB Work alias
-    /// window (`0x71/0x72_0000_0000 + offset`) for a fresh Work slot.
-    pub(super) fn global_work_space_left(&self, render: bool) -> bool {
-        let index = usize::from(render);
-        let stride = crate::g16_work_pool::stride(render);
-        !self.free_work_va[index].is_empty()
-            || self
-                .next_work_va
-                .checked_add(stride)
-                .is_some_and(|end| end <= WORK_BASE + WORK_WINDOW)
-    }
-
-    /// Lower-bound check for `check_cap_headroom`: true if either global Work
-    /// VA space remains or at least one live VM already holds an idle slot.
+    /// Lower-bound check for `check_cap_headroom`: true while at least one live
+    /// VM holds an idle pre-provisioned Work slot of `render` kind.
     pub(super) fn work_space_left(&self, render: bool) -> bool {
-        let index = usize::from(render);
-        self.vm_free_work[index] != 0 || self.global_work_space_left(render)
+        self.vm_free_work[usize::from(render)] != 0
     }
 
-    /// Lease a per-VM Work slot until notifier/driver stamps and transport
-    /// retire. Returns `(va, reused)` where `reused == true` means the slot
-    /// was popped from `client`'s own idle pool (zero allocations, zero PTE
-    /// edits, zero TLB invalidations), and `reused == false` means a fresh
-    /// slot was allocated with `__GFP_ZERO` backing and mapped strictly into
-    /// firmware, context 0, and `client`.
-    pub(super) fn allocate_work(
+    /// For the SUBMIT ioctl (process context, BEFORE fence publication):
+    /// ensure `client` owns at least `min_slots` pre-mapped per-VM Work slots
+    /// so the fence-signalling pump worker never allocates Work pages, PTEs,
+    /// or bookkeeping vectors.
+    pub(crate) fn provision_work(
         &mut self,
         client: &mut g16_vm::AddressSpace,
         render: bool,
-    ) -> Result<(u64, bool)> {
+        min_slots: usize,
+    ) -> Result {
+        if self.render_failed {
+            return Err(EIO);
+        }
+        while client.work_owned(render) < min_slots {
+            self.provision_one_work_slot(client, render)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn provision_one_work_slot(
+        &mut self,
+        client: &mut g16_vm::AddressSpace,
+        render: bool,
+    ) -> Result {
         use crate::g16_work_pool as wp;
         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
         let index = usize::from(render);
-        if let Some(va) = client.pop_free_work(render) {
-            self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
-            return Ok((va, true));
-        }
         let stride = wp::stride(render);
         let (priv_size, shared_size) = if render {
             (0x10000usize, 0xc000usize)
@@ -81,11 +78,15 @@ impl Bootstrap {
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             if let Err(err) = fw.alloc(va, priv_size, PROT_FW_PRIV_RW) {
-                let _ = self.free_work_va[index].push_within_capacity(va);
+                // Only recycle `va` if `fw.alloc` did not retain a partial region.
+                if !fw.has_region(va) {
+                    let _ = self.free_work_va[index].push_within_capacity(va);
+                }
                 return Err(err);
             }
             if let Err(err) = fw.alloc(va + priv_size as u64, shared_size, PROT_FW_SHARED_RW) {
-                if fw.release_region(va).is_ok() {
+                let r1 = fw.release_region(va);
+                if r1.is_ok() && !fw.has_region(va) && !fw.has_region(va + priv_size as u64) {
                     let _ = self.free_work_va[index].push_within_capacity(va);
                 }
                 return Err(err);
@@ -96,7 +97,11 @@ impl Bootstrap {
                     Err(err) => {
                         let r1 = fw.release_region(va);
                         let r2 = fw.release_region(va + priv_size as u64);
-                        if r1.is_ok() && r2.is_ok() {
+                        if r1.is_ok()
+                            && r2.is_ok()
+                            && !fw.has_region(va)
+                            && !fw.has_region(va + priv_size as u64)
+                        {
                             let _ = self.free_work_va[index].push_within_capacity(va);
                         }
                         return Err(err);
@@ -150,7 +155,11 @@ impl Bootstrap {
                 if let Some(fw) = self._firmware_space.as_mut() {
                     let r1 = fw.release_region(va);
                     let r2 = fw.release_region(va + priv_size as u64);
-                    if r1.is_ok() && r2.is_ok() {
+                    if r1.is_ok()
+                        && r2.is_ok()
+                        && !fw.has_region(va)
+                        && !fw.has_region(va + priv_size as u64)
+                    {
                         let _ = self.free_work_va[index].push_within_capacity(va);
                     }
                 }
@@ -173,8 +182,29 @@ impl Bootstrap {
         }
         self.invalidate_client(client);
 
-        client.record_fresh_work(render, va)?;
-        Ok((va, false))
+        client.record_idle_work(render, va)?;
+        self.vm_free_work[index] += 1;
+        Ok(())
+    }
+
+    /// Lease a pre-provisioned per-VM Work slot in the pump worker.
+    /// Zero allocations, zero PTE edits, zero TLB invalidations; returns
+    /// `EBUSY` if every slot owned by `client` is currently in flight.
+    pub(super) fn allocate_work(
+        &mut self,
+        client: &mut g16_vm::AddressSpace,
+        render: bool,
+    ) -> Result<u64> {
+        let index = usize::from(render);
+        if let Some(va) = client.pop_free_work(render) {
+            self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
+            return Ok(va);
+        }
+        if client.work_leased(render) != 0 {
+            self.report_pressure(64, "Work storage");
+            return Err(EBUSY);
+        }
+        Err(EIO)
     }
 
     /// Return a retired or rolled-back Work slot to its owning VM's idle pool.

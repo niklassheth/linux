@@ -59,8 +59,8 @@ impl FakeRuntime {
         let (owned, free) = self.work_pool.lists_mut(render);
         owned.reserve(1);
         free.reserve(1);
-        self.work_pool.record_fresh(render, va).unwrap();
-        va
+        self.work_pool.record_idle(render, va).unwrap();
+        self.work_pool.pop_free(render).unwrap()
     }
 }
 
@@ -152,4 +152,19 @@ fn commit_disarms_drop_and_transfers_ownership() {
     assert_eq!(rt.scratch_users, 1);
     assert!(rt.returned_scratch.is_empty());
     assert_eq!(rt.work_pool.leased_count(true), 1);
+}
+
+#[test]
+fn partial_commit_failure_still_rolls_back_held_scratch() {
+    let mut rt = FakeRuntime::new();
+    let res = {
+        let mut prep = PrepGuard::new(&mut rt, true);
+        let scratch = prep.sink_mut().lease_scratch(0x5000);
+        prep.set_scratch(scratch);
+        // Work not set: commit() must return None AND leave scratch for Drop.
+        prep.commit()
+    };
+    assert_eq!(res, None);
+    assert_eq!(rt.scratch_users, 0);
+    assert_eq!(rt.returned_scratch, vec![0x5000]);
 }

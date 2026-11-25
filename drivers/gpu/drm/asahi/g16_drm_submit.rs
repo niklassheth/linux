@@ -319,11 +319,40 @@ impl File {
                 vm.compute_ready = true;
             }
         }
-        // Provision what this queue's or VM root's first publication would
-        // otherwise allocate in the job worker, so a failure returns here with
-        // nothing queued instead of failing the queue later.
+        // Provision what this queue's or VM root's publication would otherwise
+        // allocate in the job worker (firmware rings, TVB pool, and per-VM
+        // Work slots), so any allocation failure returns here before fence
+        // publication instead of entering reclaim in the fence-signalling
+        // worker.
+        const MAX_VM_WORK_SLOTS: usize = 64;
         let tvb = renders != 0 && !vm.tvb_ready;
-        if tvb || !firmware.lock().provisioned() {
+        let render_work_target = if renders != 0 {
+            let need = usize::from(renders);
+            let space = vm.space.lock();
+            let owned = space.work_owned(true);
+            let want = (owned + if space.has_free_work(true) { 0 } else { need })
+                .max(need)
+                .min(MAX_VM_WORK_SLOTS);
+            if owned < want { want } else { 0 }
+        } else {
+            0
+        };
+        let compute_work_target = if computes != 0 {
+            let need = usize::from(computes);
+            let space = vm.compute_space.lock();
+            let owned = space.work_owned(false);
+            let want = (owned + if space.has_free_work(false) { 0 } else { need })
+                .max(need)
+                .min(MAX_VM_WORK_SLOTS);
+            if owned < want { want } else { 0 }
+        } else {
+            0
+        };
+        if tvb
+            || !firmware.lock().provisioned()
+            || render_work_target != 0
+            || compute_work_target != 0
+        {
             let mut runtime = device.runtime.lock();
             if runtime.render_failed() {
                 return Err(EIO);
@@ -333,6 +362,12 @@ impl File {
                 let support = vm.render_support.as_deref().ok_or(EIO)?;
                 runtime.provision_tvb(&mut vm.space.lock(), support)?;
                 vm.tvb_ready = true;
+            }
+            if render_work_target != 0 {
+                runtime.provision_work(&mut vm.space.lock(), true, render_work_target)?;
+            }
+            if compute_work_target != 0 {
+                runtime.provision_work(&mut vm.compute_space.lock(), false, compute_work_target)?;
             }
         }
         // Every submission retains the VM's mappings until it completes.

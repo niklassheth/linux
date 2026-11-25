@@ -113,12 +113,12 @@ impl Bootstrap {
         if self.render_failed {
             return Err(EIO);
         }
-        // Work storage is owned per VM and bounded globally by its 4 GiB alias
-        // window. When the window is full and this VM has no idle slot, only
-        // this VM's own leased slots will return to it on retirement.
-        if !client_has_free_work && !self.global_work_space_left(render) {
+        // Work slots are provisioned per VM in the SUBMIT ioctl before fence
+        // publication; the worker never allocates them. When every slot owned
+        // by this VM is leased, wait for one of this VM's flights to retire.
+        if !client_has_free_work {
             if client_work_leased == 0 {
-                return Err(ENOSPC);
+                return Err(EIO);
             }
             self.report_pressure(64, "Work storage");
             return Err(EBUSY);

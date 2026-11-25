@@ -385,20 +385,6 @@ impl UatPageTable {
         self.with_pages_gfp(iova_range, walk, GFP_KERNEL, cb)
     }
 
-    /// Upper bound on intermediate + leaf page tables needed to map `range`.
-    pub(crate) fn max_tables_for_range(range: &Range<u64>) -> usize {
-        if range.is_empty() {
-            return 0;
-        }
-        let last = range.end - 1;
-        let l0 = ((last >> (UAT_PGBIT + UAT_LVBIT)) - (range.start >> (UAT_PGBIT + UAT_LVBIT)) + 1)
-            as usize;
-        let l1 = ((last >> (UAT_PGBIT + 2 * UAT_LVBIT))
-            - (range.start >> (UAT_PGBIT + 2 * UAT_LVBIT))
-            + 1) as usize;
-        l0.saturating_add(l1)
-    }
-
     /// Exact read-only count of intermediate + leaf page tables currently
     /// missing for `iova_range`. Zero allocations; monotonic upper bound while
     /// this page table is alive because intermediate tables are never freed.

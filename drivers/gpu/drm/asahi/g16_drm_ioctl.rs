@@ -133,11 +133,16 @@ impl File {
         }
         let inner = file.inner();
         let mut state = inner.state.lock();
-        let index = state
-            .vms
-            .iter()
-            .position(|v| v.id == data.vm_id && v.visible)
-            .ok_or(ENOENT)?;
+        let Some(index) = state.vms.iter().position(|v| v.id == data.vm_id) else {
+            return Err(ENOENT);
+        };
+        if !state.vms[index].visible {
+            return Err(if state.vms[index].destroying {
+                EBUSY
+            } else {
+                ENOENT
+            });
+        }
         // Withdraw the public VM handle immediately before checking queues or
         // unlocking to drain. Existing queues retain the VM until the last
         // queue is destroyed; no concurrent QUEUE_CREATE can attach during
@@ -174,9 +179,11 @@ impl File {
                 return Ok(0);
             };
             if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
-                // Destructive teardown already started: keep `visible = false`
-                // and release ownership so File::drop() finishes cleanup.
+                // Destructive teardown already started: keep `visible = false`,
+                // release ownership, and arm the reaper to retry cleanup.
                 state.vms[index].destroying = false;
+                inner.reaper.armed.store(true, Ordering::SeqCst);
+                let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
                 return Err(err);
             }
             state.vms.swap_remove(index);
@@ -325,6 +332,10 @@ impl File {
                     {
                         vm.destroying = false;
                     }
+                    // Hand deferred teardown to the file reaper so this hidden
+                    // VM is detached once its remaining fences signal.
+                    inner.reaper.armed.store(true, Ordering::SeqCst);
+                    let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
                     return Err(err);
                 }
                 if let Some(index) = state
@@ -334,6 +345,8 @@ impl File {
                 {
                     if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
                         state.vms[index].destroying = false;
+                        inner.reaper.armed.store(true, Ordering::SeqCst);
+                        let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
                         return Err(err);
                     }
                     state.vms.swap_remove(index);
@@ -377,29 +390,31 @@ impl File {
                 let extent = ((data.offset + data.range + 0x3fff) & !0x3fff) - first;
                 state.timestamps.reserve(1, GFP_KERNEL)?;
                 state.retained_timestamps.reserve(1, GFP_KERNEL)?;
-                // Count only missing firmware page tables for the next free
-                // timestamp slot (0 on a populated tree), then preallocate
-                // outside `device.runtime.lock()` so mapping never enters reclaim.
-                let pt_count = {
-                    let runtime = device.runtime.lock();
+                // Size and reserve the exact timestamp slot under the same
+                // `device.runtime.lock()` acquisition, dropping the lock only
+                // to preallocate missing page tables with GFP_KERNEL when needed.
+                let mut pt_pages = KVec::new();
+                let (base, mut runtime) = loop {
+                    let mut runtime = device.runtime.lock();
                     if device.failed.load(Ordering::Acquire) {
                         return Err(EIO);
                     }
-                    runtime.timestamp_tables_needed(extent)?
+                    let need = runtime.timestamp_tables_needed(extent)?;
+                    if pt_pages.len() >= need {
+                        let base = runtime.reserve_timestamp(extent)?;
+                        break (base, runtime);
+                    }
+                    drop(runtime);
+                    let add = need - pt_pages.len();
+                    pt_pages.reserve(add, GFP_KERNEL)?;
+                    for _ in 0..add {
+                        pt_pages
+                            .push_within_capacity(kernel::page::Page::alloc_page(
+                                GFP_KERNEL | __GFP_ZERO,
+                            )?)
+                            .map_err(|_| EIO)?;
+                    }
                 };
-                let mut pt_pages = KVec::with_capacity(pt_count, GFP_KERNEL)?;
-                for _ in 0..pt_count {
-                    pt_pages
-                        .push_within_capacity(kernel::page::Page::alloc_page(
-                            GFP_KERNEL | __GFP_ZERO,
-                        )?)
-                        .map_err(|_| EIO)?;
-                }
-                let mut runtime = device.runtime.lock();
-                if device.failed.load(Ordering::Acquire) {
-                    return Err(EIO);
-                }
-                let base = runtime.reserve_timestamp(extent)?;
                 let timestamp = TimestampBuffer {
                     id,
                     _obj: bo.clone(),

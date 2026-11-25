@@ -515,7 +515,11 @@ impl Bootstrap {
         // vector reservations.
         self.collect_destroyed_queues()?;
         if self.free_queues.is_empty() {
-            let _ = self.recycle_queues();
+            match self.recycle_queues() {
+                Ok(()) => {}
+                Err(err) if err == ENOMEM => {}
+                Err(err) => return Err(err),
+            }
         }
         if self.free_queues.is_empty() {
             return Ok(false);

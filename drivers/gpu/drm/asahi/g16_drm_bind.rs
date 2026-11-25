@@ -141,25 +141,17 @@ impl Vm {
             // fails, keep the backing pinned AND quarantine this VM so SUBMIT
             // never validates a mapping whose roots are inconsistent.
             let mut clean = true;
-            if space_edited
-                && self
-                    .space
-                    .lock()
-                    .low
-                    .unmap_pages_gfp(range.clone(), gfp)
-                    .is_err()
-            {
-                clean = false;
+            if space_edited {
+                let res = { self.space.lock().low.unmap_pages_gfp(range.clone(), gfp) };
+                if res.is_err() {
+                    clean = false;
+                }
             }
-            if compute_edited
-                && self
-                    .compute_space
-                    .lock()
-                    .low
-                    .unmap_pages_gfp(range, gfp)
-                    .is_err()
-            {
-                clean = false;
+            if compute_edited {
+                let res = { self.compute_space.lock().low.unmap_pages_gfp(range, gfp) };
+                if res.is_err() {
+                    clean = false;
+                }
             }
             let runtime = device.runtime.lock();
             self.publish_mappings(&runtime);
@@ -225,42 +217,53 @@ impl Vm {
         if right.is_some() {
             self.mappings.reserve(1, gfp)?;
         }
-        // Pre-reserve invalidation and dirty-table capacity for every disjoint
-        // overlapping interval before editing the first PTE.
+        // Pre-reserve invalidation and dirty-table capacity for the exact
+        // contiguous runs and distinct leaf tables covered by this unbind
+        // (`self.mappings` is sorted by start address, matching how `changed_gfp`
+        // merges adjacent ranges and `mark_dirty_gfp` deduplicates leaves).
         let mut inv_count = 0usize;
         let mut leaf_count = 0usize;
+        let mut prev_end: Option<u64> = None;
+        let mut prev_leaf: Option<u64> = None;
+        let leaf_shift = (crate::pgtable::UAT_PGBIT + 11) as u64;
         for m in self.mappings.iter() {
             let start = m.range.start.max(range.start);
             let end = m.range.end.min(range.end);
             if start < end {
-                inv_count += 1;
-                leaf_count = leaf_count.saturating_add(
-                    crate::pgtable::UatPageTable::max_tables_for_range(&(start..end)),
-                );
+                if prev_end != Some(start) {
+                    inv_count += 1;
+                }
+                prev_end = Some(end);
+                let first_leaf = start >> leaf_shift;
+                let last_leaf = (end - 1) >> leaf_shift;
+                let overlap = usize::from(prev_leaf == Some(first_leaf));
+                leaf_count = leaf_count
+                    .saturating_add((last_leaf - first_leaf + 1) as usize - overlap);
+                prev_leaf = Some(last_leaf);
             }
         }
         if inv_count != 0 {
-            self.space.lock().low.reserve_invalidations_gfp(inv_count, gfp)?;
-            self.space.lock().low.reserve_pending_tables_gfp(leaf_count, gfp)?;
-            self.compute_space
-                .lock()
-                .low
-                .reserve_invalidations_gfp(inv_count, gfp)?;
-            self.compute_space
-                .lock()
-                .low
-                .reserve_pending_tables_gfp(leaf_count, gfp)?;
+            {
+                let mut space = self.space.lock();
+                space.low.reserve_invalidations_gfp(inv_count, gfp)?;
+                space.low.reserve_pending_tables_gfp(leaf_count, gfp)?;
+            }
+            {
+                let mut compute = self.compute_space.lock();
+                compute.low.reserve_invalidations_gfp(inv_count, gfp)?;
+                compute.low.reserve_pending_tables_gfp(leaf_count, gfp)?;
+            }
         }
         // Unbinds may span holes, such as unbound sparse pages. Clear only
-        // the parts which mappings cover. If an error occurs after any PTE was
-        // cleared, publish what changed and quarantine the VM so SUBMIT cannot
-        // approve jobs against inconsistent roots while backing stays pinned.
+        // the parts which mappings cover. Drop each root's mutex guard before
+        // error recovery calls `publish_mappings()` (which locks both roots).
         let mut edited = false;
         for m in self.mappings.iter() {
             let start = m.range.start.max(range.start);
             let end = m.range.end.min(range.end);
             if start < end {
-                if let Err(err) = self.space.lock().low.unmap_pages_gfp(start..end, gfp) {
+                let space_res = { self.space.lock().low.unmap_pages_gfp(start..end, gfp) };
+                if let Err(err) = space_res {
                     if edited {
                         self.publish_mappings(runtime);
                         self.render_broken = true;
@@ -268,12 +271,13 @@ impl Vm {
                     return Err(err);
                 }
                 edited = true;
-                if let Err(err) = self
-                    .compute_space
-                    .lock()
-                    .low
-                    .unmap_pages_gfp(start..end, gfp)
-                {
+                let compute_res = {
+                    self.compute_space
+                        .lock()
+                        .low
+                        .unmap_pages_gfp(start..end, gfp)
+                };
+                if let Err(err) = compute_res {
                     self.publish_mappings(runtime);
                     self.render_broken = true;
                     return Err(err);

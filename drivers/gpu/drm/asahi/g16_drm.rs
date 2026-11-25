@@ -790,6 +790,31 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
             }
         }
     }
+    // Also finish tearing down any hidden, unowned, queue-less VMs whose
+    // earlier last-queue drain timed out or whose detach hit a transient error.
+    let mut keep_vms = 0usize;
+    for i in 0..state.vms.len() {
+        let orphaned_hidden = !state.vms[i].visible
+            && !state.vms[i].destroying
+            && !state.queues.iter().any(|q| q.vm == state.vms[i].id);
+        if orphaned_hidden {
+            state.vms[i].pending.retain(|f| {
+                // SAFETY: Each entry owns its live fence reference.
+                !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+            });
+            if state.vms[i].pending.is_empty() {
+                let rt = runtime.get_or_insert_with(|| device.runtime.lock());
+                if state.vms[i].detach(rt).is_ok() {
+                    continue;
+                }
+            }
+            left = true;
+        }
+        state.vms.swap(keep_vms, i);
+        keep_vms += 1;
+    }
+    drop(runtime);
+    state.vms.truncate(keep_vms);
     if !left {
         armed.store(false, Ordering::Relaxed);
     }

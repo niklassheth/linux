@@ -8,6 +8,9 @@ use super::*;
 
 impl Bootstrap {
     pub(crate) fn reserve_timestamp(&mut self, size: u64) -> Result<u64> {
+        if self.render_failed {
+            return Err(EIO);
+        }
         if size == 0 || size & 0x3fff != 0 {
             return Err(EINVAL);
         }
@@ -29,6 +32,9 @@ impl Bootstrap {
     }
 
     pub(crate) fn map_timestamp(&mut self, address: u64, physical: u64, size: usize) -> Result {
+        if self.render_failed {
+            return Err(EIO);
+        }
         self._firmware_space.as_mut().ok_or(EIO)?.map_external(
             address,
             physical,
@@ -40,6 +46,12 @@ impl Bootstrap {
     }
 
     pub(crate) fn release_timestamp(&mut self, range: core::ops::Range<u64>) -> Result {
+        // Never unmap or recycle a timestamp firmware VA after a fault:
+        // firmware quiescence has not been established, so keep the VA and its
+        // backing BO quarantined until reset.
+        if self.render_failed {
+            return Err(EIO);
+        }
         self._firmware_space
             .as_mut()
             .ok_or(EIO)?

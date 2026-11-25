@@ -836,6 +836,14 @@ impl PinnedDrop for File {
             return;
         }
         let mut runtime = self.device.runtime.lock();
+        if self.device.failed.load(Ordering::Acquire) || runtime.render_failed() {
+            // Retain roots and timestamp backing after any device/runtime fault
+            // until reset establishes firmware quiescence.
+            drop(runtime);
+            drop(state);
+            core::mem::forget(self.state.clone());
+            return;
+        }
         for vm in state.vms.iter().rev() {
             if vm.detach(&mut runtime).is_err() {
                 // Retain GPU-visible mappings if the installed root cannot

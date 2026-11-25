@@ -332,6 +332,9 @@ impl File {
                 state.timestamps.reserve(1, GFP_KERNEL)?;
                 state.retained_timestamps.reserve(1, GFP_KERNEL)?;
                 let mut runtime = device.runtime.lock();
+                if device.failed.load(Ordering::Acquire) {
+                    return Err(EIO);
+                }
                 let base = runtime.reserve_timestamp(extent)?;
                 let timestamp = TimestampBuffer {
                     id,
@@ -417,11 +420,15 @@ impl File {
                     .iter()
                     .position(|t| t.base == timestamp.base && t.extent == timestamp.extent)
                     .ok_or(EIO)?;
-                // Keep the retained backing reference if unmapping fails, just
-                // as at file teardown, so a stale PTE never reaches freed RAM.
-                device.runtime.lock().release_timestamp(
-                    timestamp.base..timestamp.base + timestamp.extent,
-                )?;
+                // Keep the retained backing reference if the device/runtime is
+                // poisoned or unmapping fails, just as at file teardown, so a
+                // late firmware timestamp write never reaches reused VA or RAM.
+                let mut runtime = device.runtime.lock();
+                if device.failed.load(Ordering::Acquire) {
+                    return Err(EIO);
+                }
+                runtime.release_timestamp(timestamp.base..timestamp.base + timestamp.extent)?;
+                drop(runtime);
                 state.retained_timestamps.swap_remove(retained);
             }
             _ => return Err(EINVAL),

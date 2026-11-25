@@ -334,6 +334,18 @@ impl File {
                 let extent = ((data.offset + data.range + 0x3fff) & !0x3fff) - first;
                 state.timestamps.reserve(1, GFP_KERNEL)?;
                 state.retained_timestamps.reserve(1, GFP_KERNEL)?;
+                // Preallocate intermediate firmware page tables outside
+                // `device.runtime.lock()` so mapping never enters reclaim.
+                let pt_count =
+                    crate::pgtable::UatPageTable::max_tables_for_range(&(0..extent)) + 2;
+                let mut pt_pages = KVec::with_capacity(pt_count, GFP_KERNEL)?;
+                for _ in 0..pt_count {
+                    pt_pages
+                        .push_within_capacity(kernel::page::Page::alloc_page(
+                            GFP_KERNEL | __GFP_ZERO,
+                        )?)
+                        .map_err(|_| EIO)?;
+                }
                 let mut runtime = device.runtime.lock();
                 if device.failed.load(Ordering::Acquire) {
                     return Err(EIO);
@@ -350,7 +362,8 @@ impl File {
                 // Keep backing even if mapping installation or rollback fails.
                 state
                     .retained_timestamps
-                    .push(timestamp.clone(), GFP_KERNEL)?;
+                    .push_within_capacity(timestamp.clone())
+                    .map_err(|_| EIO)?;
                 let mut offset = first;
                 let mut address = base;
                 let result = (|| {
@@ -365,6 +378,7 @@ impl File {
                             address,
                             segment.dma_address() + offset,
                             size.try_into()?,
+                            &mut pt_pages,
                         )?;
                         address += size;
                         offset = 0;
@@ -382,7 +396,10 @@ impl File {
                     state.retained_timestamps.pop();
                     return Err(error);
                 }
-                state.timestamps.push(timestamp, GFP_KERNEL)?;
+                state
+                    .timestamps
+                    .push_within_capacity(timestamp)
+                    .map_err(|_| EIO)?;
                 state.next_timestamp = next;
                 data.object_handle = id;
             }
@@ -591,7 +608,6 @@ impl File {
                         vm.unmap(range.clone(), &runtime)?;
                     }
                 }
-                let runtime = device.runtime.lock();
                 vm.map(
                     address..end,
                     offset,
@@ -600,7 +616,7 @@ impl File {
                     access,
                     flags & 6,
                     single,
-                    &runtime,
+                    device,
                 )?;
                 break;
             }

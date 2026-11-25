@@ -232,7 +232,8 @@ impl Bootstrap {
                 let a = &render.addresses;
                 dev_err!(self.dev.as_ref(), "G16: hang render TA={:#x} 3D={:#x} scene={} context={}\n",
                          a.tiling_work, a.fragment_work, render.scene, a.context_id);
-                let mut line = KVec::new();
+                let mut line = [(0u32, 0u64); 6];
+                let mut count = 0usize;
                 for i in 0..0x600u64 / 12 {
                     let at = a.fragment_work + 0x80 + i * 12;
                     let number = fw.read_u32(at)?;
@@ -240,14 +241,15 @@ impl Bootstrap {
                     if number == 0 && value == 0 {
                         break;
                     }
-                    line.push((number, value), GFP_KERNEL)?;
-                    if line.len() == 6 {
-                        dev_err!(self.dev.as_ref(), "G16: hang 3D regs {:x?}\n", &line[..]);
-                        line.clear();
+                    line[count] = (number, value);
+                    count += 1;
+                    if count == line.len() {
+                        dev_err!(self.dev.as_ref(), "G16: hang 3D regs {:x?}\n", &line[..count]);
+                        count = 0;
                     }
                 }
-                if !line.is_empty() {
-                    dev_err!(self.dev.as_ref(), "G16: hang 3D regs {:x?}\n", &line[..]);
+                if count != 0 {
+                    dev_err!(self.dev.as_ref(), "G16: hang 3D regs {:x?}\n", &line[..count]);
                 }
             }
         }
@@ -372,7 +374,10 @@ impl Bootstrap {
         if let Some(entry) = self.diagnostics.lane_events.iter_mut().find(|e| e.0 == stamp) {
             entry.1 = event;
         } else {
-            let _ = self.diagnostics.lane_events.push((stamp, event), GFP_KERNEL);
+            let _ = self
+                .diagnostics
+                .lane_events
+                .push((stamp, event), GFP_NOWAIT | __GFP_NOWARN);
         }
     }
 
@@ -428,18 +433,26 @@ impl Bootstrap {
                      at / 1_000_000_000, (at % 1_000_000_000) / 1000, stamp, value, tag, current,
                      if live { " (live for another queue)" } else { "" });
         }
-        let mut line = KVec::new();
+        let mut line = [(0u64, 0u32); 6];
+        let mut count = 0usize;
         for &(stamp, event) in self.diagnostics.lane_events.iter().take(96) {
-            if line.push((stamp, event), GFP_KERNEL).is_err() {
-                break;
-            }
-            if line.len() == 6 {
-                dev_err!(self.dev.as_ref(), "G16: hang lane events (stamp, event) {:x?}\n", &line[..]);
-                line.clear();
+            line[count] = (stamp, event);
+            count += 1;
+            if count == line.len() {
+                dev_err!(
+                    self.dev.as_ref(),
+                    "G16: hang lane events (stamp, event) {:x?}\n",
+                    &line[..count]
+                );
+                count = 0;
             }
         }
-        if !line.is_empty() {
-            dev_err!(self.dev.as_ref(), "G16: hang lane events (stamp, event) {:x?}\n", &line[..]);
+        if count != 0 {
+            dev_err!(
+                self.dev.as_ref(),
+                "G16: hang lane events (stamp, event) {:x?}\n",
+                &line[..count]
+            );
         }
     }
 }

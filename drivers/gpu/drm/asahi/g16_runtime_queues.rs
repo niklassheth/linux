@@ -397,6 +397,7 @@ impl Bootstrap {
             let additional = total - retired.len();
             retired.reserve(additional, gfp)?;
             drop(retired);
+            let _ = self.diagnostics.lane_events.reserve(3, gfp);
         }
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         if fresh {

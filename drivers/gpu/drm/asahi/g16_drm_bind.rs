@@ -39,7 +39,7 @@ impl Vm {
         access: crate::pgtable::Prot,
         permissions: u32,
         single: bool,
-        runtime: &crate::g16::Bootstrap,
+        device: &Device,
     ) -> Result {
         self.snapshot = None;
         if self
@@ -74,6 +74,21 @@ impl Vm {
         if va != range.end {
             return Err(EINVAL);
         }
+        // Preallocate intermediate page tables outside VM and runtime locks so
+        // mapping into a live VM never enters GFP_KERNEL reclaim under locks
+        // needed by fence retirement.
+        let pt_count = crate::pgtable::UatPageTable::max_tables_for_range(&range);
+        let alloc_pt = || -> Result<KVec<kernel::types::Owned<kernel::page::Page>>> {
+            let mut pages = KVec::with_capacity(pt_count, GFP_KERNEL)?;
+            for _ in 0..pt_count {
+                pages
+                    .push_within_capacity(kernel::page::Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?)
+                    .map_err(|_| EIO)?;
+            }
+            Ok(pages)
+        };
+        let mut pt_space = alloc_pt()?;
+        let mut pt_compute = alloc_pt()?;
         self.mappings.push(
             Mapping {
                 range: range.clone(),
@@ -89,13 +104,16 @@ impl Vm {
         let last = self.mappings.len() - 1;
         let index = self.mappings[..last].partition_point(|m| m.range.start < range.start);
         self.mappings[index..].rotate_right(1);
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
         let result = (|| {
             // The shim uses distinct roots for the fixed render and compute
             // private namespaces. Both views share the caller's GEM pages.
-            for view in [&self.space, &self.compute_space] {
+            for (view, pt) in [(&self.space, &mut pt_space), (&self.compute_space, &mut pt_compute)]
+            {
                 let mut space = view.lock();
+                space.low.prepare_map_prealloc_gfp(range.clone(), pt, gfp)?;
                 for &(start, end, pa) in &chunks {
-                    space.low.map_pages(start..end, pa, access, single)?;
+                    space.low.map_pages_gfp(start..end, pa, access, single, gfp)?;
                     let last = if single {
                         pa
                     } else {
@@ -112,14 +130,17 @@ impl Vm {
         })();
         if let Err(e) = result {
             // Keep the backing pinned if rollback itself cannot finish.
-            self.space.lock().low.unmap_pages(range.clone())?;
-            self.compute_space.lock().low.unmap_pages(range)?;
-            self.publish_mappings(runtime);
+            self.space.lock().low.unmap_pages_gfp(range.clone(), gfp)?;
+            self.compute_space.lock().low.unmap_pages_gfp(range, gfp)?;
+            let runtime = device.runtime.lock();
+            self.publish_mappings(&runtime);
+            drop(runtime);
             self.mappings[index..].rotate_left(1);
             self.mappings.pop();
             return Err(e);
         }
-        self.publish_mappings(runtime);
+        let runtime = device.runtime.lock();
+        self.publish_mappings(&runtime);
         Ok(())
     }
 
@@ -167,19 +188,23 @@ impl Vm {
             obj: m.obj.clone(),
             closing: m.closing,
         });
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
         if right.is_some() {
-            self.mappings.reserve(1, GFP_KERNEL)?;
+            self.mappings.reserve(1, gfp)?;
         }
-        self.space.lock().low.reserve_invalidation()?;
-        self.compute_space.lock().low.reserve_invalidation()?;
+        self.space.lock().low.reserve_invalidation_gfp(gfp)?;
+        self.compute_space.lock().low.reserve_invalidation_gfp(gfp)?;
         // Unbinds may span holes, such as unbound sparse pages. Clear only
         // the parts which mappings cover.
         for m in self.mappings.iter() {
             let start = m.range.start.max(range.start);
             let end = m.range.end.min(range.end);
             if start < end {
-                self.space.lock().low.unmap_pages(start..end)?;
-                self.compute_space.lock().low.unmap_pages(start..end)?;
+                self.space.lock().low.unmap_pages_gfp(start..end, gfp)?;
+                self.compute_space
+                    .lock()
+                    .low
+                    .unmap_pages_gfp(start..end, gfp)?;
             }
         }
         self.publish_mappings(runtime);

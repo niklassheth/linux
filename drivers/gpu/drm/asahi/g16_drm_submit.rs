@@ -299,8 +299,11 @@ impl File {
                     }
                     let support = vm.render_support.clone().ok_or(EIO)?;
                     let pool = vm.render_pool.ok_or(EIO)?;
-                    let pages = vm.space.lock().render_pool_pages(&pool)?;
-                    let start = pool.end().ok_or(EINVAL)?;
+                    let end = pool.end().ok_or(EINVAL)?;
+                    let count = ((end - pool.directory) as usize) / crate::pgtable::UAT_PGSZ;
+                    let mut pages = KVec::with_capacity(count, GFP_KERNEL)?;
+                    vm.space.lock().fill_render_pool_pages(&pool, &mut pages)?;
+                    let start = end;
                     let mut space = vm.compute_space.lock();
                     space
                         .share_render_pool(&pages, vm.space.clone())
@@ -314,10 +317,11 @@ impl File {
                 } else {
                     let buffers =
                         crate::g16_timeline::COMPUTE_POOL_BUFFERS.load(Ordering::Relaxed) as usize;
-                    vm.compute_space
-                        .lock()
-                        .alloc_compute_pool(buffers)
-                        .and_then(|()| {
+                    // End the first `compute_space` guard before acquiring
+                    // `device.runtime` and reacquiring `compute_space` below.
+                    let pool_res = { vm.compute_space.lock().alloc_compute_pool(buffers) };
+                    match pool_res {
+                        Ok(()) => (|| {
                             let support_raw = {
                                 let mut runtime = device.runtime.lock();
                                 if runtime.render_failed() {
@@ -332,7 +336,9 @@ impl File {
                             space.sync();
                             space.report_compute_pool("private");
                             Ok(())
-                        })
+                        })(),
+                        Err(err) => Err(err),
+                    }
                 };
                 if let Err(error) = result {
                     // Allocation failures resume on a retry; anything else

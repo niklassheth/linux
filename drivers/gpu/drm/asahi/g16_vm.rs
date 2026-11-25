@@ -469,20 +469,21 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// The (VA, physical) pages of this render root's FList: its directory,
-    /// descriptor table and buffers.
-    pub(crate) fn render_pool_pages(
+    /// Fill caller-preallocated `out` with the `(VA, physical)` pages of this
+    /// render root's FList (directory, descriptor table, and buffers). Performs
+    /// zero allocations while this live render root is locked.
+    pub(crate) fn fill_render_pool_pages(
         &mut self,
         pool: &crate::g16_render::OperandPool,
-    ) -> Result<KVec<(u64, u64)>> {
+        out: &mut KVec<(u64, u64)>,
+    ) -> Result {
         let end = pool.end().ok_or(EINVAL)?;
-        let mut pages = KVec::new();
         for va in (pool.directory..end).step_by(UAT_PGSZ) {
             if let Some(physical) = self.low.translate(va)? {
-                pages.push((va, physical), GFP_KERNEL)?;
+                out.push_within_capacity((va, physical)).map_err(|_| EIO)?;
             }
         }
-        Ok(pages)
+        Ok(())
     }
 
     /// Map the render pool of this VM (`pages`, from `render_pool_pages` of
@@ -1053,8 +1054,38 @@ impl FirmwareSpace {
         self.table.map_pages(va..end, pa, prot, false)
     }
 
-    pub(crate) fn unmap_external(&mut self, range: core::ops::Range<u64>) -> Result {
-        self.table.unmap_pages(range.clone())?;
+    pub(crate) fn map_external_prealloc_gfp(
+        &mut self,
+        va: u64,
+        pa: u64,
+        size: usize,
+        prot: crate::pgtable::Prot,
+        prealloc: &mut KVec<kernel::types::Owned<Page>>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        if size == 0 || (va | pa | size as u64) & (UAT_PGSZ as u64 - 1) != 0 {
+            return Err(EINVAL);
+        }
+        let end = va.checked_add(size as u64).ok_or(EINVAL)?;
+        for v in (va..end).step_by(UAT_PGSZ) {
+            if self.table.translate(v)?.is_some() {
+                return Err(EEXIST);
+            }
+        }
+        self.external.reserve(1, gfp)?;
+        self.table.reserve_teardown_gfp(gfp)?;
+        self.table.prepare_map_prealloc_gfp(va..end, prealloc, gfp)?;
+        // Retain the whole range before leaf writes so partial failures unwind.
+        self.external.push_within_capacity(va..end).map_err(|_| EIO)?;
+        self.table.map_pages_gfp(va..end, pa, prot, false, gfp)
+    }
+
+    pub(crate) fn unmap_external_gfp(
+        &mut self,
+        range: core::ops::Range<u64>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        self.table.unmap_pages_gfp(range.clone(), gfp)?;
         self.table.publish();
         self.external
             .retain(|r| r.start < range.start || r.end > range.end);

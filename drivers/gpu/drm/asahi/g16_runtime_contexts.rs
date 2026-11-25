@@ -26,21 +26,32 @@ impl Bootstrap {
         if end > g16_fw::TIMESTAMP_BASE + g16_fw::TIMESTAMP_SIZE {
             return Err(ENOSPC);
         }
-        self.timestamp_ranges.push(base..end, GFP_KERNEL)?;
+        self.timestamp_ranges.push(base..end, GFP_NOWAIT | __GFP_NOWARN)?;
         self.timestamp_ranges.sort_unstable_by_key(|r| r.start);
         Ok(base)
     }
 
-    pub(crate) fn map_timestamp(&mut self, address: u64, physical: u64, size: usize) -> Result {
+    pub(crate) fn map_timestamp(
+        &mut self,
+        address: u64,
+        physical: u64,
+        size: usize,
+        prealloc: &mut KVec<kernel::types::Owned<kernel::page::Page>>,
+    ) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
-        self._firmware_space.as_mut().ok_or(EIO)?.map_external(
-            address,
-            physical,
-            size,
-            crate::pgtable::prot::PROT_FW_SHARED_RW,
-        )?;
+        self._firmware_space
+            .as_mut()
+            .ok_or(EIO)?
+            .map_external_prealloc_gfp(
+                address,
+                physical,
+                size,
+                crate::pgtable::prot::PROT_FW_SHARED_RW,
+                prealloc,
+                GFP_NOWAIT | __GFP_NOWARN,
+            )?;
         self._firmware_space.as_ref().ok_or(EIO)?.sync();
         Ok(())
     }
@@ -55,7 +66,7 @@ impl Bootstrap {
         self._firmware_space
             .as_mut()
             .ok_or(EIO)?
-            .unmap_external(range.clone())?;
+            .unmap_external_gfp(range.clone(), GFP_NOWAIT | __GFP_NOWARN)?;
         self.timestamp_ranges.retain(|r| *r != range);
         Ok(())
     }

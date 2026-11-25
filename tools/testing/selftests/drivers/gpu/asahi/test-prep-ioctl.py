@@ -81,9 +81,15 @@ lanes = function(runtime, 'prepare_lanes')
 assert 'if owner.lanes.is_none()' in lanes
 assert 'self.prepare_lanes_prealloc(owner, prealloc)' in function(runtime, 'provision_queue')
 for name in ('publish_support', 'provision_queue', 'provision_tvb', 'tvb_pool',
-             'init_queues', 'recycle_queues'):
+             'init_queues', 'recycle_queues', 'reserve_timestamp',
+             'map_timestamp', 'release_timestamp', 'dump_hang_state',
+             'set_lane_event', 'print_lane_events'):
     assert 'GFP_KERNEL' not in function(runtime, name), f'{name} enters reclaim under runtime lock'
 assert 'GFP_KERNEL' not in function(vm, 'alloc_tvb_blocks')
+assert 'GFP_KERNEL' not in function(vm, 'fill_render_pool_pages')
+assert 'GFP_KERNEL' not in function(drm, 'unmap')
+assert 'prepare_map_prealloc_gfp' in function(drm, 'map')
+assert 'let pool_res = { vm.compute_space.lock().alloc_compute_pool(buffers) };' in submit
 assert 'prepare_map_gfp' in function(vm, 'alloc_tvb_blocks')
 assert 'map_pages_gfp' in function(vm, 'alloc_tvb_blocks')
 assert 'scratch_needs_prealloc' in submit

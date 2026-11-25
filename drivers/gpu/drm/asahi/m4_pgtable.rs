@@ -307,10 +307,6 @@ impl UatPageTable {
         }
     }
 
-    pub(crate) fn reserve_invalidation(&mut self) -> Result {
-        self.reserve_invalidation_gfp(GFP_KERNEL)
-    }
-
     pub(crate) fn reserve_invalidation_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
         self.reserve_invalidations_gfp(1, gfp)
     }
@@ -380,11 +376,39 @@ impl UatPageTable {
         self.with_pages_gfp(iova_range, walk, GFP_KERNEL, cb)
     }
 
+    /// Upper bound on intermediate + leaf page tables needed to map `range`.
+    pub(crate) fn max_tables_for_range(range: &Range<u64>) -> usize {
+        if range.is_empty() {
+            return 0;
+        }
+        let last = range.end - 1;
+        let l0 = ((last >> (UAT_PGBIT + UAT_LVBIT)) - (range.start >> (UAT_PGBIT + UAT_LVBIT)) + 1)
+            as usize;
+        let l1 = ((last >> (UAT_PGBIT + 2 * UAT_LVBIT))
+            - (range.start >> (UAT_PGBIT + 2 * UAT_LVBIT))
+            + 1) as usize;
+        l0.saturating_add(l1)
+    }
+
     fn with_pages_gfp<F>(
         &mut self,
         iova_range: Range<u64>,
         walk: Walk,
         gfp: kernel::alloc::Flags,
+        cb: F,
+    ) -> Result
+    where
+        F: FnMut(u64, &[Pte]) -> Result,
+    {
+        self.with_pages_gfp_opt(iova_range, walk, gfp, None, cb)
+    }
+
+    fn with_pages_gfp_opt<F>(
+        &mut self,
+        iova_range: Range<u64>,
+        walk: Walk,
+        gfp: kernel::alloc::Flags,
+        mut prealloc: Option<&mut KVec<kernel::types::Owned<Page>>>,
         mut cb: F,
     ) -> Result
     where
@@ -456,7 +480,10 @@ impl UatPageTable {
                                 self.mark_dirty_gfp(phys, gfp)?;
                                 self.owned_tables.reserve(1, gfp)?;
                                 self.pending_tables.get_mut().reserve(1, gfp)?;
-                                let pt_page = Page::alloc_page(gfp | __GFP_ZERO)?;
+                                let pt_page = match prealloc.as_deref_mut().and_then(KVec::pop) {
+                                    Some(page) => page,
+                                    None => Page::alloc_page(gfp | __GFP_ZERO)?,
+                                };
                                 pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
                                 let pt_paddr = pt_page.phys();
                                 let dirty_node = kernel::rbtree::RBTreeNode::new(
@@ -571,6 +598,23 @@ impl UatPageTable {
         }
         self.reserve_invalidation_gfp(gfp)?;
         self.with_pages_gfp(iova_range, Walk::Allocate, gfp, |_, _| Ok(()))
+    }
+
+    pub(crate) fn prepare_map_prealloc_gfp(
+        &mut self,
+        iova_range: Range<u64>,
+        prealloc: &mut KVec<kernel::types::Owned<Page>>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        if iova_range.is_empty()
+            || iova_range.start < self.va_range.start
+            || iova_range.end > self.va_range.end
+            || (iova_range.start | iova_range.end) & UAT_PGMSK as u64 != 0
+        {
+            return Err(EINVAL);
+        }
+        self.reserve_invalidation_gfp(gfp)?;
+        self.with_pages_gfp_opt(iova_range, Walk::Allocate, gfp, Some(prealloc), |_, _| Ok(()))
     }
 
     pub(crate) fn map_pages(

@@ -74,11 +74,20 @@ assert 'vm.tvb_ready = true' in submit[tvb:job]
 checks += 1
 
 # Publication finds them: the worker's TVB lookup is the shared helper, and
-# prepare_queues still allocates rings only when they are missing.
+# prepare_queues / provision_queue / provision_tvb / publish_support never
+# enter GFP_KERNEL reclaim under device.runtime.
 assert 'self.tvb_pool(client, support)?' in queue
 lanes = function(runtime, 'prepare_lanes')
 assert 'if owner.lanes.is_none()' in lanes
-assert 'self.prepare_lanes(owner)' in function(runtime, 'provision_queue')
+assert 'self.prepare_lanes_prealloc(owner, prealloc)' in function(runtime, 'provision_queue')
+for name in ('publish_support', 'provision_queue', 'provision_tvb', 'tvb_pool',
+             'init_queues', 'recycle_queues'):
+    assert 'GFP_KERNEL' not in function(runtime, name), f'{name} enters reclaim under runtime lock'
+assert 'GFP_KERNEL' not in function(vm, 'alloc_tvb_blocks')
+assert 'prepare_map_gfp' in function(vm, 'alloc_tvb_blocks')
+assert 'map_pages_gfp' in function(vm, 'alloc_tvb_blocks')
+assert 'scratch_needs_prealloc' in submit
+assert submit.index('scratch_needs_prealloc') < submit.index('let alloc_pages')
 checks += 1
 
 # Retirement and the retire log never allocate: capacity is set at init.

@@ -6,27 +6,6 @@
 use super::*;
 
 impl Bootstrap {
-    /// Give a VM's compute root its own FList before its first compute
-    /// command: `buffers` 2 MiB buffers plus the directory, mapped only into
-    /// this root, and an exclusively leased support object and hardware slot.
-    /// No other client's root can reach this pool's pages, and this root
-    /// reaches no other pool. ENOMEM/ENOSPC leave the root healthy: a retry
-    /// resumes the allocation.
-    pub(crate) fn map_compute_work(
-        &mut self,
-        space: &mut g16_vm::AddressSpace,
-        private: core::ops::Range<u64>,
-        buffers: usize,
-    ) -> Result {
-        space.alloc_compute_pool(buffers)?;
-        let support = Arc::new(self.acquire_compute_support(buffers)?, GFP_KERNEL)?;
-        space.set_compute_support(support)?;
-        space.init_compute_private(private);
-        space.sync();
-        space.report_compute_pool("private");
-        Ok(())
-    }
-
     /// Order a compute Work against other queues in the kernel rather than
     /// with firmware dependency items, which can stall the firmware when a
     /// burst of compute Works carries them (Dota 2's loading screen); Metal's

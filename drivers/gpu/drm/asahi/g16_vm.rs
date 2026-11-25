@@ -559,8 +559,30 @@ impl AddressSpace {
         Ok(scratch)
     }
 
-    pub(crate) fn scratch_max_block(&self, render: bool) -> usize {
-        self.scratch_max_block[usize::from(render)]
+    /// Check whether SUBMIT needs to preallocate backing for a scratch request
+    /// of `size` bytes, and verify arena fit BEFORE allocating any pages.
+    /// Returns `Ok(false)` when existing provisioned or coalesced free space
+    /// already covers `size`, `Err(ENOMEM)` when the remaining arena cannot
+    /// fit `size`, and `Ok(true)` when preallocation is both needed and valid.
+    pub(crate) fn scratch_needs_prealloc(&self, render: bool, size: usize) -> Result<bool> {
+        if size == 0 || size & (UAT_PGSZ - 1) != 0 {
+            return Err(EINVAL);
+        }
+        let index = usize::from(render);
+        if self.scratch_max_block[index] >= size
+            || self.scratch_free[index]
+                .iter()
+                .any(|r| r.end - r.start >= size as u64)
+        {
+            return Ok(false);
+        }
+        let mut arena = if render {
+            self.render_arena.clone()
+        } else {
+            self.compute_arena.clone()
+        };
+        arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?;
+        Ok(true)
     }
 
     /// Pre-provision a contiguous scratch block of `size` bytes from pages
@@ -577,7 +599,11 @@ impl AddressSpace {
             return Err(EINVAL);
         }
         let index = usize::from(render);
-        if self.scratch_max_block[index] >= size {
+        if self.scratch_max_block[index] >= size
+            || self.scratch_free[index]
+                .iter()
+                .any(|r| r.end - r.start >= size as u64)
+        {
             return Ok(());
         }
         let gfp = GFP_NOWAIT | __GFP_NOWARN;
@@ -760,7 +786,9 @@ impl AddressSpace {
         }
         // Capacity was reserved in `lease_scratch`, so retirement and prep
         // rollback never allocate.
+        let merged = (range.end - range.start) as usize;
         free.push_within_capacity(range).map_err(|_| EIO)?;
+        self.scratch_max_block[index] = self.scratch_max_block[index].max(merged);
         self.scratch_users[index] -= 1;
         Ok(())
     }
@@ -774,7 +802,7 @@ impl AddressSpace {
     /// Allocate tiler blocks from the shared private aperture. Before mapping,
     /// failure leaves both existing backing and the arena reservation untouched.
     /// `gfp` comes from the caller: TVB growth must not enter reclaim. Page
-    /// tables for the new range are still allocated by `map_pages`.
+    /// tables and invalidation slots are prepared with `gfp` before committing.
     pub(crate) fn alloc_tvb_blocks(&mut self, count: usize, gfp: kernel::alloc::Flags) -> Result<Option<u64>> {
         if count == 0 || count > crate::g16_tvb::MAX_BLOCKS as usize {
             return Err(EINVAL);
@@ -788,12 +816,20 @@ impl AddressSpace {
         if pages.reserve(count * 8, gfp).is_err() {
             return Ok(None);
         }
+        if self.low.reserve_invalidations_gfp(count, gfp).is_err() {
+            return Ok(None);
+        }
         for block in 0..count {
             let start = base + block as u64 * 0x28000;
             for va in (start..start + 0x28000).step_by(UAT_PGSZ) {
                 if self.pages.get(&va).is_some() || self.low.translate(va)?.is_some() {
                     return Err(EEXIST);
                 }
+            }
+            match self.low.prepare_map_gfp(start..start + 0x20000, gfp) {
+                Ok(()) => {}
+                Err(err) if err == ENOMEM => return Ok(None),
+                Err(err) => return Err(err),
             }
             for va in (start..start + 0x20000).step_by(UAT_PGSZ) {
                 let page = match GpuPage::alloc(gfp | __GFP_ZERO) {
@@ -807,7 +843,8 @@ impl AddressSpace {
                 pages.push_within_capacity(node).map_err(|_| EIO)?;
             }
         }
-        // Transfer every preallocated node before the first fallible PTE edit.
+        // Transfer every preallocated node only after page-table preparation
+        // succeeded with the caller's GFP flags.
         self.render_arena = arena;
         for node in pages {
             self.pages.insert(node);
@@ -816,11 +853,12 @@ impl AddressSpace {
         for block in 0..count {
             let start = base + block as u64 * 0x28000;
             for va in (start..start + 0x20000).step_by(UAT_PGSZ) {
-                self.low.map_pages(
+                self.low.map_pages_gfp(
                     va..va + UAT_PGSZ as u64,
                     self.pages.get(&va).ok_or(EIO)?.phys(),
                     prot::PROT_GPU_SHARED_RW,
                     false,
+                    gfp,
                 )?;
             }
         }
@@ -1026,6 +1064,12 @@ impl FirmwareSpace {
     /// Whether a firmware region starting at `va` is currently retained.
     pub(crate) fn has_region(&self, va: u64) -> bool {
         self.regions.get(&va).is_some()
+    }
+
+    /// Pre-reserve invalidation and dirty-table capacity so later region
+    /// teardown under retirement locks needs zero allocations.
+    pub(crate) fn reserve_teardown_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
+        self.table.reserve_teardown_gfp(gfp)
     }
 
     /// Map preallocated zeroed `GpuPage`s at `va..va+size` using `gfp` for
@@ -1371,10 +1415,6 @@ impl FirmwareSpace {
     }
 
     /// Called only after the context is drained and its hardware roots detached.
-    pub(crate) fn release_region(&mut self, va: u64) -> Result {
-        self.release_region_gfp(va, GFP_KERNEL)
-    }
-
     pub(crate) fn release_region_gfp(&mut self, va: u64, gfp: kernel::alloc::Flags) -> Result {
         let size = self.regions.get(&va).ok_or(EINVAL)?.pages.len() * UAT_PGSZ;
         self.table.unmap_pages_gfp(va..va + size as u64, gfp)?;

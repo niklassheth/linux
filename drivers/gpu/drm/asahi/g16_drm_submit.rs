@@ -256,11 +256,10 @@ impl File {
         let needs_mapping = (renders != 0 && !vm.render_ready) || first_compute;
         if needs_mapping {
             // These reserved namespaces are initialized once before this
-            // VM's first command on the corresponding engine.
-            let mut runtime = device.runtime.lock();
-            if runtime.render_failed() {
-                return Err(EIO);
-            }
+            // VM's first command on the corresponding engine. Keep every
+            // GFP_KERNEL allocation outside `device.runtime.lock()` so reclaim
+            // cannot deadlock against retirement of earlier exported fences;
+            // `acquire_*_support()` performs zero allocations under the lock.
             if (renders != 0 || share) && !vm.render_ready {
                 // Native mesh keeps its qualified full-size pool.
                 let buffers = if vm.native_mode.enabled() {
@@ -270,12 +269,16 @@ impl File {
                 };
                 let pool =
                     render::OperandPool::with_buffers(vm.kernel.start, vm.kernel.end, buffers).ok_or_else(|| reject(format_args!("VM kernel VA {:#x}..{:#x} too small for the render operand pool, or render_operand_buffers={} outside {}..={}", vm.kernel.start, vm.kernel.end, buffers, render::OPERAND_BUFFERS_MIN, render::OPERAND_BUFFERS_MAX)))?;
+                let support_raw = {
+                    let mut runtime = device.runtime.lock();
+                    if runtime.render_failed() {
+                        return Err(EIO);
+                    }
+                    runtime.acquire_render_support(&pool, vm.native_mode)?
+                };
                 // Acquire scarce support and its Arc before editing this
                 // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
-                let support = Arc::new(
-                    runtime.acquire_render_support(&pool, vm.native_mode)?,
-                    GFP_KERNEL,
-                )?;
+                let support = Arc::new(support_raw, GFP_KERNEL)?;
                 if let Err(error) = vm.space.lock()
                     .alloc_render_private(vm.kernel.start, vm.kernel.end, &pool)
                 {
@@ -291,6 +294,9 @@ impl File {
             }
             if first_compute {
                 let result = if share {
+                    if device.runtime.lock().render_failed() {
+                        return Err(EIO);
+                    }
                     let support = vm.render_support.clone().ok_or(EIO)?;
                     let pool = vm.render_pool.ok_or(EIO)?;
                     let pages = vm.space.lock().render_pool_pages(&pool)?;
@@ -308,7 +314,25 @@ impl File {
                 } else {
                     let buffers =
                         crate::g16_timeline::COMPUTE_POOL_BUFFERS.load(Ordering::Relaxed) as usize;
-                    runtime.map_compute_work(&mut vm.compute_space.lock(), vm.kernel.clone(), buffers)
+                    vm.compute_space
+                        .lock()
+                        .alloc_compute_pool(buffers)
+                        .and_then(|()| {
+                            let support_raw = {
+                                let mut runtime = device.runtime.lock();
+                                if runtime.render_failed() {
+                                    return Err(EIO);
+                                }
+                                runtime.acquire_compute_support(buffers)?
+                            };
+                            let support = Arc::new(support_raw, GFP_KERNEL)?;
+                            let mut space = vm.compute_space.lock();
+                            space.set_compute_support(support)?;
+                            space.init_compute_private(vm.kernel.clone());
+                            space.sync();
+                            space.report_compute_pool("private");
+                            Ok(())
+                        })
                 };
                 if let Err(error) = result {
                     // Allocation failures resume on a retry; anything else
@@ -394,10 +418,21 @@ impl File {
                 }
             }
         }
-        let need_render_scratch =
-            max_render_scratch != 0 && vm.space.lock().scratch_max_block(true) < max_render_scratch;
-        let need_compute_scratch =
-            computes != 0 && vm.compute_space.lock().scratch_max_block(false) < 0x28000;
+        let need_queue = !firmware.lock().provisioned();
+        let need_render_scratch = if max_render_scratch != 0 {
+            vm.space
+                .lock()
+                .scratch_needs_prealloc(true, max_render_scratch)?
+        } else {
+            false
+        };
+        let need_compute_scratch = if computes != 0 {
+            vm.compute_space
+                .lock()
+                .scratch_needs_prealloc(false, 0x28000)?
+        } else {
+            false
+        };
 
         let alloc_pages = |count: usize| -> Result<KVec<crate::g16_vm::GpuPage>> {
             let mut pages = KVec::with_capacity(count, GFP_KERNEL)?;
@@ -407,6 +442,16 @@ impl File {
                     .map_err(|_| EIO)?;
             }
             Ok(pages)
+        };
+        let mut prealloc_queue = if need_queue {
+            alloc_pages(crate::g16::Bootstrap::QUEUE_INIT_PAGES)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_tvb = if tvb {
+            alloc_pages(crate::g16_tvb::Tvb::INIT_PAGES)?
+        } else {
+            KVec::new()
         };
         let mut prealloc_render_work = if render_work_add != 0 {
             alloc_pages(render_work_add * 7)?
@@ -443,19 +488,17 @@ impl File {
                 &mut prealloc_compute_scratch,
             )?;
         }
-        if tvb
-            || !firmware.lock().provisioned()
-            || render_work_target != 0
-            || compute_work_target != 0
-        {
+        if tvb || need_queue || render_work_target != 0 || compute_work_target != 0 {
             let mut runtime = device.runtime.lock();
             if runtime.render_failed() {
                 return Err(EIO);
             }
-            runtime.provision_queue(&mut firmware.lock())?;
+            if need_queue {
+                runtime.provision_queue(&mut firmware.lock(), &mut prealloc_queue)?;
+            }
             if tvb {
                 let support = vm.render_support.as_deref().ok_or(EIO)?;
-                runtime.provision_tvb(&mut vm.space.lock(), support)?;
+                runtime.provision_tvb(&mut vm.space.lock(), support, &mut prealloc_tvb)?;
                 vm.tvb_ready = true;
             }
             if render_work_target != 0 {

@@ -59,12 +59,18 @@ pub(crate) struct Tvb {
     next_scene: u32,
 }
 impl Tvb {
+    /// Preallocated firmware pages required by `Tvb::new`:
+    /// 4 (`0x10000`) + 1 (`0x4000`) + 11 (`0x2c000`) = 16 pages.
+    pub(crate) const INIT_PAGES: usize = 16;
+
     pub(crate) fn new(
         fw: &mut FirmwareSpace,
         client: &mut AddressSpace,
         base: u64,
         slot: u64,
+        prealloc: &mut KVec<crate::g16_vm::GpuPage>,
     ) -> Result<Self> {
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
         let mut a = render::Addresses::bootstrap();
         a.buffer_manager_slot = slot;
         a.buffer_manager = base;
@@ -74,11 +80,33 @@ impl Tvb {
         a.buffer_manager_counter = base + 0x10000;
         a.buffer_manager_block_list = base + 0x14000;
         a.buffer_manager_page_list = base + 0x24000;
-        fw.alloc(base, 0x10000, prot::PROT_FW_PRIV_RW)?;
+        fw.reserve_teardown_gfp(gfp)?;
+        client.low.reserve_teardown_gfp(gfp)?;
+        client
+            .low
+            .prepare_map_gfp(0x1000258000..0x1000258000 + 0x1c000, gfp)?;
+        fw.alloc_prealloc_gfp(base, 0x10000, prot::PROT_FW_PRIV_RW, prealloc, gfp)?;
         // The host advances this count while earlier renders are active.
         // Firmware must observe those writes without a cache maintenance pass.
-        fw.alloc(base + 0x10000, 0x4000, prot::PROT_FW_SHARED_RW)?;
-        fw.alloc(base + 0x14000, 0x2c000, prot::PROT_FW_PRIV_RW)?;
+        if let Err(err) =
+            fw.alloc_prealloc_gfp(base + 0x10000, 0x4000, prot::PROT_FW_SHARED_RW, prealloc, gfp)
+        {
+            if fw.has_region(base) {
+                let _ = fw.release_region_gfp(base, gfp);
+            }
+            return Err(err);
+        }
+        if let Err(err) =
+            fw.alloc_prealloc_gfp(base + 0x14000, 0x2c000, prot::PROT_FW_PRIV_RW, prealloc, gfp)
+        {
+            if fw.has_region(base + 0x10000) {
+                let _ = fw.release_region_gfp(base + 0x10000, gfp);
+            }
+            if fw.has_region(base) {
+                let _ = fw.release_region_gfp(base, gfp);
+            }
+            return Err(err);
+        }
         for va in (base..base + 0x40000).step_by(0x4000) {
             fw.init_page(va, |bytes| a.private_page(va, bytes).ok_or(EINVAL))?;
         }
@@ -87,10 +115,10 @@ impl Tvb {
         for offset in (0..0x1c000u64).step_by(0x4000) {
             let va = 0x1000258000 + offset;
             let pa = fw.physical(a.buffer_manager_page_list + offset)?;
-            client.low.unmap_pages(va..va + 0x4000)?;
+            client.low.unmap_pages_gfp(va..va + 0x4000, gfp)?;
             client
                 .low
-                .map_pages(va..va + 0x4000, pa, prot::PROT_GPU_SHARED_RW, false)?;
+                .map_pages_gfp(va..va + 0x4000, pa, prot::PROT_GPU_SHARED_RW, false, gfp)?;
         }
         fw.write_live(
             0xfffffc2000128000 + slot * 16,

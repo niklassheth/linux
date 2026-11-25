@@ -312,7 +312,30 @@ impl UatPageTable {
     }
 
     pub(crate) fn reserve_invalidation_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
-        self.invalidations.get_mut().reserve(1, gfp)?;
+        self.reserve_invalidations_gfp(1, gfp)
+    }
+
+    pub(crate) fn reserve_invalidations_gfp(
+        &mut self,
+        additional: usize,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        self.invalidations.get_mut().reserve(additional, gfp)?;
+        Ok(())
+    }
+
+    /// Pre-reserve invalidation and dirty-table queue capacity so tearing down
+    /// any single Work alias or TVB region (at most two leaf tables) cannot
+    /// allocate when `sync()` / `clear_invalidations()` drains between items.
+    pub(crate) fn reserve_teardown_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
+        let inv = self.invalidations.get_mut();
+        if inv.capacity() < 2 {
+            inv.reserve(2 - inv.len(), gfp)?;
+        }
+        let pending = self.pending_tables.get_mut();
+        if pending.capacity() < 4 {
+            pending.reserve(4 - pending.len(), gfp)?;
+        }
         Ok(())
     }
 
@@ -431,18 +454,27 @@ impl UatPageTable {
                             // Allocate if requested
                             if upte_val == 0 && alloc {
                                 self.mark_dirty_gfp(phys, gfp)?;
+                                self.owned_tables.reserve(1, gfp)?;
+                                self.pending_tables.get_mut().reserve(1, gfp)?;
                                 let pt_page = Page::alloc_page(gfp | __GFP_ZERO)?;
                                 pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
                                 let pt_paddr = pt_page.phys();
-                                self.owned_tables.push(OwnedTable {
+                                let dirty_node = kernel::rbtree::RBTreeNode::new(
+                                    pt_paddr,
+                                    Cell::new(true),
+                                    gfp,
+                                )?;
+                                // Every fallible allocation succeeded; commit
+                                // ownership, dirty tracking for the zeroed new
+                                // table, and the parent PTE atomically.
+                                let _ = Page::into_phys(pt_page);
+                                self.dirty_tables.insert(dirty_node);
+                                let _ = self.pending_tables.get_mut().push_within_capacity(pt_paddr);
+                                let _ = self.owned_tables.push_within_capacity(OwnedTable {
                                     phys: pt_paddr,
                                     parent: phys,
                                     index: upidx,
-                                }, gfp)?;
-                                let _ = Page::into_phys(pt_page);
-                                // The new table's zero entries also need publication.
-                                // Ownership has transferred before this fallible step.
-                                self.mark_dirty_gfp(pt_paddr, gfp)?;
+                                });
                                 upte_val = pt_paddr | PTE_TYPE_LEAF_TABLE;
                                 upte.store(upte_val, Ordering::Relaxed);
                             }

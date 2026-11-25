@@ -55,6 +55,16 @@ impl Bootstrap {
         // Reserve VM and teardown capacities up front so retirement and VM
         // teardown never allocate.
         client.reserve_work_slot_gfp(render, gfp)?;
+        client.low.reserve_teardown_gfp(gfp)?;
+        self._address_space
+            .as_mut()
+            .ok_or(EIO)?
+            .low
+            .reserve_teardown_gfp(gfp)?;
+        self._firmware_space
+            .as_mut()
+            .ok_or(EIO)?
+            .reserve_teardown_gfp(gfp)?;
         let from_free = !self.free_work_va[index].is_empty();
         let va = if from_free {
             *self.free_work_va[index].last().ok_or(EIO)?
@@ -269,11 +279,12 @@ impl Bootstrap {
     /// Firmware may still hold a retired queue's context ID binding, so the
     /// context is destroyed before its storage serves another queue.
     pub(super) fn recycle_queues(&mut self) -> Result {
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
         self.collect_destroyed_queues()?;
         loop {
-            self.destroying_queues.reserve(1, GFP_KERNEL)?;
+            self.destroying_queues.reserve(1, gfp)?;
             self.free_queues
-                .reserve(self.destroying_queues.len() + 1, GFP_KERNEL)?;
+                .reserve(self.destroying_queues.len() + 1, gfp)?;
             let Some(base) = self.retired_queues.lock().pop() else {
                 return Ok(());
             };
@@ -348,18 +359,26 @@ impl Bootstrap {
         Ok(true)
     }
 
+    /// Preallocated firmware pages required for one fresh queue's three lanes:
+    /// 3 * (1 `0x4000` priv + 2 `0x8000` shared) = 9 pages.
+    pub(crate) const QUEUE_INIT_PAGES: usize = 9;
+
     /// Initialize three lanes in `base`, which is newly allocated or recycled.
     /// `identity` is a fresh address whose page index names the queues, so a
-    /// recycled queue never reuses a destroyed queue's identity.
+    /// recycled queue never reuses a destroyed queue's identity. Uses only
+    /// `GFP_NOWAIT | __GFP_NOWARN` + preallocated pages while `device.runtime`
+    /// is held.
     pub(super) fn init_queues(
         &mut self,
         owner: &FirmwareQueues,
         base: u64,
         identity: u64,
         fresh: bool,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
     ) -> Result<[Lane; 3]> {
         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
         use g16_fw::queue as q;
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
 
         let lanes: [Lane; 3] = core::array::from_fn(|stage| {
             let queue = base + stage as u64 * 0xc000;
@@ -376,15 +395,37 @@ impl Bootstrap {
             let total = self.queue_regions + 1;
             let mut retired = self.retired_queues.lock();
             let additional = total - retired.len();
-            retired.reserve(additional, GFP_KERNEL)?;
+            retired.reserve(additional, gfp)?;
             drop(retired);
-            self.queue_regions = total;
         }
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        for lane in &lanes {
+        if fresh {
+            fw.reserve_teardown_gfp(gfp)?;
+        }
+        for (stage, lane) in lanes.iter().enumerate() {
             if fresh {
-                fw.alloc(lane.queue, 0x4000, PROT_FW_PRIV_RW)?;
-                fw.alloc(lane.pointers, 0x8000, PROT_FW_SHARED_RW)?;
+                if let Err(err) =
+                    fw.alloc_prealloc_gfp(lane.queue, 0x4000, PROT_FW_PRIV_RW, prealloc, gfp)
+                        .and_then(|()| {
+                            fw.alloc_prealloc_gfp(
+                                lane.pointers,
+                                0x8000,
+                                PROT_FW_SHARED_RW,
+                                prealloc,
+                                gfp,
+                            )
+                        })
+                {
+                    for prev in &lanes[..=stage] {
+                        if fw.has_region(prev.pointers) {
+                            let _ = fw.release_region_gfp(prev.pointers, gfp);
+                        }
+                        if fw.has_region(prev.queue) {
+                            let _ = fw.release_region_gfp(prev.queue, gfp);
+                        }
+                    }
+                    return Err(err);
+                }
             } else {
                 // Restore a new allocation's zeroed state, including the
                 // firmware-private words after each queue descriptor.
@@ -392,6 +433,10 @@ impl Bootstrap {
                 fw.zero_live(lane.pointers, 0x8000)?;
             }
         }
+        if fresh {
+            self.queue_regions += 1;
+        }
+        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         // A notifier list and GPU context belong to the public queue,
         // shared only by its own vertex, fragment and compute lanes.
         let jobs = base + 0x4100;
@@ -450,33 +495,36 @@ impl Bootstrap {
         Ok(lanes)
     }
 
-    /// For the SUBMIT ioctl: allocate the queue's firmware rings now rather
-    /// than at its first publication.
-    pub(crate) fn provision_queue(&mut self, owner: &mut FirmwareQueues) -> Result {
+    /// For the SUBMIT ioctl: install the queue's firmware rings using pages
+    /// preallocated outside retirement locks (`GFP_NOWAIT | __GFP_NOWARN` inside).
+    pub(crate) fn provision_queue(
+        &mut self,
+        owner: &mut FirmwareQueues,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
+    ) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
-        self.prepare_lanes(owner)
+        self.prepare_lanes_prealloc(owner, prealloc)
     }
 
-    /// For the SUBMIT ioctl: create the VM root's TVB pool now rather than
-    /// at its first render publication.
-    pub(crate) fn provision_tvb(&mut self, client: &mut g16_vm::AddressSpace, support: &Support) -> Result {
+    /// For the SUBMIT ioctl: create the VM root's TVB pool using pages
+    /// preallocated outside retirement locks (`GFP_NOWAIT | __GFP_NOWARN` inside).
+    pub(crate) fn provision_tvb(
+        &mut self,
+        client: &mut g16_vm::AddressSpace,
+        support: &Support,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
+    ) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
-        self.tvb_pool(client, support).map(|_| ())
-    }
-
-    /// The index of the client root's TVB pool, created on first use. Not
-    /// inlined: its creation path would otherwise enlarge the job worker's frame.
-    #[inline(never)]
-    pub(super) fn tvb_pool(&mut self, client: &mut g16_vm::AddressSpace, support: &Support) -> Result<usize> {
         let root = client.roots().low;
-        if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root) {
-            return Ok(index);
+        if self.tvb_pools.iter().any(|p| p.root == root) {
+            return Ok(());
         }
-        self.tvb_pools.reserve(1, GFP_KERNEL)?;
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
+        self.tvb_pools.reserve(1, gfp)?;
         let base = self.next_object_va;
         self.next_object_va = base.checked_add(0x44000).ok_or(ENOSPC)?;
         let pool = crate::g16_tvb::Tvb::new(
@@ -484,9 +532,21 @@ impl Bootstrap {
             client,
             base,
             7 + u64::from(support.index),
+            prealloc,
         )?;
         self.tvb_pools.push_within_capacity(pool).map_err(|_| ENOMEM)?;
-        Ok(self.tvb_pools.len() - 1)
+        Ok(())
+    }
+
+    /// The index of the client root's TVB pool, provisioned by SUBMIT.
+    /// Pure lookup with zero allocations on the fence-signalling worker.
+    #[inline(never)]
+    pub(super) fn tvb_pool(&mut self, client: &mut g16_vm::AddressSpace, _support: &Support) -> Result<usize> {
+        let root = client.roots().low;
+        self.tvb_pools
+            .iter()
+            .position(|p| p.root == root)
+            .ok_or(EIO)
     }
 
     pub(super) fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
@@ -494,21 +554,32 @@ impl Bootstrap {
         self.prepare_events(owner)
     }
 
-    /// The queue's firmware rings, allocated once per public queue. Not
-    /// inlined, like `tvb_pool`: it is cold and its frame is large.
+    /// The queue's firmware rings, provisioned by SUBMIT. Not inlined, like
+    /// `tvb_pool`: it is cold and its frame is large.
     #[inline(never)]
     pub(super) fn prepare_lanes(&mut self, owner: &mut FirmwareQueues) -> Result {
+        if owner.lanes.is_none() {
+            let mut empty = KVec::new();
+            self.prepare_lanes_prealloc(owner, &mut empty)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn prepare_lanes_prealloc(
+        &mut self,
+        owner: &mut FirmwareQueues,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
+    ) -> Result {
         if owner.lanes.is_none() {
             self.recycle_queues()?;
             let identity = self.next_object_va;
             self.next_object_va = identity.checked_add(0x24000).ok_or(ENOSPC)?;
             let recycled = self.free_queues.pop();
             let base = recycled.unwrap_or(identity);
-            let lanes = match self.init_queues(owner, base, identity, recycled.is_none()) {
+            let lanes = match self.init_queues(owner, base, identity, recycled.is_none(), prealloc) {
                 Ok(lanes) => lanes,
                 Err(error) => {
-                    // A failed fresh allocation keeps any partial regions
-                    // owned, like a failed Work refill; recycled storage returns.
                     if let Some(base) = recycled {
                         let _ = self.free_queues.push_within_capacity(base);
                     }

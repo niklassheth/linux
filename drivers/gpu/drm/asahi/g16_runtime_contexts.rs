@@ -100,13 +100,11 @@ impl Bootstrap {
 
     /// Write a fresh support header (the rest of its page zero) and zero the
     /// lease's shared state: a reused lease starts its submitted-Work count
-    /// afresh.
+    /// afresh. Zero-allocation so it can run under `device.runtime`.
     fn publish_support(&mut self, lease: &Support, header: &[u8; 0x100]) -> Result {
-        let mut page = KVec::new();
-        page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
-        page[..0x100].copy_from_slice(header);
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        fw.write_live(lease.address(), &page)?;
+        fw.zero_live(lease.address(), 0x4000)?;
+        fw.write_live(lease.address(), header)?;
         fw.zero_live(lease.shared_state(), 0x4000)?;
         Ok(())
     }
@@ -287,6 +285,10 @@ impl Bootstrap {
                 if space.has_pending_tables() {
                     space.sync();
                 }
+                // `space` was already detached from every hardware ASID above,
+                // so clearing its queued invalidations preserves pre-reserved
+                // teardown capacity across slots.
+                space.low.clear_invalidations();
                 client_unmap?;
                 let mut dev_unmap = Ok(());
                 for addr in (alias_range.start..alias_range.end).step_by(pgsz) {
@@ -324,14 +326,28 @@ impl Bootstrap {
             }
         }
         if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root_low) {
+            let gfp = GFP_NOWAIT | __GFP_NOWARN;
             let a = self.tvb_pools[index].addresses;
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             fw.write_live(0xfffffc2000128000 + a.buffer_manager_slot * 16, &[0; 16])?;
             // The pool is three regions: control pages, the shared counter
-            // and the block and page lists (see Tvb::new).
-            fw.release_region(a.buffer_manager)?;
-            fw.release_region(a.buffer_manager_counter)?;
-            fw.release_region(a.buffer_manager_block_list)?;
+            // and the block and page lists (see Tvb::new). Guard each region
+            // so a partial teardown can resume idempotently under NOWAIT.
+            for region in [
+                a.buffer_manager,
+                a.buffer_manager_counter,
+                a.buffer_manager_block_list,
+            ] {
+                if fw.has_region(region) {
+                    fw.release_region_gfp(region, gfp)?;
+                }
+            }
+            if fw.has_region(a.buffer_manager)
+                || fw.has_region(a.buffer_manager_counter)
+                || fw.has_region(a.buffer_manager_block_list)
+            {
+                return Err(EIO);
+            }
             self.tvb_pools.swap_remove(index);
         }
         Ok(())

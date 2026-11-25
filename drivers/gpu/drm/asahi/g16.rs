@@ -281,8 +281,11 @@ pub(crate) struct Bootstrap {
     /// 32 simultaneous active queues (96 lanes) without overflowing.
     pub(crate) last_scan: KBox<crate::g16_snapshot::WordSnapshot<128>>,
     queue_regions: usize,
-    /// Storage whose context destruction is published, with its control target.
-    destroying_queues: KVec<(u64, u32)>,
+    /// Monotonic 64-bit epoch tracker for the 256-entry control channel.
+    control_ring: crate::g16_control_ring::ControlRing,
+    /// Storage whose context destruction is published, with its monotonic
+    /// control-channel acknowledgment epoch.
+    destroying_queues: KVec<(u64, u64)>,
     free_queues: KVec<u64>,
     render_failed: bool,
     flights: KVec<render_runtime::Flight>,
@@ -851,6 +854,7 @@ impl Bootstrap {
             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
             last_scan: KBox::zeroed(GFP_KERNEL)?,
             queue_regions: 0,
+            control_ring: crate::g16_control_ring::ControlRing::new(0),
             destroying_queues: KVec::new(),
             free_queues: KVec::new(),
             render_failed: false,
@@ -1046,6 +1050,7 @@ impl Bootstrap {
                 sgx.as_view().relaxed().read32(0xd60060),
             );
             if cursors == (3, 3, 3) && firmware.read_u32(0xffff_fc20_0003_f19c)? == 1 {
+                self.control_ring = crate::g16_control_ring::ControlRing::new(3);
                 dev_info!(
                     dev,
                     "G16: opening control registration retired; cursors {:?}\n",

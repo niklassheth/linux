@@ -10,6 +10,7 @@ mod g16;
 mod g16_alloc;
 mod g16_compute;
 mod g16_context_slot;
+mod g16_control_ring;
 mod g16_deferred;
 mod g16_drain;
 mod g16_drm;

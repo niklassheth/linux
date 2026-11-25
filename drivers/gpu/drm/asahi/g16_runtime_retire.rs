@@ -186,8 +186,14 @@ impl Bootstrap {
         let mut channel_state: [Option<[u32; 2]>; 12] = [None; 12];
         let control_replied = {
             let guard = self._sgx.try_access().ok_or(ENODEV)?;
+            let head = guard.try_read32(0xd640c0)?;
+            let ack = guard.try_read32(0xd640c8)?;
             let tail = guard.try_read32(0xd60060)?;
-            guard.try_read32(0xd640c0)? == tail && guard.try_read32(0xd640c8)? == tail
+            drop(guard);
+            self.control_ring
+                .observe(head, ack, tail)
+                .map_err(|_| EIO)?;
+            self.control_ring.drained()
         };
         // Preallocated to MAX_FLIGHTS, which bounds the flights scanned here.
         if self.retired.capacity() < self.flights.len() {
@@ -655,13 +661,13 @@ impl Bootstrap {
             let ack = sgx.try_read32(0xd640c8)?;
             let tail = sgx.try_read32(0xd60060)?;
             drop(guard);
-            if head >= 256 || ack >= 256 || tail >= 256 {
-                return Err(EIO);
-            }
-            let successor = (tail + 1) & 255;
-            if successor == head || successor == ack {
+            self.control_ring
+                .observe(head, ack, tail)
+                .map_err(|_| EIO)?;
+            if !self.control_ring.has_room() {
                 break;
             }
+            let (slot, successor) = self.control_ring.next_slot();
             let mut reply = [0u8; 64];
             if kind == 6 {
                 let (w1, w2, w3, subpipe, halt_count) = {
@@ -776,12 +782,13 @@ impl Bootstrap {
             }
             crate::mem::sync();
             let control = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS).channels[12].ring;
-            fw.write_live(control + u64::from(tail) * 64, &reply)?;
+            fw.write_live(control + u64::from(slot) * 64, &reply)?;
             crate::mem::sync();
             fw.write_live(STATE, &next.to_le_bytes())?;
             let guard = self._sgx.try_access().ok_or(ENODEV)?;
             guard.try_write32(successor, 0xd60060)?;
             drop(guard);
+            let _ = self.control_ring.commit();
             crate::mem::sync();
             self._rtkit
                 .as_mut()

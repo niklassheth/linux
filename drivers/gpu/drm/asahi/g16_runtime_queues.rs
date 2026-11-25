@@ -192,7 +192,8 @@ impl Bootstrap {
     }
 
     /// Collect storage whose context destruction firmware has consumed. Retire
-    /// polls this too, so the half-ring comparison sees each target promptly.
+    /// polls this too. Monotonic 64-bit control epochs eliminate modular
+    /// half-ring ambiguity even when collection trails other control traffic.
     /// It must not allocate: publication reserved each free-list slot.
     pub(super) fn collect_destroyed_queues(&mut self) -> Result {
         if self.destroying_queues.is_empty() {
@@ -201,14 +202,15 @@ impl Bootstrap {
         let guard = self._sgx.try_access().ok_or(ENODEV)?;
         let read = guard.try_read32(0xd640c0)?;
         let done = guard.try_read32(0xd640c8)?;
+        let tail = guard.try_read32(0xd60060)?;
         drop(guard);
-        if read >= 256 || done >= 256 {
-            return Err(EIO);
-        }
+        self.control_ring
+            .observe(read, done, tail)
+            .map_err(|_| EIO)?;
         let mut i = 0;
         while i < self.destroying_queues.len() {
             let (base, target) = self.destroying_queues[i];
-            if reached(read, target, 256) && reached(done, target, 256) {
+            if self.control_ring.reached(target) {
                 self.destroying_queues.swap_remove(i);
                 self.free_queues
                     .push_within_capacity(base)
@@ -234,7 +236,8 @@ impl Bootstrap {
             match self.destroy_queue_context(base)? {
                 Some(target) => self.destroying_queues.push((base, target), GFP_KERNEL)?,
                 None => {
-                    // The control ring is full. Its slot was just vacated.
+                    // The control ring reached its half-ring in-flight bound.
+                    // Its slot in retired_queues was just vacated.
                     let _ = self.retired_queues.lock().push_within_capacity(base);
                     return Ok(());
                 }
@@ -243,8 +246,9 @@ impl Bootstrap {
     }
 
     /// Publish a context destruction without waiting, as growth replies are.
-    /// Returns the control cursor that acknowledges it, or None when full.
-    pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u32>> {
+    /// Returns the monotonic control epoch that acknowledges it, or None when
+    /// the half-ring in-flight window is full.
+    pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u64>> {
         let context = base + 0x4140;
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         let ids = fw.read_u32(context)?;
@@ -259,27 +263,28 @@ impl Bootstrap {
         let ack = guard.try_read32(0xd640c8)?;
         let tail = guard.try_read32(0xd60060)?;
         drop(guard);
-        if head >= 256 || ack >= 256 || tail >= 256 {
-            return Err(EIO);
-        }
-        let successor = (tail + 1) & 255;
-        if successor == head || successor == ack {
+        self.control_ring
+            .observe(head, ack, tail)
+            .map_err(|_| EIO)?;
+        if !self.control_ring.has_room() {
             return Ok(None);
         }
+        let (slot, successor) = self.control_ring.next_slot();
         let control = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS).channels[12].ring;
         fw.write_live(
-            control + u64::from(tail) * 64,
+            control + u64::from(slot) * 64,
             &g16_fw::destroy_context(context, fields),
         )?;
         crate::mem::sync();
         let guard = self._sgx.try_access().ok_or(ENODEV)?;
         guard.try_write32(successor, 0xd60060)?;
         drop(guard);
+        let target = self.control_ring.commit();
         crate::mem::sync();
         self._rtkit
             .as_mut()
             .send_message(0x21, 0x0084_0000_0000_0011)?;
-        Ok(Some(successor))
+        Ok(Some(target))
     }
 
     /// Initialize three lanes in `base`, which is newly allocated or recycled.

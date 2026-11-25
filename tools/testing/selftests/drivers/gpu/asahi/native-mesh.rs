@@ -815,6 +815,12 @@ impl ScratchVm {
         self.writes.push((va, data.to_vec()));
         Ok(())
     }
+    fn release_scratch(&mut self, _: Scratch) -> Result {
+        Ok(())
+    }
+    fn has_pending_tables(&self) -> bool {
+        true
+    }
     fn sync(&self) {}
     /* PREPARE_RENDER */
 }

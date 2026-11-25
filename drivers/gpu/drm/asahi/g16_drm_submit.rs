@@ -405,15 +405,20 @@ impl File {
         };
         let mut max_render_scratch = 0usize;
         if renders != 0 {
+            let producer_pending = data.in_sync_count != 0 || pending_jobs != 0;
             for p in &parameters {
                 if let Parameters::Render(r) = p {
                     if let Some((tilemap, tpc)) = r.scratch_sizes() {
+                        // When no producer is pending, the CPU already wrote
+                        // the encoder header so the native check is exact; when
+                        // a producer may still write it, reserve mesh headroom.
                         let mesh_extra = if vm.native_mode.enabled()
-                            && vm
-                                .space
-                                .lock()
-                                .command_word(r.encoder)
-                                .is_ok_and(crate::g16_mesh::may_be_native)
+                            && (producer_pending
+                                || vm
+                                    .space
+                                    .lock()
+                                    .command_word(r.encoder)
+                                    .is_ok_and(crate::g16_mesh::may_be_native))
                         {
                             crate::g16_mesh::Profile::PAYLOAD_BYTES
                         } else {

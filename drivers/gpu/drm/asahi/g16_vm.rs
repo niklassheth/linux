@@ -486,7 +486,7 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Map the render pool of this VM (`pages`, from `render_pool_pages` of
+    /// Map the render pool of this VM (`pages`, from `fill_render_pool_pages` of
     /// `owner`) into this compute root at the same VAs, so compute Works can
     /// use the render support object. `owner` is retained with the mappings.
     pub(crate) fn share_render_pool(
@@ -1105,6 +1105,10 @@ impl FirmwareSpace {
     /// teardown under retirement locks needs zero allocations.
     pub(crate) fn reserve_teardown_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
         self.table.reserve_teardown_gfp(gfp)
+    }
+
+    pub(crate) fn missing_tables_for_range(&self, range: &core::ops::Range<u64>) -> usize {
+        self.table.missing_tables_for_range(range)
     }
 
     /// Map preallocated zeroed `GpuPage`s at `va..va+size` using `gfp` for

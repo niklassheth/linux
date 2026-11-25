@@ -7,7 +7,7 @@
 use super::*;
 
 impl Bootstrap {
-    pub(crate) fn reserve_timestamp(&mut self, size: u64) -> Result<u64> {
+    fn next_timestamp_range(&self, size: u64) -> Result<core::ops::Range<u64>> {
         if self.render_failed {
             return Err(EIO);
         }
@@ -26,7 +26,27 @@ impl Bootstrap {
         if end > g16_fw::TIMESTAMP_BASE + g16_fw::TIMESTAMP_SIZE {
             return Err(ENOSPC);
         }
-        self.timestamp_ranges.push(base..end, GFP_NOWAIT | __GFP_NOWARN)?;
+        Ok(base..end)
+    }
+
+    /// Exact read-only count of firmware page tables currently missing for the
+    /// next timestamp aperture slot of `size` bytes (0 on a populated tree).
+    pub(crate) fn timestamp_tables_needed(&self, size: u64) -> Result<usize> {
+        let range = self.next_timestamp_range(size)?;
+        Ok(self
+            ._firmware_space
+            .as_ref()
+            .ok_or(EIO)?
+            .missing_tables_for_range(&range))
+    }
+
+    pub(crate) fn reserve_timestamp(&mut self, size: u64) -> Result<u64> {
+        if self.render_failed {
+            return Err(EIO);
+        }
+        let range = self.next_timestamp_range(size)?;
+        let base = range.start;
+        self.timestamp_ranges.push(range, GFP_NOWAIT | __GFP_NOWARN)?;
         self.timestamp_ranges.sort_unstable_by_key(|r| r.start);
         Ok(base)
     }

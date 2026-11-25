@@ -88,6 +88,9 @@ for name in ('publish_support', 'provision_queue', 'provision_tvb', 'tvb_pool',
 assert 'GFP_KERNEL' not in function(vm, 'alloc_tvb_blocks')
 assert 'GFP_KERNEL' not in function(vm, 'fill_render_pool_pages')
 assert 'GFP_KERNEL' not in function(drm, 'unmap')
+assert 'self.render_broken = true;' in function(drm, 'map')
+assert 'self.render_broken = true;' in function(drm, 'unmap')
+assert 'missing_tables_for_range' in function(drm, 'map')
 assert 'prepare_map_prealloc_gfp' in function(drm, 'map')
 assert 'let pool_res = { vm.compute_space.lock().alloc_compute_pool(buffers) };' in submit
 assert 'prepare_map_gfp' in function(vm, 'alloc_tvb_blocks')

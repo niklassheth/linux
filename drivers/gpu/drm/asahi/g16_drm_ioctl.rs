@@ -93,6 +93,7 @@ impl File {
             Vm {
                 id,
                 visible: true,
+                destroying: false,
                 kernel: data.kernel_start..data.kernel_end,
                 space,
                 compute_space,
@@ -140,24 +141,45 @@ impl File {
         // Withdraw the public VM handle immediately before checking queues or
         // unlocking to drain. Existing queues retain the VM until the last
         // queue is destroyed; no concurrent QUEUE_CREATE can attach during
-        // drain, and a partial detach failure leaves the VM unreachable.
+        // drain, and `destroying` guarantees a single teardown owner.
         state.vms[index].visible = false;
         if !state.queues.iter().any(|q| q.vm == data.vm_id) {
+            if state.vms[index].destroying {
+                return Ok(0);
+            }
+            state.vms[index].destroying = true;
             // No queue can submit to this VM any more, so only its own
             // pending work can still use its tables. Other clients' work
             // never touches them: don't wait for the whole device.
             let (relocked, result, _) = drain_vm(state, data.vm_id, 35000, false, &inner.drained);
             state = relocked;
-            result?;
-            let index = state
+            if let Err(err) = result {
+                // Pre-detach drain failed: restore visibility so the caller
+                // can retry VM_DESTROY cleanly.
+                if let Some(vm) = state
+                    .vms
+                    .iter_mut()
+                    .find(|v| v.id == data.vm_id && v.destroying)
+                {
+                    vm.destroying = false;
+                    vm.visible = true;
+                }
+                return Err(err);
+            }
+            let Some(index) = state
                 .vms
                 .iter()
-                .position(|v| v.id == data.vm_id && !v.visible)
-                .ok_or(ENOENT)?;
-            if !state.queues.iter().any(|q| q.vm == data.vm_id) {
-                state.vms[index].detach(&mut device.runtime.lock())?;
-                state.vms.swap_remove(index);
+                .position(|v| v.id == data.vm_id && v.destroying)
+            else {
+                return Ok(0);
+            };
+            if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
+                // Destructive teardown already started: keep `visible = false`
+                // and release ownership so File::drop() finishes cleanup.
+                state.vms[index].destroying = false;
+                return Err(err);
             }
+            state.vms.swap_remove(index);
         }
         Ok(0)
     }
@@ -284,20 +306,38 @@ impl File {
         let vm_id = queue.vm;
         drop(queue);
         let mut state = inner.state.lock();
-        let last = |state: &FileState| {
-            !state.queues.iter().any(|q| q.vm == vm_id)
-                && state.vms.iter().any(|v| v.id == vm_id && !v.visible)
-        };
-        if last(&state) {
-            // The last queue of an already destroyed VM: detach it once the
-            // VM's own work has finished, never waiting for other clients.
-            let (relocked, result, _) = drain_vm(state, vm_id, 35000, false, &inner.drained);
-            state = relocked;
-            result?;
-            if last(&state) {
-                let index = state.vms.iter().position(|v| v.id == vm_id).ok_or(ENOENT)?;
-                state.vms[index].detach(&mut device.runtime.lock())?;
-                state.vms.swap_remove(index);
+        if !state.queues.iter().any(|q| q.vm == vm_id) {
+            if let Some(idx) = state
+                .vms
+                .iter()
+                .position(|v| v.id == vm_id && !v.visible && !v.destroying)
+            {
+                // The last queue of an already destroyed VM: claim single
+                // teardown ownership and detach once this VM's work finishes.
+                state.vms[idx].destroying = true;
+                let (relocked, result, _) = drain_vm(state, vm_id, 35000, false, &inner.drained);
+                state = relocked;
+                if let Err(err) = result {
+                    if let Some(vm) = state
+                        .vms
+                        .iter_mut()
+                        .find(|v| v.id == vm_id && v.destroying)
+                    {
+                        vm.destroying = false;
+                    }
+                    return Err(err);
+                }
+                if let Some(index) = state
+                    .vms
+                    .iter()
+                    .position(|v| v.id == vm_id && v.destroying)
+                {
+                    if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
+                        state.vms[index].destroying = false;
+                        return Err(err);
+                    }
+                    state.vms.swap_remove(index);
+                }
             }
         }
         Ok(0)
@@ -337,10 +377,16 @@ impl File {
                 let extent = ((data.offset + data.range + 0x3fff) & !0x3fff) - first;
                 state.timestamps.reserve(1, GFP_KERNEL)?;
                 state.retained_timestamps.reserve(1, GFP_KERNEL)?;
-                // Preallocate intermediate firmware page tables outside
-                // `device.runtime.lock()` so mapping never enters reclaim.
-                let pt_count =
-                    crate::pgtable::UatPageTable::max_tables_for_range(&(0..extent)) + 2;
+                // Count only missing firmware page tables for the next free
+                // timestamp slot (0 on a populated tree), then preallocate
+                // outside `device.runtime.lock()` so mapping never enters reclaim.
+                let pt_count = {
+                    let runtime = device.runtime.lock();
+                    if device.failed.load(Ordering::Acquire) {
+                        return Err(EIO);
+                    }
+                    runtime.timestamp_tables_needed(extent)?
+                };
                 let mut pt_pages = KVec::with_capacity(pt_count, GFP_KERNEL)?;
                 for _ in 0..pt_count {
                     pt_pages

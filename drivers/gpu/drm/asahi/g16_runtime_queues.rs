@@ -282,6 +282,9 @@ impl Bootstrap {
         let gfp = GFP_NOWAIT | __GFP_NOWARN;
         self.collect_destroyed_queues()?;
         loop {
+            if self.retired_queues.lock().is_empty() {
+                return Ok(());
+            }
             self.destroying_queues.reserve(1, gfp)?;
             self.free_queues
                 .reserve(self.destroying_queues.len() + 1, gfp)?;
@@ -507,7 +510,13 @@ impl Bootstrap {
         if owner.lanes.is_some() {
             return Ok(true);
         }
-        self.recycle_queues()?;
+        // Collect already-acknowledged destroys first (zero allocations) so an
+        // available recycled queue is claimed without touching destroy-queue
+        // vector reservations.
+        self.collect_destroyed_queues()?;
+        if self.free_queues.is_empty() {
+            let _ = self.recycle_queues();
+        }
         if self.free_queues.is_empty() {
             return Ok(false);
         }
@@ -593,7 +602,10 @@ impl Bootstrap {
         prealloc: &mut KVec<g16_vm::GpuPage>,
     ) -> Result {
         if owner.lanes.is_none() {
-            self.recycle_queues()?;
+            self.collect_destroyed_queues()?;
+            if self.free_queues.is_empty() {
+                self.recycle_queues()?;
+            }
             let identity = self.next_object_va;
             self.next_object_va = identity.checked_add(0x24000).ok_or(ENOSPC)?;
             let recycled = self.free_queues.pop();

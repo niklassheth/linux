@@ -76,21 +76,22 @@ impl Vm {
         if va != range.end {
             return Err(EINVAL);
         }
-        // Preallocate intermediate page tables outside VM and runtime locks so
-        // mapping into a live VM never enters GFP_KERNEL reclaim under locks
-        // needed by fence retirement.
-        let pt_count = crate::pgtable::UatPageTable::max_tables_for_range(&range);
-        let alloc_pt = || -> Result<KVec<kernel::types::Owned<kernel::page::Page>>> {
-            let mut pages = KVec::with_capacity(pt_count, GFP_KERNEL)?;
-            for _ in 0..pt_count {
+        // Count only missing page tables per root so binds on a populated tree
+        // allocate zero pages, then preallocate outside VM and runtime locks
+        // so mapping never enters GFP_KERNEL reclaim under retirement locks.
+        let pt_space_need = self.space.lock().low.missing_tables_for_range(&range);
+        let pt_compute_need = self.compute_space.lock().low.missing_tables_for_range(&range);
+        let alloc_pt = |count: usize| -> Result<KVec<kernel::types::Owned<kernel::page::Page>>> {
+            let mut pages = KVec::with_capacity(count, GFP_KERNEL)?;
+            for _ in 0..count {
                 pages
                     .push_within_capacity(kernel::page::Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?)
                     .map_err(|_| EIO)?;
             }
             Ok(pages)
         };
-        let mut pt_space = alloc_pt()?;
-        let mut pt_compute = alloc_pt()?;
+        let mut pt_space = alloc_pt(pt_space_need)?;
+        let mut pt_compute = alloc_pt(pt_compute_need)?;
         self.mappings.push(
             Mapping {
                 range: range.clone(),
@@ -107,15 +108,20 @@ impl Vm {
         let index = self.mappings[..last].partition_point(|m| m.range.start < range.start);
         self.mappings[index..].rotate_right(1);
         let gfp = GFP_NOWAIT | __GFP_NOWARN;
+        let mut space_edited = false;
+        let mut compute_edited = false;
         let result = (|| {
             // The shim uses distinct roots for the fixed render and compute
             // private namespaces. Both views share the caller's GEM pages.
-            for (view, pt) in [(&self.space, &mut pt_space), (&self.compute_space, &mut pt_compute)]
-            {
+            for (view, pt, edited) in [
+                (&self.space, &mut pt_space, &mut space_edited),
+                (&self.compute_space, &mut pt_compute, &mut compute_edited),
+            ] {
                 let mut space = view.lock();
                 space.low.prepare_map_prealloc_gfp(range.clone(), pt, gfp)?;
                 for &(start, end, pa) in &chunks {
                     space.low.map_pages_gfp(start..end, pa, access, single, gfp)?;
+                    *edited = true;
                     let last = if single {
                         pa
                     } else {
@@ -131,14 +137,39 @@ impl Vm {
             Ok(())
         })();
         if let Err(e) = result {
-            // Keep the backing pinned if rollback itself cannot finish.
-            self.space.lock().low.unmap_pages_gfp(range.clone(), gfp)?;
-            self.compute_space.lock().low.unmap_pages_gfp(range, gfp)?;
+            // Roll back any root whose PTEs were touched. If rollback itself
+            // fails, keep the backing pinned AND quarantine this VM so SUBMIT
+            // never validates a mapping whose roots are inconsistent.
+            let mut clean = true;
+            if space_edited
+                && self
+                    .space
+                    .lock()
+                    .low
+                    .unmap_pages_gfp(range.clone(), gfp)
+                    .is_err()
+            {
+                clean = false;
+            }
+            if compute_edited
+                && self
+                    .compute_space
+                    .lock()
+                    .low
+                    .unmap_pages_gfp(range, gfp)
+                    .is_err()
+            {
+                clean = false;
+            }
             let runtime = device.runtime.lock();
             self.publish_mappings(&runtime);
             drop(runtime);
-            self.mappings[index..].rotate_left(1);
-            self.mappings.pop();
+            if clean {
+                self.mappings[index..].rotate_left(1);
+                self.mappings.pop();
+            } else {
+                self.render_broken = true;
+            }
             return Err(e);
         }
         let runtime = device.runtime.lock();
@@ -194,19 +225,59 @@ impl Vm {
         if right.is_some() {
             self.mappings.reserve(1, gfp)?;
         }
-        self.space.lock().low.reserve_invalidation_gfp(gfp)?;
-        self.compute_space.lock().low.reserve_invalidation_gfp(gfp)?;
-        // Unbinds may span holes, such as unbound sparse pages. Clear only
-        // the parts which mappings cover.
+        // Pre-reserve invalidation and dirty-table capacity for every disjoint
+        // overlapping interval before editing the first PTE.
+        let mut inv_count = 0usize;
+        let mut leaf_count = 0usize;
         for m in self.mappings.iter() {
             let start = m.range.start.max(range.start);
             let end = m.range.end.min(range.end);
             if start < end {
-                self.space.lock().low.unmap_pages_gfp(start..end, gfp)?;
-                self.compute_space
+                inv_count += 1;
+                leaf_count = leaf_count.saturating_add(
+                    crate::pgtable::UatPageTable::max_tables_for_range(&(start..end)),
+                );
+            }
+        }
+        if inv_count != 0 {
+            self.space.lock().low.reserve_invalidations_gfp(inv_count, gfp)?;
+            self.space.lock().low.reserve_pending_tables_gfp(leaf_count, gfp)?;
+            self.compute_space
+                .lock()
+                .low
+                .reserve_invalidations_gfp(inv_count, gfp)?;
+            self.compute_space
+                .lock()
+                .low
+                .reserve_pending_tables_gfp(leaf_count, gfp)?;
+        }
+        // Unbinds may span holes, such as unbound sparse pages. Clear only
+        // the parts which mappings cover. If an error occurs after any PTE was
+        // cleared, publish what changed and quarantine the VM so SUBMIT cannot
+        // approve jobs against inconsistent roots while backing stays pinned.
+        let mut edited = false;
+        for m in self.mappings.iter() {
+            let start = m.range.start.max(range.start);
+            let end = m.range.end.min(range.end);
+            if start < end {
+                if let Err(err) = self.space.lock().low.unmap_pages_gfp(start..end, gfp) {
+                    if edited {
+                        self.publish_mappings(runtime);
+                        self.render_broken = true;
+                    }
+                    return Err(err);
+                }
+                edited = true;
+                if let Err(err) = self
+                    .compute_space
                     .lock()
                     .low
-                    .unmap_pages_gfp(start..end, gfp)?;
+                    .unmap_pages_gfp(start..end, gfp)
+                {
+                    self.publish_mappings(runtime);
+                    self.render_broken = true;
+                    return Err(err);
+                }
             }
         }
         self.publish_mappings(runtime);

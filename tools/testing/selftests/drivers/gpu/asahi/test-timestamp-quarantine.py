@@ -49,8 +49,9 @@ for fn_name in ('reserve_timestamp', 'map_timestamp', 'release_timestamp'):
 #    and only removes retained_timestamps after release_timestamp() succeeds.
 bo = function(ioctl, 'bind_object')
 bind_arm, unbind_arm = bo.split('DRM_ASAHI_BIND_OBJECT_OP_UNBIND', 1)
-assert bind_arm.index('let mut runtime = device.runtime.lock();') < bind_arm.index('device.failed.load(Ordering::Acquire)')
-assert bind_arm.index('device.failed.load(Ordering::Acquire)') < bind_arm.index('runtime.reserve_timestamp(')
+bind_lock = bind_arm.index('let mut runtime = device.runtime.lock();')
+bind_fail = bind_arm.index('device.failed.load(Ordering::Acquire)', bind_lock)
+assert bind_lock < bind_fail < bind_arm.index('runtime.reserve_timestamp(', bind_lock)
 assert unbind_arm.index('let mut runtime = device.runtime.lock();') < unbind_arm.index('device.failed.load(Ordering::Acquire)')
 assert unbind_arm.index('device.failed.load(Ordering::Acquire)') < unbind_arm.index('runtime.release_timestamp(')
 assert unbind_arm.index('runtime.release_timestamp(') < unbind_arm.index('state.retained_timestamps.swap_remove(')

@@ -320,6 +320,15 @@ impl UatPageTable {
         Ok(())
     }
 
+    pub(crate) fn reserve_pending_tables_gfp(
+        &mut self,
+        additional: usize,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        self.pending_tables.get_mut().reserve(additional, gfp)?;
+        Ok(())
+    }
+
     /// Pre-reserve invalidation and dirty-table queue capacity so tearing down
     /// any single Work alias or TVB region (at most two leaf tables) cannot
     /// allocate when `sync()` / `clear_invalidations()` drains between items.
@@ -388,6 +397,60 @@ impl UatPageTable {
             - (range.start >> (UAT_PGBIT + 2 * UAT_LVBIT))
             + 1) as usize;
         l0.saturating_add(l1)
+    }
+
+    /// Exact read-only count of intermediate + leaf page tables currently
+    /// missing for `iova_range`. Zero allocations; monotonic upper bound while
+    /// this page table is alive because intermediate tables are never freed.
+    pub(crate) fn missing_tables_for_range(&self, iova_range: &Range<u64>) -> usize {
+        if iova_range.is_empty()
+            || iova_range.start < self.va_range.start
+            || iova_range.end > self.va_range.end
+            || (iova_range.start | iova_range.end) & (UAT_PGMSK as u64) != 0
+        {
+            return 0;
+        }
+        let mut iova = iova_range.start & self.ias_mask;
+        let end = ((iova_range.end - 1) & self.ias_mask) + 1;
+        let l0_shift = (UAT_PGBIT + UAT_LVBIT) as u64;
+        let l1_shift = (UAT_PGBIT + 2 * UAT_LVBIT) as u64;
+        let l0_block = 1u64 << l0_shift;
+        let l1_block = 1u64 << l1_shift;
+        let mut missing = 0usize;
+        let read_pte = |table_phys: PhysicalAddr, idx: usize| -> u64 {
+            // SAFETY: Live page table owned by us or firmware.
+            let page = unsafe { Page::borrow_phys_unchecked(&table_phys) };
+            page.with_pointer_into_page(idx * PTE_SIZE, PTE_SIZE, |p| {
+                // SAFETY: Index is aligned and in-bounds for a 16 KiB table.
+                Ok(unsafe { &*(p as *const Pte) }.load(Ordering::Relaxed))
+            })
+            .unwrap_or(0)
+        };
+        while iova < end {
+            let l1_idx = ((iova >> l1_shift) & UAT_LVMSK) as usize;
+            let l1_pte = read_pte(self.ttb, l1_idx);
+            let next_l1 = align(iova + 1, l1_block);
+            if l1_pte & PTE_TYPE_BITS != PTE_TYPE_LEAF_TABLE {
+                if l1_pte == 0 {
+                    let sub_end = end.min(next_l1) - 1;
+                    let l0_count = ((sub_end >> l0_shift) - (iova >> l0_shift) + 1) as usize;
+                    missing = missing.saturating_add(1).saturating_add(l0_count);
+                }
+                iova = next_l1;
+                continue;
+            }
+            let l1_phys = l1_pte & self.oas_mask & (!UAT_PGMSK as u64);
+            let sub_end = end.min(next_l1);
+            while iova < sub_end {
+                let l0_idx = ((iova >> l0_shift) & UAT_LVMSK) as usize;
+                let l0_pte = read_pte(l1_phys, l0_idx);
+                if l0_pte == 0 {
+                    missing = missing.saturating_add(1);
+                }
+                iova = align(iova + 1, l0_block);
+            }
+        }
+        missing
     }
 
     fn with_pages_gfp<F>(

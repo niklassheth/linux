@@ -135,6 +135,9 @@ static NEXT_CLOSE: AtomicU64 = AtomicU64::new(1);
 struct Vm {
     id: u32,
     visible: bool,
+    /// Single teardown owner claimed by `vm_destroy` or last `queue_destroy`
+    /// so concurrent callers never double-drain or return spurious ENOENT.
+    destroying: bool,
     kernel: Range<u64>,
     // Tables must be removed before the references keeping GEM pages pinned.
     space: Arc<Mutex<crate::g16_vm::AddressSpace>>,

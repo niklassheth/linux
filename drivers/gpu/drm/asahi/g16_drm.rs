@@ -141,6 +141,9 @@ struct Vm {
     /// Single teardown owner claimed by `vm_destroy` or last `queue_destroy`
     /// so concurrent callers never double-drain or return spurious ENOENT.
     destroying: bool,
+    /// Permanent structural detach error observed in background reaping;
+    /// stop retrying and retain until `File::drop()` / device reset.
+    detach_failed: bool,
     kernel: Range<u64>,
     // Tables must be removed before the references keeping GEM pages pinned.
     space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
@@ -820,6 +823,7 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) -> bool {
     for i in 0..state.vms.len() {
         let orphaned_hidden = !state.vms[i].visible
             && !state.vms[i].destroying
+            && !state.vms[i].detach_failed
             && !state.queues.iter().any(|q| q.vm == state.vms[i].id);
         if orphaned_hidden {
             state.vms[i].pending.retain(|f| {
@@ -828,12 +832,22 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) -> bool {
             });
             if state.vms[i].pending.is_empty() {
                 let rt = runtime.get_or_insert_with(|| device.runtime.lock());
-                if !rt.render_failed() {
-                    if state.vms[i].detach(rt).is_ok() {
-                        continue;
+                if !device.failed.load(Ordering::Acquire) && !rt.render_failed() {
+                    match state.vms[i].detach(device, rt) {
+                        Ok(()) => continue,
+                        Err(err) if err == ENOMEM || err == EBUSY => {
+                            left = true;
+                            retry_detach = true;
+                        }
+                        Err(err) => {
+                            pr_err!(
+                                "G16: retaining hidden VM {} after permanent detach error: {:?}\n",
+                                state.vms[i].id,
+                                err
+                            );
+                            state.vms[i].detach_failed = true;
+                        }
                     }
-                    left = true;
-                    retry_detach = true;
                 }
             } else {
                 left = true;
@@ -918,7 +932,7 @@ impl PinnedDrop for File {
         // `runtime` before truncating so GEM objects never drop under it.
         let mut keep_vms = 0usize;
         for i in 0..state.vms.len() {
-            if state.vms[i].detach(&mut runtime).is_err() {
+            if state.vms[i].detach(&self.device, &mut runtime).is_err() {
                 state.vms.swap(keep_vms, i);
                 keep_vms += 1;
             }

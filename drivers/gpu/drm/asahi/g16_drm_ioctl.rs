@@ -94,6 +94,7 @@ impl File {
                 id,
                 visible: true,
                 destroying: false,
+                detach_failed: false,
                 kernel: data.kernel_start..data.kernel_end,
                 space,
                 compute_space,
@@ -180,12 +181,16 @@ impl File {
             else {
                 return Ok(0);
             };
-            if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
+            if let Err(err) = state.vms[index].detach(device, &mut device.runtime.lock()) {
                 // Destructive teardown already started: keep `visible = false`,
-                // release ownership, and arm the reaper to retry cleanup.
+                // release ownership, and arm the reaper only on transient errors.
                 state.vms[index].destroying = false;
-                inner.reaper.armed.store(true, Ordering::SeqCst);
-                let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
+                if err == ENOMEM || err == EBUSY {
+                    inner.reaper.armed.store(true, Ordering::SeqCst);
+                    let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
+                } else {
+                    state.vms[index].detach_failed = true;
+                }
                 return Err(err);
             }
             state.vms.swap_remove(index);
@@ -345,10 +350,14 @@ impl File {
                     .iter()
                     .position(|v| v.id == vm_id && v.destroying)
                 {
-                    if let Err(err) = state.vms[index].detach(&mut device.runtime.lock()) {
+                    if let Err(err) = state.vms[index].detach(device, &mut device.runtime.lock()) {
                         state.vms[index].destroying = false;
-                        inner.reaper.armed.store(true, Ordering::SeqCst);
-                        let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
+                        if err == ENOMEM || err == EBUSY {
+                            inner.reaper.armed.store(true, Ordering::SeqCst);
+                            let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
+                        } else {
+                            state.vms[index].detach_failed = true;
+                        }
                         return Err(err);
                     }
                     state.vms.swap_remove(index);

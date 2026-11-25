@@ -479,22 +479,34 @@ impl File {
         } else {
             KVec::new()
         };
-        // Allocate mandatory executable Work slots (`min_add`) with `?`, then
-        // grow pipelining headroom up to `want_add` best-effort so memory
-        // pressure never rejects a submission whose VM already owns a slot.
-        let alloc_work_slots = |want_add: usize,
-                                min_add: usize,
-                                pages_per_slot: usize|
-         -> Result<(usize, KVec<crate::g16_vm::GpuPage>)> {
-            if want_add == 0 {
-                return Ok((0, KVec::new()));
-            }
-            let mut pages = KVec::with_capacity(min_add * pages_per_slot, GFP_KERNEL)?;
-            for _ in 0..min_add * pages_per_slot {
-                pages
-                    .push_within_capacity(crate::g16_vm::GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?)
-                    .map_err(|_| EIO)?;
-            }
+        let mut prealloc_render_scratch = if need_render_scratch {
+            alloc_pages(max_render_scratch / crate::pgtable::UAT_PGSZ)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_compute_scratch = if need_compute_scratch {
+            alloc_pages(0x28000 / crate::pgtable::UAT_PGSZ)?
+        } else {
+            KVec::new()
+        };
+        // Allocate every mandatory executable Work slot BEFORE growing optional
+        // pipelining headroom so optional Work pages never starve mandatory
+        // scratch or the other engine's first slot.
+        let mut prealloc_render_work = if render_min_add != 0 {
+            alloc_pages(render_min_add * 7)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_compute_work = if compute_min_add != 0 {
+            alloc_pages(compute_min_add * 2)?
+        } else {
+            KVec::new()
+        };
+        let grow_work_slots = |pages: &mut KVec<crate::g16_vm::GpuPage>,
+                               min_add: usize,
+                               want_add: usize,
+                               pages_per_slot: usize|
+         -> usize {
             let mut slots = min_add;
             for _ in min_add..want_add {
                 if pages.reserve(pages_per_slot, GFP_KERNEL).is_err() {
@@ -519,31 +531,29 @@ impl File {
                 }
                 slots += 1;
             }
-            Ok((slots, pages))
+            slots
         };
-        let (render_slots_alloc, mut prealloc_render_work) =
-            alloc_work_slots(render_work_add, render_min_add, 7)?;
+        let render_slots_alloc = grow_work_slots(
+            &mut prealloc_render_work,
+            render_min_add,
+            render_work_add,
+            7,
+        );
         let render_work_target = if render_slots_alloc != 0 {
             render_owned + render_slots_alloc
         } else {
             0
         };
-        let (compute_slots_alloc, mut prealloc_compute_work) =
-            alloc_work_slots(compute_work_add, compute_min_add, 2)?;
+        let compute_slots_alloc = grow_work_slots(
+            &mut prealloc_compute_work,
+            compute_min_add,
+            compute_work_add,
+            2,
+        );
         let compute_work_target = if compute_slots_alloc != 0 {
             compute_owned + compute_slots_alloc
         } else {
             0
-        };
-        let mut prealloc_render_scratch = if need_render_scratch {
-            alloc_pages(max_render_scratch / crate::pgtable::UAT_PGSZ)?
-        } else {
-            KVec::new()
-        };
-        let mut prealloc_compute_scratch = if need_compute_scratch {
-            alloc_pages(0x28000 / crate::pgtable::UAT_PGSZ)?
-        } else {
-            KVec::new()
         };
 
         if need_render_scratch {
@@ -574,26 +584,32 @@ impl File {
                 vm.tvb_ready = true;
             }
             if render_work_target != 0 {
+                let mut space = vm.space.lock();
                 match runtime.provision_work(
-                    &mut vm.space.lock(),
+                    &mut space,
                     true,
                     render_work_target,
                     &mut prealloc_render_work,
                 ) {
                     Ok(()) => {}
-                    Err(err) if (err == ENOMEM || err == ENOSPC) && render_min_add == 0 => {}
+                    // Optional pipelining growth failed, but at least one
+                    // executable Work slot is already installed on this VM.
+                    Err(err) if (err == ENOMEM || err == ENOSPC) && space.work_owned(true) != 0 => {
+                    }
                     Err(err) => return Err(err),
                 }
             }
             if compute_work_target != 0 {
+                let mut space = vm.compute_space.lock();
                 match runtime.provision_work(
-                    &mut vm.compute_space.lock(),
+                    &mut space,
                     false,
                     compute_work_target,
                     &mut prealloc_compute_work,
                 ) {
                     Ok(()) => {}
-                    Err(err) if (err == ENOMEM || err == ENOSPC) && compute_min_add == 0 => {}
+                    Err(err)
+                        if (err == ENOMEM || err == ENOSPC) && space.work_owned(false) != 0 => {}
                     Err(err) => return Err(err),
                 }
             }

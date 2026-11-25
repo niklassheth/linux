@@ -19,7 +19,14 @@ impl Vm {
             || self.compute_space.lock().work_owned_any()
     }
 
-    pub(super) fn detach(&mut self, runtime: &mut crate::g16::Bootstrap) -> Result {
+    pub(super) fn detach(
+        &mut self,
+        device: &Device,
+        runtime: &mut crate::g16::Bootstrap,
+    ) -> Result {
+        if device.failed.load(Ordering::Acquire) || runtime.render_failed() {
+            return Err(EIO);
+        }
         {
             let mut space = self.space.lock();
             runtime.report_vm_detach(space.roots().low);

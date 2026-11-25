@@ -59,16 +59,21 @@ assert unbind_arm.index('runtime.release_timestamp(') < unbind_arm.index('state.
 vc = function(ioctl, 'vm_create')
 assert vc.index('device.failed.load(Ordering::Acquire)') < vc.index('AddressSpace::new()')
 
-# 3. File::drop() checks device.failed || runtime.render_failed() under runtime.lock()
-#    and forgets file state only when VMs or retained timestamps exist (empty
-#    files drop cleanly without leaking).
+# 3. File::drop() checks device.failed || runtime.render_failed() under runtime.lock(),
+#    drops never-published VMs (has_firmware_state() == false) even on faulted close,
+#    and on healthy close detaches every VM / releases every timestamp independently
+#    before dropping runtime and truncating cleanly detached items.
 fdrop = drm[drm.index('impl PinnedDrop for File'):drm.index('static FENCE_KEY')]
 lock_pos = fdrop.index('let mut runtime = self.device.runtime.lock();')
 guard_pos = fdrop.index('self.device.failed.load(Ordering::Acquire) || runtime.render_failed()', lock_pos)
-non_empty_pos = fdrop.index('!state.vms.is_empty() || !state.retained_timestamps.is_empty()', guard_pos)
-detach_pos = fdrop.index('vm.detach(', non_empty_pos)
+retain_pos = fdrop.index('state.vms.retain(|vm| vm.has_firmware_state());', guard_pos)
+non_empty_pos = fdrop.index('!state.vms.is_empty() || !state.retained_timestamps.is_empty()', retain_pos)
+detach_pos = fdrop.index('.detach(&mut runtime)', non_empty_pos)
 rel_pos = fdrop.index('.release_timestamp(', detach_pos)
-assert lock_pos < guard_pos < non_empty_pos < detach_pos < rel_pos
+drop_rt_pos = fdrop.index('drop(runtime);', rel_pos)
+trunc_vm_pos = fdrop.index('state.vms.truncate(keep_vms);', drop_rt_pos)
+trunc_ts_pos = fdrop.index('state.retained_timestamps.truncate(keep_timestamps);', trunc_vm_pos)
+assert lock_pos < guard_pos < retain_pos < non_empty_pos < detach_pos < rel_pos < drop_rt_pos < trunc_vm_pos < trunc_ts_pos
 
 # 4. Behavioral Rust test modeling the quarantine state machine across faulted
 #    unbind + rebind attempts.

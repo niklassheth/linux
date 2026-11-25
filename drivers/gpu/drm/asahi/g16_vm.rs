@@ -172,6 +172,10 @@ impl AddressSpace {
         self.work_pool.owned_count(render)
     }
 
+    pub(crate) fn work_owned_any(&self) -> bool {
+        self.work_pool.owned_count(false) != 0 || self.work_pool.owned_count(true) != 0
+    }
+
     pub(crate) fn work_leased(&self, render: bool) -> usize {
         self.work_pool.leased_count(render)
     }

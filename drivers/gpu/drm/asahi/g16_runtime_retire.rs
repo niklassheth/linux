@@ -80,28 +80,34 @@ impl Bootstrap {
                         non_simple = Some((base, kind, cursor, None));
                         break;
                     }
-                    let mut selected = None;
-                    for (index, flight) in self.flights.iter().enumerate() {
-                        if let Some(render) = &flight.render {
-                            let a = &render.addresses;
-                            let matches = match kind {
-                                6 => {
-                                    reader.read_u32_relaxed(base + 4)? == a.context_id as u32
-                                        && reader.read_u32_relaxed(base + 8)?
-                                            == a.buffer_manager_slot as u32
-                                        && reader.read_u32_relaxed(a.fragment_firmware_stamp)?
-                                            != a.fragment_stamp as u32
+                    let mut selected = self.deferred_event.pinned_flight(cursor).and_then(|id| {
+                        self.flights
+                            .iter()
+                            .position(|f| f.id == id && f.render.is_some())
+                    });
+                    if selected.is_none() {
+                        for (index, flight) in self.flights.iter().enumerate() {
+                            if let Some(render) = &flight.render {
+                                let a = &render.addresses;
+                                let matches = match kind {
+                                    6 => {
+                                        reader.read_u32_relaxed(base + 4)? == a.context_id as u32
+                                            && reader.read_u32_relaxed(base + 8)?
+                                                == a.buffer_manager_slot as u32
+                                            && reader.read_u32_relaxed(a.fragment_firmware_stamp)?
+                                                != a.fragment_stamp as u32
+                                    }
+                                    7 => {
+                                        reader.read_u32_relaxed(base + 12)? == a.fragment_event as u32
+                                            && reader.read_u32_relaxed(base + 16)?
+                                                == a.fragment_stamp as u32
+                                    }
+                                    _ => false,
+                                };
+                                if matches {
+                                    selected = Some(index);
+                                    break;
                                 }
-                                7 => {
-                                    reader.read_u32_relaxed(base + 12)? == a.fragment_event as u32
-                                        && reader.read_u32_relaxed(base + 16)?
-                                            == a.fragment_stamp as u32
-                                }
-                                _ => false,
-                            };
-                            if matches {
-                                selected = Some(index);
-                                break;
                             }
                         }
                     }
@@ -135,6 +141,7 @@ impl Bootstrap {
                 self.report_failed_event(base, kind, cursor)?;
                 return Err(EIO);
             };
+            let flight_id = self.flights[index].id;
             let mut render = self.flights[index].render.take().ok_or(EIO)?;
             let pool_index = self
                 .tvb_pools
@@ -153,8 +160,10 @@ impl Bootstrap {
             self.flights[index].render = Some(render);
             result?;
             if self._firmware_space.as_ref().ok_or(EIO)?.read_u32(STATE)? == cursor {
+                self.deferred_event.pin(cursor, flight_id);
                 break;
             }
+            self.deferred_event.clear();
         }
         self.drain_trace_rx()
     }

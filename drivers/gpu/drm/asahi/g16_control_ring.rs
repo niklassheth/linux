@@ -88,3 +88,32 @@ impl ControlRing {
         self.head >= target && self.ack >= target
     }
 }
+
+/// Pins an unanswered firmware event (`cursor` in the 256-entry RX ring) to
+/// the exact flight ID that first matched it so `swap_remove` reordering in
+/// `flights` cannot switch owners on retry before the control reply commits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeferredEvent {
+    entry: Option<(u32, u64)>,
+}
+
+impl DeferredEvent {
+    pub(crate) const fn new() -> Self {
+        Self { entry: None }
+    }
+
+    #[inline]
+    pub(crate) fn pinned_flight(&self, cursor: u32) -> Option<u64> {
+        self.entry.filter(|&(c, _)| c == cursor).map(|(_, id)| id)
+    }
+
+    #[inline]
+    pub(crate) fn pin(&mut self, cursor: u32, flight_id: u64) {
+        self.entry = Some((cursor, flight_id));
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.entry = None;
+    }
+}

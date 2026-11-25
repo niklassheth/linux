@@ -837,34 +837,46 @@ impl PinnedDrop for File {
         }
         let mut runtime = self.device.runtime.lock();
         if self.device.failed.load(Ordering::Acquire) || runtime.render_failed() {
+            drop(runtime);
+            // Never-published VMs have no firmware-visible state and drop
+            // cleanly even after a device fault or VM_CREATE/fault race.
+            state.vms.retain(|vm| vm.has_firmware_state());
             if !state.vms.is_empty() || !state.retained_timestamps.is_empty() {
-                // Retain roots and timestamp backing after any device/runtime
-                // fault until reset establishes firmware quiescence. Empty
-                // files with no published resources drop normally.
-                drop(runtime);
+                // Retain published roots and timestamp backing after any
+                // device/runtime fault until reset establishes quiescence.
                 drop(state);
                 core::mem::forget(self.state.clone());
             }
             return;
         }
-        for vm in state.vms.iter().rev() {
-            if vm.detach(&mut runtime).is_err() {
-                // Retain GPU-visible mappings if the installed root cannot
-                // be detached safely; device reset releases the hardware.
-                drop(runtime);
-                drop(state);
-                core::mem::forget(self.state.clone());
-                return;
+        // Detach every VM and release every timestamp independently so an error
+        // on one resource never leaks unrelated healthy VMs or backing.
+        // Partition failed items to the front under `runtime`, then drop
+        // `runtime` before truncating so GEM objects never drop under it.
+        let mut keep_vms = 0usize;
+        for i in 0..state.vms.len() {
+            if state.vms[i].detach(&mut runtime).is_err() {
+                state.vms.swap(keep_vms, i);
+                keep_vms += 1;
             }
         }
-        for timestamp in &state.retained_timestamps {
-            if runtime
-                .release_timestamp(timestamp.base..timestamp.base + timestamp.extent)
-                .is_err()
-            {
-                core::mem::forget(self.state.clone());
-                break;
+        let mut keep_timestamps = 0usize;
+        for i in 0..state.retained_timestamps.len() {
+            let range = state.retained_timestamps[i].base
+                ..state.retained_timestamps[i].base + state.retained_timestamps[i].extent;
+            if runtime.release_timestamp(range).is_err() {
+                state.retained_timestamps.swap(keep_timestamps, i);
+                keep_timestamps += 1;
             }
+        }
+        drop(runtime);
+        state.vms.truncate(keep_vms);
+        state.retained_timestamps.truncate(keep_timestamps);
+        if keep_vms != 0 || keep_timestamps != 0 {
+            // Retain only the specific roots/timestamps that failed teardown;
+            // device reset releases the hardware.
+            drop(state);
+            core::mem::forget(self.state.clone());
         }
     }
 }

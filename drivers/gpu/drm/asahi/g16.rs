@@ -283,6 +283,8 @@ pub(crate) struct Bootstrap {
     queue_regions: usize,
     /// Monotonic 64-bit epoch tracker for the 256-entry control channel.
     control_ring: crate::g16_control_ring::ControlRing,
+    /// Pinned owner for a deferred RX event waiting for control-ring space.
+    deferred_event: crate::g16_control_ring::DeferredEvent,
     /// Storage whose context destruction is published, with its monotonic
     /// control-channel acknowledgment epoch.
     destroying_queues: KVec<(u64, u64)>,
@@ -855,6 +857,7 @@ impl Bootstrap {
             last_scan: KBox::zeroed(GFP_KERNEL)?,
             queue_regions: 0,
             control_ring: crate::g16_control_ring::ControlRing::new(0),
+            deferred_event: crate::g16_control_ring::DeferredEvent::new(),
             destroying_queues: KVec::new(),
             free_queues: KVec::new(),
             render_failed: false,

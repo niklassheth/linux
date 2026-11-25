@@ -7,6 +7,18 @@
 use super::*;
 
 impl Vm {
+    /// Whether this VM's roots have acquired any firmware-visible state
+    /// (support lease, TVB pool, Work slots, or published render/compute root).
+    /// Never-published VMs can always be dropped safely on faulted close.
+    pub(super) fn has_firmware_state(&self) -> bool {
+        self.render_ready
+            || self.compute_ready
+            || self.tvb_ready
+            || self.render_support.is_some()
+            || self.space.lock().work_owned_any()
+            || self.compute_space.lock().work_owned_any()
+    }
+
     pub(super) fn detach(&self, runtime: &mut crate::g16::Bootstrap) -> Result {
         {
             let mut space = self.space.lock();

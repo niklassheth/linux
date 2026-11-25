@@ -170,3 +170,85 @@ fn partial_commit_failure_still_rolls_back_held_scratch() {
     assert_eq!(rt.scratch_users, 0);
     assert_eq!(rt.returned_scratch, vec![0x5000]);
 }
+
+#[test]
+fn scratch_coalesced_reuse_and_arena_fit_precheck() {
+    use std::ops::Range;
+
+    struct ScratchArenaModel {
+        arena_next: u64,
+        arena_end: u64,
+        free: Vec<Range<u64>>,
+        max_block: usize,
+        allocated_pages: usize,
+    }
+
+    impl ScratchArenaModel {
+        fn new(size: u64) -> Self {
+            Self {
+                arena_next: 0,
+                arena_end: size,
+                free: Vec::new(),
+                max_block: 0,
+                allocated_pages: 0,
+            }
+        }
+
+        fn needs_prealloc(&self, size: usize) -> Result<bool, &'static str> {
+            if self.max_block >= size
+                || self.free.iter().any(|r| r.end - r.start >= size as u64)
+            {
+                return Ok(false);
+            }
+            if self.arena_next + size as u64 > self.arena_end {
+                return Err("ENOMEM");
+            }
+            Ok(true)
+        }
+
+        fn alloc_block(&mut self, size: usize) -> Range<u64> {
+            let start = self.arena_next;
+            self.arena_next += size as u64;
+            self.allocated_pages += size / 0x4000;
+            self.max_block = self.max_block.max(size);
+            start..self.arena_next
+        }
+
+        fn release_and_coalesce(&mut self, mut range: Range<u64>) {
+            let mut i = 0;
+            while i < self.free.len() {
+                if self.free[i].end == range.start || range.end == self.free[i].start {
+                    let old = self.free.remove(i);
+                    range.start = range.start.min(old.start);
+                    range.end = range.end.max(old.end);
+                    i = 0;
+                } else {
+                    i += 1;
+                }
+            }
+            let merged = (range.end - range.start) as usize;
+            self.free.push(range);
+            self.max_block = self.max_block.max(merged);
+        }
+    }
+
+    // 256 KiB total arena: an oversized 512 KiB request fails BEFORE allocating.
+    let mut m = ScratchArenaModel::new(0x40000);
+    assert_eq!(m.needs_prealloc(0x80000), Err("ENOMEM"));
+    assert_eq!(m.allocated_pages, 0);
+
+    // Allocate two adjacent 128 KiB blocks, exhausting the 256 KiB arena.
+    assert_eq!(m.needs_prealloc(0x20000), Ok(true));
+    let b1 = m.alloc_block(0x20000);
+    let b2 = m.alloc_block(0x20000);
+    assert_eq!(m.arena_next, m.arena_end);
+
+    // Release both: coalescing merges them into one 256 KiB block and raises
+    // max_block, so a subsequent 256 KiB request needs ZERO new backing even
+    // though the remaining arena is 0!
+    m.release_and_coalesce(b1);
+    m.release_and_coalesce(b2);
+    assert_eq!(m.max_block, 0x40000);
+    assert_eq!(m.needs_prealloc(0x40000), Ok(false));
+    assert_eq!(m.allocated_pages, 0x40000 / 0x4000);
+}

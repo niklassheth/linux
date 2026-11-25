@@ -55,5 +55,9 @@ assert ls.index('self.low.prepare_map_gfp(range.clone(), gfp)') < ls.index('self
 assert ls.index('GpuPage::alloc(gfp | __GFP_ZERO)') < ls.index('self.render_arena = next_arena;')
 rs = vm[vm.index('pub(crate) fn release_scratch('):vm.index('pub(crate) fn tvb_va_blocks(')]
 assert 'push_within_capacity(range)' in rs and 'GFP_KERNEL' not in rs
+assert 'self.scratch_max_block[index] = self.scratch_max_block[index].max(merged);' in rs
+sn = vm[vm.index('pub(crate) fn scratch_needs_prealloc('):vm.index('pub(crate) fn provision_scratch_prealloc(')]
+assert 'arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?' in sn
+assert 'self.scratch_free[index]' in sn
 
 print('test-prep-rollback: ok')

@@ -51,5 +51,8 @@ assert 'service.reply_epoch = self.control_ring.commit();' in retire
 assert 'service.pending_event = false;' in retire
 assert '!render.events.pending_event' in retire
 assert 'self.control_ring.reached(render.events.reply_epoch)' in retire
+assert 'self.deferred_event.pinned_flight(cursor)' in retire
+assert 'self.deferred_event.pin(cursor, flight_id);' in retire
+assert 'self.deferred_event.clear();' in retire
 
 print('test-control-ring: ok')

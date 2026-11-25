@@ -371,15 +371,22 @@ impl AddressSpace {
         p.ta_status = meta + 0x8000 + 0x240;
         p.fragment_status = meta + 0xc000 + 0x2c0;
         p.aux_fb = meta + 0x10000;
-        if let Some(mesh) = &mut p.mesh {
-            mesh.payload = meta + 0x14000;
-            // The lease lasts through both TA and fragment retirement. Clear
-            // the entire payload, not only the metadata pages.
-            for offset in (0..crate::g16_mesh::Profile::PAYLOAD_BYTES).step_by(256) {
-                self.write_low(mesh.payload + offset as u64, &[0; 256])?;
+        let init_res: Result = (|| {
+            if let Some(mesh) = &mut p.mesh {
+                mesh.payload = meta + 0x14000;
+                // The lease lasts through both TA and fragment retirement. Clear
+                // the entire payload, not only the metadata pages.
+                for offset in (0..crate::g16_mesh::Profile::PAYLOAD_BYTES).step_by(256) {
+                    self.write_low(mesh.payload + offset as u64, &[0; 256])?;
+                }
             }
+            self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
+            Ok(())
+        })();
+        if let Err(err) = init_res {
+            let _ = self.release_scratch(scratch);
+            return Err(err);
         }
-        self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
         // Only clean page tables if lease_scratch allocated new mappings;
         // Normal-WB metadata/aux_fb writes are ordered by flush() before the
         // GPU can observe this render.
@@ -532,15 +539,10 @@ impl AddressSpace {
         let range = if let Some(slot) = free {
             let start = self.scratch_free[index][slot].start;
             let end = start + size as u64;
-            if end == self.scratch_free[index][slot].end {
-                self.scratch_free[index].remove(slot).map_err(|_| EIO)?;
-            } else {
-                self.scratch_free[index][slot].start = end;
-            }
             // All previous GPU writes have retired. Reinitialize the
             // metadata pages of the leased range (the tilemap, TPC and compute
-            // scratch need no clearing; full VK CTS clean, #181) without
-            // touching PTEs or neighbouring active jobs.
+            // scratch need no clearing; full VK CTS clean, #181) before
+            // mutating `scratch_free`, so a lookup error never orphans the slot.
             let clear_from = (start + metadata as u64).min(end);
             for va in (clear_from..end).step_by(UAT_PGSZ) {
                 let page = self.pages.get(&va).ok_or(EIO)?;
@@ -548,6 +550,11 @@ impl AddressSpace {
                     // SAFETY: The lease owns this full page exclusively.
                     unsafe { core::ptr::write_bytes(ptr, 0, UAT_PGSZ) };
                 });
+            }
+            if end == self.scratch_free[index][slot].end {
+                self.scratch_free[index].remove(slot).map_err(|_| EIO)?;
+            } else {
+                self.scratch_free[index][slot].start = end;
             }
             start..end
         } else {
@@ -580,7 +587,9 @@ impl AddressSpace {
                 slot += 1;
             }
         }
-        free.push(range, GFP_KERNEL)?;
+        // Capacity was reserved in `lease_scratch`, so retirement and prep
+        // rollback never allocate.
+        free.push_within_capacity(range).map_err(|_| EIO)?;
         self.scratch_users[index] -= 1;
         Ok(())
     }

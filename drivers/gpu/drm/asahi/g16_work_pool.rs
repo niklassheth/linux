@@ -170,3 +170,67 @@ impl<V: SlotVec> VmWorkPool<V> {
         Ok(())
     }
 }
+
+/// Sink for automatic RAII rollback of pre-publication `Scratch` and `Work` leases.
+pub(crate) trait LeaseSink<S> {
+    fn poisoned(&self) -> bool;
+    fn release_work(&mut self, render: bool, va: u64);
+    fn release_scratch(&mut self, scratch: S);
+}
+
+/// RAII guard owning pre-publication `Scratch` and per-VM `Work` leases until
+/// publication starts (`commit()`).
+///
+/// Any `?` error exit before `commit()` runs `Drop`: when the runtime is not
+/// poisoned, both held leases return to the owning VM automatically; when
+/// poisoned, both remain quarantined.
+pub(crate) struct PrepGuard<'a, S, T: LeaseSink<S>> {
+    sink: &'a mut T,
+    render: bool,
+    scratch: Option<S>,
+    work: Option<u64>,
+}
+
+impl<'a, S, T: LeaseSink<S>> PrepGuard<'a, S, T> {
+    pub(crate) fn new(sink: &'a mut T, render: bool) -> Self {
+        Self {
+            sink,
+            render,
+            scratch: None,
+            work: None,
+        }
+    }
+
+    pub(crate) fn sink_mut(&mut self) -> &mut T {
+        self.sink
+    }
+
+    pub(crate) fn set_scratch(&mut self, scratch: S) {
+        self.scratch = Some(scratch);
+    }
+
+    pub(crate) fn set_work(&mut self, va: u64) {
+        self.work = Some(va);
+    }
+
+    /// Transfer both leases out of the guard right before the point of no
+    /// return (publication / quarantine boundary), disarming `Drop`.
+    pub(crate) fn commit(mut self) -> Option<(S, u64)> {
+        let scratch = self.scratch.take()?;
+        let work = self.work.take()?;
+        Some((scratch, work))
+    }
+}
+
+impl<S, T: LeaseSink<S>> Drop for PrepGuard<'_, S, T> {
+    fn drop(&mut self) {
+        if !self.sink.poisoned() {
+            if let Some(va) = self.work.take() {
+                self.sink.release_work(self.render, va);
+            }
+            if let Some(scratch) = self.scratch.take() {
+                self.sink.release_scratch(scratch);
+            }
+        }
+    }
+}

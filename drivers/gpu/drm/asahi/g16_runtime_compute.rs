@@ -201,38 +201,62 @@ impl Bootstrap {
     ) -> Result<Receipt> {
         let lane = queue.lanes.as_ref().ok_or(EIO)?[2];
         let priority = queue.priority;
-
-        let mut params = *params;
-        let scratch = client.prepare_compute(&mut params)?;
-        let space = client.roots();
         if self.render_failed {
             return Err(EIO);
         }
         if !(2..=3).contains(&priority) {
             return Err(EINVAL);
         }
+
+        let mut params = *params;
+        let space = client.roots();
         let ordinal = queue.compute_count;
-        let (work, reused) = self.allocate_work(client, false)?;
-        let alias = crate::g16_work_pool::alias_range(work, WORK_BASE, WORK_WINDOW, false)
-            .ok_or(ENOSPC)?
-            .start;
-        // Firmware save state is independent of shader resource tables.
-        // The upper half of the zeroed Work page is GPU-addressable storage.
-        params.save_area = alias + 0x2000;
-        let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
-        let support = client.compute_support().ok_or(EIO)?;
-        a.support = support.address();
-        a.queue = lane.queue;
-        a.driver_stamp = work + 0x4000;
-        a.firmware_stamp = lane.firmware_stamp();
-        a.event = queue.event(2)?;
-        if client.has_pending_tables() {
-            client.sync();
-        }
-        self.invalidate_client(client);
-        a.context = self.acquire_context(space, 1)?;
-        a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
-        a.register_identity = (u64::from(a.context) << 32) | 1;
+        // Wrap pre-publication leases (scratch + per-VM Work slot) in an RAII
+        // Drop guard so any `?` error before publication returns both cleanly.
+        let (scratch, alias, reused, mut a) = {
+            let mut sink = RuntimeLeaseSink {
+                runtime: self,
+                client,
+            };
+            let mut prep = crate::g16_work_pool::PrepGuard::new(&mut sink, false);
+            let scratch = prep.sink_mut().client.prepare_compute(&mut params)?;
+            prep.set_scratch(scratch);
+            let (work, reused) = {
+                let s = prep.sink_mut();
+                s.runtime.allocate_work(s.client, false)?
+            };
+            prep.set_work(work);
+            let alias = crate::g16_work_pool::alias_range(work, WORK_BASE, WORK_WINDOW, false)
+                .ok_or(ENOSPC)?
+                .start;
+            // Firmware save state is independent of shader resource tables.
+            // The upper half of the zeroed Work page is GPU-addressable storage.
+            params.save_area = alias + 0x2000;
+            let mut a = compute::Addresses::publication(
+                prep.sink_mut().runtime.compute_publication,
+                ordinal,
+                work,
+                alias,
+            );
+            let support = prep.sink_mut().client.compute_support().ok_or(EIO)?;
+            a.support = support.address();
+            a.queue = lane.queue;
+            a.driver_stamp = work + 0x4000;
+            a.firmware_stamp = lane.firmware_stamp();
+            a.event = queue.event(2)?;
+            {
+                let s = prep.sink_mut();
+                if s.client.has_pending_tables() {
+                    s.client.sync();
+                }
+                s.runtime.invalidate_client(s.client);
+            }
+            a.context = prep.sink_mut().runtime.acquire_context(space, 1)?;
+            a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
+            a.register_identity = (u64::from(a.context) << 32) | 1;
+            let (scratch, _work) = prep.commit().ok_or(EIO)?;
+            (scratch, alias, reused, a)
+        };
         self.render_failed = true;
         let dep_stamps = dependencies.map(|d| d.map(|r| r.stamp));
         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));

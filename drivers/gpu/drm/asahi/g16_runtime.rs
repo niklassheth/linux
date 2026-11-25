@@ -512,6 +512,32 @@ pub(crate) struct Handover {
     next: u64,
 }
 
+/// RAII rollback sink binding `Bootstrap` and a client `AddressSpace` during
+/// submission preparation (before `render_failed = true` / publication).
+pub(super) struct RuntimeLeaseSink<'a> {
+    pub(super) runtime: &'a mut Bootstrap,
+    pub(super) client: &'a mut g16_vm::AddressSpace,
+}
+
+impl crate::g16_work_pool::LeaseSink<g16_vm::Scratch> for RuntimeLeaseSink<'_> {
+    fn poisoned(&self) -> bool {
+        self.runtime.render_failed
+    }
+
+    fn release_work(&mut self, render: bool, va: u64) {
+        let _ = Bootstrap::release_work_counted(
+            &mut self.runtime.vm_free_work,
+            self.client,
+            render,
+            va,
+        );
+    }
+
+    fn release_scratch(&mut self, scratch: g16_vm::Scratch) {
+        let _ = self.client.release_scratch(scratch);
+    }
+}
+
 pub(crate) const RETIRE_LOG: usize = 256;
 
 fn micros(later: Instant<Monotonic>, earlier: Instant<Monotonic>) -> i64 {

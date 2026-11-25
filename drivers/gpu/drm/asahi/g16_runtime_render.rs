@@ -295,119 +295,153 @@ impl Bootstrap {
         // BufferThing. Reusing scene 1 here corrupts other in-flight renders.
         params.scene_slot = u64::from(scene);
         params.cycle = 0x240000 + u64::from(scene) * 0x30;
-        let scratch = client.prepare_render(&mut params)?;
-        let mut a = render::Addresses::bootstrap().publication(self.render_publication);
-        pool.work_addresses(&mut a, scene);
-        // Keep profiling storage private to the Work. Public timestamp BOs
-        // are written by the firmware through its separate user destinations.
-        let lanes = queue.lanes.as_ref().ok_or(EIO)?;
-        a.tiling_queue = lanes[0].queue;
-        a.fragment_queue = lanes[1].queue;
-        a.tiling_event = u64::from(queue.event(0)?);
-        a.fragment_event = u64::from(queue.event(1)?);
-        a.support = support.address();
-        a.render_shared_state = support.shared_state();
-        a.tiling_status_page = params.ta_status & !0x3fff;
-        a.fragment_status_page = params.fragment_status & !0x3fff;
         let queue_ordinal = queue.render_count;
-        a.fragment_counter = queue_ordinal.wrapping_mul(2);
-        a.tiling_counter = a.fragment_counter.wrapping_add(1);
-        // Firmware's dependency graph requires consecutive stamp updates
-        // within each lane, even when other queues publish between them.
-        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
-        a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
-        let (va, _reused) = self.allocate_work(client, true)?;
-        a.tiling_shared_tail = va + 0x10000;
-        a.fragment_shared_tail = va + 0x14000;
-        // The notifier pass stores driver stamps, then sends the IRQ after
-        // a DSB. These destinations must be firmware-uncached: a DSB does
-        // not clean a cached stamp, leaving Linux asleep on stale memory.
-        // Each render has its own driver stamps and, with shared_notifier=0,
-        // its own notifier and count. A notifier shared by the whole queue
-        // with a cumulative count (2026-10-03 to 10-27) was announced only
-        // once every Work published to it had completed, so a busy queue
-        // waited for the safety poll; one per submission (below) is not.
-        // The Work count lives with the stamps in the firmware-uncached page:
-        // a shared notifier's count is raised while the firmware reads it.
-        a.event_control = va + 0x200;
-        a.event_count_array = va + 0x18080;
-        a.tiling_driver_stamp = va + 0x18000;
-        a.fragment_driver_stamp = va + 0x18040;
-        // shared_notifier=1: renders of one submission staged in the same
-        // flush batch share the notifier AND uncached driver-stamp slots of
-        // its first render (the owner), as Metal shares one per command
-        // buffer. Firmware's per-notifier completion pass coalesces
-        // consecutive stage driver-stamp writes within a shared notifier:
-        // giving member renders distinct driver-stamp addresses leaves earlier
-        // renders' private slots unwritten (blocked=0x1) whenever firmware
-        // flushes only the later Work's address. Sharing owner_va+0x18000 /
-        // +0x18040 (initialized once by the owner to previous(first_stamp))
-        // lets monotonically rising coalesced writes satisfy every render in
-        // the notifier. Each render raises the notifier's Work count by its
-        // own two Works before flush() exposes the batch to firmware. Once
-        // flush() runs, firmware can complete and drain that notifier before
-        // the owner retires on the host CPU, so a later render split across a
-        // flush boundary by backpressure (EBUSY) starts a fresh notifier
-        // rather than re-arming one that may have drained.
-        let job_owner = if crate::g16_timeline::shared_notifier() {
-            let owner = self
-                .job_notifiers
-                .iter()
-                .find(|j| j.job == job && !j.flushed && !j.owner_retired)
-                .map(|j| j.owner);
-            let owner_va = owner.unwrap_or(va);
-            a.event_control = owner_va + 0x200;
-            a.event_count_array = owner_va + 0x18080;
-            a.tiling_driver_stamp = owner_va + 0x18000;
-            a.fragment_driver_stamp = owner_va + 0x18040;
-            Some((owner_va, owner.is_none()))
-        } else {
-            None
-        };
-        // What this render writes into the notifier: the full header (its
-        // own notifier, or a submission's first) and the Work count.
-        let notifier_write = match job_owner {
-            None | Some((_, true)) => (true, 2u32),
-            Some((owner_va, false)) => {
-                let entry = self.job_notifiers.iter().find(|j| j.owner == owner_va).ok_or(EIO)?;
-                (false, entry.works + 2)
-            }
-        };
-        // Fail before publication: past it, a render must have its Flight.
-        if matches!(job_owner, Some((_, true))) && self.job_notifiers.len() == self.job_notifiers.capacity() {
-            return Err(EIO);
-        }
-
-        a.tiling_firmware_stamp = lanes[0].firmware_stamp();
-        a.fragment_firmware_stamp = lanes[1].firmware_stamp();
-        let alias = crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, true)
-            .ok_or(ENOSPC)?
-            .start;
-        for stage in 0..2u64 {
-            let work_page = va + stage * 0x8000;
-            let register_page = alias + stage * 0x4000;
-            if stage == 0 {
-                a.tiling_work = work_page + (a.tiling_work & 0x3fff);
-                a.tiling_microsequence = work_page + 0x4000 + (a.tiling_microsequence & 0x3fff);
-                a.tiling_prelude = work_page + 0x4000;
-                a.tiling_register_alias = register_page + (a.tiling_register_alias & 0x3fff);
+        // Wrap pre-publication leases (scratch + per-VM Work slot) in an RAII
+        // Drop guard so any `?` error before publication returns both cleanly.
+        let (scratch, va, a, lanes, job_owner, notifier_write) = {
+            let mut sink = RuntimeLeaseSink {
+                runtime: self,
+                client,
+            };
+            let mut prep = crate::g16_work_pool::PrepGuard::new(&mut sink, true);
+            let scratch = prep.sink_mut().client.prepare_render(&mut params)?;
+            prep.set_scratch(scratch);
+            let mut a = render::Addresses::bootstrap()
+                .publication(prep.sink_mut().runtime.render_publication);
+            pool.work_addresses(&mut a, scene);
+            // Keep profiling storage private to the Work. Public timestamp BOs
+            // are written by the firmware through its separate user destinations.
+            let lanes = *queue.lanes.as_ref().ok_or(EIO)?;
+            a.tiling_queue = lanes[0].queue;
+            a.fragment_queue = lanes[1].queue;
+            a.tiling_event = u64::from(queue.event(0)?);
+            a.fragment_event = u64::from(queue.event(1)?);
+            a.support = support.address();
+            a.render_shared_state = support.shared_state();
+            a.tiling_status_page = params.ta_status & !0x3fff;
+            a.fragment_status_page = params.fragment_status & !0x3fff;
+            a.fragment_counter = queue_ordinal.wrapping_mul(2);
+            a.tiling_counter = a.fragment_counter.wrapping_add(1);
+            // Firmware's dependency graph requires consecutive stamp updates
+            // within each lane, even when other queues publish between them.
+            a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
+            a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
+            let (va, _reused) = {
+                let s = prep.sink_mut();
+                s.runtime.allocate_work(s.client, true)?
+            };
+            prep.set_work(va);
+            a.tiling_shared_tail = va + 0x10000;
+            a.fragment_shared_tail = va + 0x14000;
+            // The notifier pass stores driver stamps, then sends the IRQ after
+            // a DSB. These destinations must be firmware-uncached: a DSB does
+            // not clean a cached stamp, leaving Linux asleep on stale memory.
+            // Each render has its own driver stamps and, with shared_notifier=0,
+            // its own notifier and count. A notifier shared by the whole queue
+            // with a cumulative count (2026-10-03 to 10-27) was announced only
+            // once every Work published to it had completed, so a busy queue
+            // waited for the safety poll; one per submission (below) is not.
+            // The Work count lives with the stamps in the firmware-uncached page:
+            // a shared notifier's count is raised while the firmware reads it.
+            a.event_control = va + 0x200;
+            a.event_count_array = va + 0x18080;
+            a.tiling_driver_stamp = va + 0x18000;
+            a.fragment_driver_stamp = va + 0x18040;
+            // shared_notifier=1: renders of one submission staged in the same
+            // flush batch share the notifier AND uncached driver-stamp slots of
+            // its first render (the owner), as Metal shares one per command
+            // buffer. Firmware's per-notifier completion pass coalesces
+            // consecutive stage driver-stamp writes within a shared notifier:
+            // giving member renders distinct driver-stamp addresses leaves earlier
+            // renders' private slots unwritten (blocked=0x1) whenever firmware
+            // flushes only the later Work's address. Sharing owner_va+0x18000 /
+            // +0x18040 (initialized once by the owner to previous(first_stamp))
+            // lets monotonically rising coalesced writes satisfy every render in
+            // the notifier. Each render raises the notifier's Work count by its
+            // own two Works before flush() exposes the batch to firmware. Once
+            // flush() runs, firmware can complete and drain that notifier before
+            // the owner retires on the host CPU, so a later render split across a
+            // flush boundary by backpressure (EBUSY) starts a fresh notifier
+            // rather than re-arming one that may have drained.
+            let job_owner = if crate::g16_timeline::shared_notifier() {
+                let owner = prep
+                    .sink_mut()
+                    .runtime
+                    .job_notifiers
+                    .iter()
+                    .find(|j| j.job == job && !j.flushed && !j.owner_retired)
+                    .map(|j| j.owner);
+                let owner_va = owner.unwrap_or(va);
+                a.event_control = owner_va + 0x200;
+                a.event_count_array = owner_va + 0x18080;
+                a.tiling_driver_stamp = owner_va + 0x18000;
+                a.fragment_driver_stamp = owner_va + 0x18040;
+                Some((owner_va, owner.is_none()))
             } else {
-                a.fragment_work = work_page + (a.fragment_work & 0x3fff);
-                a.fragment_microsequence = work_page + 0x4000 + (a.fragment_microsequence & 0x3fff);
-                a.fragment_prelude = work_page + 0x4000;
-                a.fragment_register_alias = register_page + (a.fragment_register_alias & 0x3fff);
+                None
+            };
+            // What this render writes into the notifier: the full header (its
+            // own notifier, or a submission's first) and the Work count.
+            let notifier_write = match job_owner {
+                None | Some((_, true)) => (true, 2u32),
+                Some((owner_va, false)) => {
+                    let entry = prep
+                        .sink_mut()
+                        .runtime
+                        .job_notifiers
+                        .iter()
+                        .find(|j| j.owner == owner_va)
+                        .ok_or(EIO)?;
+                    (false, entry.works + 2)
+                }
+            };
+            // Fail before publication: past it, a render must have its Flight.
+            if matches!(job_owner, Some((_, true)))
+                && prep.sink_mut().runtime.job_notifiers.len()
+                    == prep.sink_mut().runtime.job_notifiers.capacity()
+            {
+                return Err(EIO);
             }
-        }
-        if client.has_pending_tables() {
-            client.sync();
-        }
-        self.invalidate_client(client);
-        // A live context lease keeps these roots fixed through retirement.
-        a.context_id = u64::from(self.acquire_context(space, 9)?);
-        a.tiling_user_timestamp_start = timestamps[0];
-        a.tiling_user_timestamp_end = timestamps[1];
-        a.fragment_user_timestamp_start = timestamps[2];
-        a.fragment_user_timestamp_end = timestamps[3];
+
+            a.tiling_firmware_stamp = lanes[0].firmware_stamp();
+            a.fragment_firmware_stamp = lanes[1].firmware_stamp();
+            let alias = crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, true)
+                .ok_or(ENOSPC)?
+                .start;
+            for stage in 0..2u64 {
+                let work_page = va + stage * 0x8000;
+                let register_page = alias + stage * 0x4000;
+                if stage == 0 {
+                    a.tiling_work = work_page + (a.tiling_work & 0x3fff);
+                    a.tiling_microsequence =
+                        work_page + 0x4000 + (a.tiling_microsequence & 0x3fff);
+                    a.tiling_prelude = work_page + 0x4000;
+                    a.tiling_register_alias = register_page + (a.tiling_register_alias & 0x3fff);
+                } else {
+                    a.fragment_work = work_page + (a.fragment_work & 0x3fff);
+                    a.fragment_microsequence =
+                        work_page + 0x4000 + (a.fragment_microsequence & 0x3fff);
+                    a.fragment_prelude = work_page + 0x4000;
+                    a.fragment_register_alias =
+                        register_page + (a.fragment_register_alias & 0x3fff);
+                }
+            }
+            {
+                let s = prep.sink_mut();
+                if s.client.has_pending_tables() {
+                    s.client.sync();
+                }
+                s.runtime.invalidate_client(s.client);
+            }
+            // A live context lease keeps these roots fixed through retirement.
+            a.context_id = u64::from(prep.sink_mut().runtime.acquire_context(space, 9)?);
+            a.tiling_user_timestamp_start = timestamps[0];
+            a.tiling_user_timestamp_end = timestamps[1];
+            a.fragment_user_timestamp_start = timestamps[2];
+            a.fragment_user_timestamp_end = timestamps[3];
+            let (scratch, va) = prep.commit().ok_or(EIO)?;
+            (scratch, va, a, lanes, job_owner, notifier_write)
+        };
         // From here any publication failure quarantines the roots.
         self.render_failed = true;
         let (ta, frag) = (&mut encodings.tiling, &mut encodings.fragment);

@@ -77,6 +77,8 @@ pub(crate) struct AddressSpace {
     render_arena: Arena,
     scratch_free: [KVec<core::ops::Range<u64>>; 2],
     scratch_users: [usize; 2],
+    /// Largest contiguous scratch block installed per kind (`0=compute, 1=render`).
+    scratch_max_block: [usize; 2],
     /// Firmware Work slots owned and recycled strictly within this VM.
     work_pool: crate::g16_work_pool::VmWorkPool<KVec<u64>>,
     /// The support of this compute root's FList (a private pool's own lease,
@@ -135,21 +137,31 @@ impl AddressSpace {
     /// firmware Work control data. Reused slots stay permanently mapped in
     /// their owning VM and never call this again; any pre-existing PTE at `va`
     /// is rejected so aliases cannot collide.
-    pub(crate) fn map_work_alias(&mut self, va: u64, pa: u64) -> Result {
+    pub(crate) fn map_work_alias_gfp(
+        &mut self,
+        va: u64,
+        pa: u64,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
         if self.low.translate(va)?.is_some() {
             return Err(EEXIST);
         }
-        self.low.map_pages(
+        self.low.map_pages_gfp(
             va..va + UAT_PGSZ as u64,
             pa,
             prot::PROT_GPU_SHARED_RO,
             false,
+            gfp,
         )
     }
 
     /// Remove Work alias PTEs during VM teardown or failed slot installation.
-    pub(crate) fn unmap_work_alias(&mut self, range: core::ops::Range<u64>) -> Result {
-        self.low.unmap_pages(range)
+    pub(crate) fn unmap_work_alias_gfp(
+        &mut self,
+        range: core::ops::Range<u64>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        self.low.unmap_pages_gfp(range, gfp)
     }
 
     pub(crate) fn has_free_work(&self, render: bool) -> bool {
@@ -172,11 +184,15 @@ impl AddressSpace {
         self.work_pool.pop_free(render)
     }
 
-    pub(crate) fn reserve_work_slot(&mut self, render: bool) -> Result {
+    pub(crate) fn reserve_work_slot_gfp(
+        &mut self,
+        render: bool,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
         let (owned, free) = self.work_pool.lists_mut(render);
-        owned.reserve(1, GFP_KERNEL)?;
+        owned.reserve(1, gfp)?;
         let need_free = (owned.len() + 1).saturating_sub(free.len());
-        free.reserve(need_free, GFP_KERNEL)?;
+        free.reserve(need_free, gfp)?;
         Ok(())
     }
 
@@ -235,6 +251,7 @@ impl AddressSpace {
             render_arena: Arena::default(),
             scratch_free: [KVec::new(), KVec::new()],
             scratch_users: [0; 2],
+            scratch_max_block: [0; 2],
             work_pool: crate::g16_work_pool::VmWorkPool::new(),
             compute_support: None,
             _pool_owner: None,
@@ -533,18 +550,111 @@ impl AddressSpace {
         Ok(scratch)
     }
 
+    pub(crate) fn scratch_max_block(&self, render: bool) -> usize {
+        self.scratch_max_block[usize::from(render)]
+    }
+
+    /// Pre-provision a contiguous scratch block of `size` bytes from pages
+    /// allocated outside retirement locks (`SUBMIT` ioctl). Uses only
+    /// `GFP_NOWAIT | __GFP_NOWARN` while this VM's mutex is held, and installs
+    /// leaf tables before advancing the arena so no failure strands VA.
+    pub(crate) fn provision_scratch_prealloc(
+        &mut self,
+        render: bool,
+        size: usize,
+        prealloc: &mut KVec<GpuPage>,
+    ) -> Result {
+        if size == 0 || size & (UAT_PGSZ - 1) != 0 {
+            return Err(EINVAL);
+        }
+        let index = usize::from(render);
+        if self.scratch_max_block[index] >= size {
+            return Ok(());
+        }
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
+        let page_count = size / UAT_PGSZ;
+        if prealloc.len() < page_count {
+            return Err(ENOMEM);
+        }
+        let need_cap = self.scratch_free[index].len() + self.scratch_users[index] + 2;
+        if self.scratch_free[index].capacity() < need_cap {
+            self.scratch_free[index]
+                .reserve(need_cap - self.scratch_free[index].len(), gfp)?;
+        }
+        let mut next_arena = if render {
+            self.render_arena.clone()
+        } else {
+            self.compute_arena.clone()
+        };
+        let range = next_arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?;
+        for v in (range.start..range.end).step_by(UAT_PGSZ) {
+            if self.pages.get(&v).is_some() || self.low.translate(v)?.is_some() {
+                return Err(EEXIST);
+            }
+        }
+        let mut nodes = KVec::new();
+        nodes.reserve(page_count, gfp)?;
+        self.low.prepare_map_gfp(range.clone(), gfp)?;
+        for v in (range.start..range.end).step_by(UAT_PGSZ) {
+            let page = prealloc.pop().ok_or(EIO)?;
+            let node = RBTreeNode::new(v, page, gfp)?;
+            nodes.push_within_capacity(node).map_err(|_| EIO)?;
+        }
+        if render {
+            self.render_arena = next_arena;
+        } else {
+            self.compute_arena = next_arena;
+        }
+        for node in nodes {
+            self.pages.insert(node);
+            self.owned_bytes += UAT_PGSZ;
+        }
+        for v in (range.start..range.end).step_by(UAT_PGSZ) {
+            let phys = self.pages.get(&v).ok_or(EIO)?.phys();
+            self.low
+                .map_pages_gfp(v..v + UAT_PGSZ as u64, phys, prot::PROT_GPU_SHARED_RW, false, gfp)?;
+        }
+        self.sync();
+        // Insert into the free list (coalescing with any adjacent range).
+        self.scratch_users[index] += 1;
+        self.release_scratch(Scratch { range, render })?;
+        self.scratch_max_block[index] = self.scratch_max_block[index].max(size);
+        Ok(())
+    }
+
     /// `metadata`: the lease offset from which a reused lease is cleared.
+    /// Runs on the fence-signalling pump worker, so every allocation uses
+    /// `GFP_NOWAIT | __GFP_NOWARN` (never enters direct reclaim).
     fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Result<Scratch> {
         if size == 0 || size & (UAT_PGSZ - 1) != 0 {
             return Err(EINVAL);
         }
         let index = usize::from(render);
-        // Splitting a free range adds at most one future free-list entry.
-        // Reserve now; completion and coalescing cannot allocate.
-        self.scratch_free[index].reserve(self.scratch_users[index] + 1, GFP_KERNEL)?;
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
+        let no_mem = |users: usize, max_block: usize| -> Error {
+            if users > 0 && max_block >= size {
+                EBUSY
+            } else {
+                ENOMEM
+            }
+        };
         let free = self.scratch_free[index]
             .iter()
             .position(|r| r.end - r.start >= size as u64);
+        let exact_match = free.is_some_and(|slot| {
+            let r = &self.scratch_free[index][slot];
+            r.end - r.start == size as u64
+        });
+        // Splitting a free range or adding a fresh block adds at most one
+        // future free-list entry; an exact match replaces its own slot.
+        // Reserve now; completion and coalescing cannot allocate.
+        let need_cap =
+            self.scratch_free[index].len() + self.scratch_users[index] + usize::from(!exact_match);
+        if self.scratch_free[index].capacity() < need_cap {
+            self.scratch_free[index]
+                .reserve(need_cap - self.scratch_free[index].len(), gfp)
+                .map_err(|_| no_mem(self.scratch_users[index], self.scratch_max_block[index]))?;
+        }
         let range = if let Some(slot) = free {
             let start = self.scratch_free[index][slot].start;
             let end = start + size as u64;
@@ -567,23 +677,40 @@ impl AddressSpace {
             }
             start..end
         } else {
-            // Stage the arena advance and preallocate all pages/tree nodes
-            // before mutating the arena or page tables so ENOMEM never strands
-            // scratch VA. Partial PTE edits still quarantine the range.
+            // Stage the arena advance, page tables, and backing pages with
+            // GFP_NOWAIT before mutating the arena or page tables so ENOMEM
+            // never enters reclaim and never strands scratch VA or backing.
             let mut next_arena = if render {
                 self.render_arena.clone()
             } else {
                 self.compute_arena.clone()
             };
-            let range = next_arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?;
-            let mut nodes = KVec::new();
-            nodes.reserve(size / UAT_PGSZ, GFP_KERNEL)?;
+            let range = next_arena
+                .alloc(size as u64, UAT_PGSZ as u64)
+                .ok_or_else(|| no_mem(self.scratch_users[index], self.scratch_max_block[index]))?;
             for v in (range.start..range.end).step_by(UAT_PGSZ) {
                 if self.pages.get(&v).is_some() || self.low.translate(v)?.is_some() {
                     return Err(EEXIST);
                 }
-                let page = GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?;
-                let node = RBTreeNode::new(v, page, GFP_KERNEL)?;
+            }
+            let mut nodes = KVec::new();
+            nodes
+                .reserve(size / UAT_PGSZ, gfp)
+                .map_err(|_| no_mem(self.scratch_users[index], self.scratch_max_block[index]))?;
+            if let Err(err) = self.low.prepare_map_gfp(range.clone(), gfp) {
+                return Err(if err == ENOMEM {
+                    no_mem(self.scratch_users[index], self.scratch_max_block[index])
+                } else {
+                    err
+                });
+            }
+            for v in (range.start..range.end).step_by(UAT_PGSZ) {
+                let page = GpuPage::alloc(gfp | __GFP_ZERO).map_err(|_| {
+                    no_mem(self.scratch_users[index], self.scratch_max_block[index])
+                })?;
+                let node = RBTreeNode::new(v, page, gfp).map_err(|_| {
+                    no_mem(self.scratch_users[index], self.scratch_max_block[index])
+                })?;
                 nodes.push_within_capacity(node).map_err(|_| EIO)?;
             }
             if render {
@@ -598,8 +725,9 @@ impl AddressSpace {
             for v in (range.start..range.end).step_by(UAT_PGSZ) {
                 let phys = self.pages.get(&v).ok_or(EIO)?.phys();
                 self.low
-                    .map_pages(v..v + UAT_PGSZ as u64, phys, prot::PROT_GPU_SHARED_RW, false)?;
+                    .map_pages_gfp(v..v + UAT_PGSZ as u64, phys, prot::PROT_GPU_SHARED_RW, false, gfp)?;
             }
+            self.scratch_max_block[index] = self.scratch_max_block[index].max(size);
             range
         };
         self.scratch_users[index] += 1;
@@ -891,6 +1019,76 @@ impl FirmwareSpace {
         self.regions.get(&va).is_some()
     }
 
+    /// Map preallocated zeroed `GpuPage`s at `va..va+size` using `gfp` for
+    /// metadata and page-table allocations (`GFP_NOWAIT | __GFP_NOWARN` under
+    /// retirement locks). Preallocates leaf tables before inserting into
+    /// `self.regions` so allocation failure leaves `self.regions` untouched.
+    pub(crate) fn alloc_prealloc_gfp(
+        &mut self,
+        va: u64,
+        size: usize,
+        prot: crate::pgtable::Prot,
+        prealloc: &mut KVec<GpuPage>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        if size == 0 || (va as usize | size) & (UAT_PGSZ - 1) != 0 {
+            return Err(EINVAL);
+        }
+        if crate::module_parameters::fw_trace.value() & 128 != 0 {
+            pr_info!("G16: fwmap {:#x}+{:#x} {:?}\n", va, size, prot);
+        }
+        let end = va.checked_add(size as u64).ok_or(EINVAL)?;
+        let previous = match self.regions.cursor_lower_bound(&va) {
+            Some(cursor) => {
+                if *cursor.current().0 < end {
+                    return Err(EEXIST);
+                }
+                cursor.peek_prev().map(|(base, _)| *base)
+            }
+            None => self.regions.cursor_back().map(|cursor| *cursor.current().0),
+        };
+        if previous.is_some_and(|base| {
+            let region = self.regions.get(&base).unwrap();
+            base + (region.pages.len() * UAT_PGSZ) as u64 > va
+        }) {
+            return Err(EEXIST);
+        }
+        for v in (va..end).step_by(UAT_PGSZ) {
+            if self.table.translate(v)?.is_some() {
+                return Err(EEXIST);
+            }
+        }
+        let count = size / UAT_PGSZ;
+        if prealloc.len() < count {
+            return Err(ENOMEM);
+        }
+        let mut pages = KVec::new();
+        pages.reserve(count, gfp)?;
+        self.table.prepare_map_gfp(va..end, gfp)?;
+        for _ in 0..count {
+            let page = prealloc.pop().ok_or(EIO)?;
+            pages.push_within_capacity(page).map_err(|_| EIO)?;
+        }
+        let node = RBTreeNode::new(va, FirmwareRegion { va, end, pages }, gfp)?;
+        self.regions.insert(node);
+        let region = self.regions.get(&va).ok_or(EIO)?;
+        for (i, page) in region.pages.iter().enumerate() {
+            let v = va + (i * UAT_PGSZ) as u64;
+            if let Err(e) = self
+                .table
+                .map_pages_gfp(v..v + UAT_PGSZ as u64, page.phys(), prot, false, gfp)
+            {
+                if v != va {
+                    self.table.unmap_pages_gfp(va..v, gfp)?;
+                }
+                self.table.publish();
+                self.regions.remove(&va);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot) -> Result {
         if size == 0 || (va as usize | size) & (UAT_PGSZ - 1) != 0 {
             return Err(EINVAL);
@@ -1165,8 +1363,12 @@ impl FirmwareSpace {
 
     /// Called only after the context is drained and its hardware roots detached.
     pub(crate) fn release_region(&mut self, va: u64) -> Result {
+        self.release_region_gfp(va, GFP_KERNEL)
+    }
+
+    pub(crate) fn release_region_gfp(&mut self, va: u64, gfp: kernel::alloc::Flags) -> Result {
         let size = self.regions.get(&va).ok_or(EINVAL)?.pages.len() * UAT_PGSZ;
-        self.table.unmap_pages(va..va + size as u64)?;
+        self.table.unmap_pages_gfp(va..va + size as u64, gfp)?;
         self.table.publish();
         self.regions.remove(&va);
         Ok(())

@@ -41,12 +41,18 @@ for src in (compute, render):
     assert src.index('prep.commit()') < src.index('self.render_failed = true;')
 
 # AddressSpace::prepare_render rolls back scratch on write_low error,
-# lease_scratch stages arena advancement until all pages/nodes allocate, and
-# release_scratch uses push_within_capacity (never allocates).
+# lease_scratch and provision_scratch_prealloc use GFP_NOWAIT | __GFP_NOWARN
+# (never entering direct reclaim in the pump worker or under VM locks) and call
+# prepare_map_gfp before advancing the arena, and release_scratch never allocates.
 pr = vm[vm.index('pub(crate) fn prepare_render('):vm.index('pub(crate) fn alloc_compute_pool(')]
 assert 'let _ = self.release_scratch(scratch);' in pr
+ps = vm[vm.index('pub(crate) fn provision_scratch_prealloc('):vm.index('fn lease_scratch(')]
+assert 'GFP_NOWAIT | __GFP_NOWARN' in ps and 'GFP_KERNEL' not in ps
+assert ps.index('self.low.prepare_map_gfp(range.clone(), gfp)?') < ps.index('self.render_arena = next_arena;')
 ls = vm[vm.index('fn lease_scratch('):vm.index('pub(crate) fn release_scratch(')]
-assert ls.index('GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?') < ls.index('self.render_arena = next_arena;')
+assert 'GFP_NOWAIT | __GFP_NOWARN' in ls and 'GFP_KERNEL' not in ls
+assert ls.index('self.low.prepare_map_gfp(range.clone(), gfp)') < ls.index('self.render_arena = next_arena;')
+assert ls.index('GpuPage::alloc(gfp | __GFP_ZERO)') < ls.index('self.render_arena = next_arena;')
 rs = vm[vm.index('pub(crate) fn release_scratch('):vm.index('pub(crate) fn tvb_va_blocks(')]
 assert 'push_within_capacity(range)' in rs and 'GFP_KERNEL' not in rs
 

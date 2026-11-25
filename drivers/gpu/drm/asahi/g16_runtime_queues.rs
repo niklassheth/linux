@@ -15,19 +15,22 @@ impl Bootstrap {
 
     /// For the SUBMIT ioctl (process context, BEFORE fence publication):
     /// ensure `client` owns at least `min_slots` pre-mapped per-VM Work slots
-    /// so the fence-signalling pump worker never allocates Work pages, PTEs,
-    /// or bookkeeping vectors.
+    /// from backing pages preallocated outside retirement locks. Every
+    /// internal allocation while `device.runtime` and `client` locks are held
+    /// uses `GFP_NOWAIT | __GFP_NOWARN` so retirement of earlier exported
+    /// fences can never deadlock in reclaim.
     pub(crate) fn provision_work(
         &mut self,
         client: &mut g16_vm::AddressSpace,
         render: bool,
         min_slots: usize,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
     ) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
         while client.work_owned(render) < min_slots {
-            self.provision_one_work_slot(client, render)?;
+            self.provision_one_work_slot(client, render, prealloc)?;
         }
         Ok(())
     }
@@ -37,9 +40,11 @@ impl Bootstrap {
         &mut self,
         client: &mut g16_vm::AddressSpace,
         render: bool,
+        prealloc: &mut KVec<g16_vm::GpuPage>,
     ) -> Result {
         use crate::g16_work_pool as wp;
         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
+        let gfp = GFP_NOWAIT | __GFP_NOWARN;
         let index = usize::from(render);
         let stride = wp::stride(render);
         let (priv_size, shared_size) = if render {
@@ -49,7 +54,7 @@ impl Bootstrap {
         };
         // Reserve VM and teardown capacities up front so retirement and VM
         // teardown never allocate.
-        client.reserve_work_slot(render)?;
+        client.reserve_work_slot_gfp(render, gfp)?;
         let from_free = !self.free_work_va[index].is_empty();
         let va = if from_free {
             *self.free_work_va[index].last().ok_or(EIO)?
@@ -59,7 +64,7 @@ impl Bootstrap {
                 return Err(ENOSPC);
             }
             let slots = self.work_va_slots[index] + 1;
-            self.free_work_va[index].reserve(slots - self.free_work_va[index].len(), GFP_KERNEL)?;
+            self.free_work_va[index].reserve(slots - self.free_work_va[index].len(), gfp)?;
             self.next_work_va
         };
         let alias_range = wp::alias_range(va, WORK_BASE, WORK_WINDOW, render).ok_or(ENOSPC)?;
@@ -77,15 +82,21 @@ impl Bootstrap {
         let mut pas = [0u64; 2];
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-            if let Err(err) = fw.alloc(va, priv_size, PROT_FW_PRIV_RW) {
-                // Only recycle `va` if `fw.alloc` did not retain a partial region.
+            if let Err(err) = fw.alloc_prealloc_gfp(va, priv_size, PROT_FW_PRIV_RW, prealloc, gfp) {
+                // Only recycle `va` if `fw` did not retain a partial region.
                 if !fw.has_region(va) {
                     let _ = self.free_work_va[index].push_within_capacity(va);
                 }
                 return Err(err);
             }
-            if let Err(err) = fw.alloc(va + priv_size as u64, shared_size, PROT_FW_SHARED_RW) {
-                let r1 = fw.release_region(va);
+            if let Err(err) = fw.alloc_prealloc_gfp(
+                va + priv_size as u64,
+                shared_size,
+                PROT_FW_SHARED_RW,
+                prealloc,
+                gfp,
+            ) {
+                let r1 = fw.release_region_gfp(va, gfp);
                 if r1.is_ok() && !fw.has_region(va) && !fw.has_region(va + priv_size as u64) {
                     let _ = self.free_work_va[index].push_within_capacity(va);
                 }
@@ -95,8 +106,8 @@ impl Bootstrap {
                 match fw.physical(va + stage as u64 * 0x8000) {
                     Ok(pa) => *pa_slot = pa,
                     Err(err) => {
-                        let r1 = fw.release_region(va);
-                        let r2 = fw.release_region(va + priv_size as u64);
+                        let r1 = fw.release_region_gfp(va, gfp);
+                        let r2 = fw.release_region_gfp(va + priv_size as u64, gfp);
                         if r1.is_ok()
                             && r2.is_ok()
                             && !fw.has_region(va)
@@ -118,9 +129,9 @@ impl Bootstrap {
                 self._address_space
                     .as_mut()
                     .ok_or(EIO)?
-                    .map_work_alias(register_page, pa)?;
+                    .map_work_alias_gfp(register_page, pa, gfp)?;
                 dev_mapped = stage as u64 + 1;
-                client.map_work_alias(register_page, pa)?;
+                client.map_work_alias_gfp(register_page, pa, gfp)?;
                 client_mapped = stage as u64 + 1;
             }
             Ok(())
@@ -129,7 +140,7 @@ impl Bootstrap {
             let mut clean = true;
             if client_mapped != 0 {
                 let end = alias_range.start + client_mapped * 0x4000;
-                if client.unmap_work_alias(alias_range.start..end).is_err() {
+                if client.unmap_work_alias_gfp(alias_range.start..end, gfp).is_err() {
                     clean = false;
                 }
                 if client.has_pending_tables() {
@@ -140,7 +151,7 @@ impl Bootstrap {
             if dev_mapped != 0 {
                 let end = alias_range.start + dev_mapped * 0x4000;
                 if let Some(dev_space) = self._address_space.as_mut() {
-                    if dev_space.unmap_work_alias(alias_range.start..end).is_err() {
+                    if dev_space.unmap_work_alias_gfp(alias_range.start..end, gfp).is_err() {
                         clean = false;
                     }
                     if dev_space.has_pending_tables() {
@@ -153,8 +164,8 @@ impl Bootstrap {
             }
             if clean {
                 if let Some(fw) = self._firmware_space.as_mut() {
-                    let r1 = fw.release_region(va);
-                    let r2 = fw.release_region(va + priv_size as u64);
+                    let r1 = fw.release_region_gfp(va, gfp);
+                    let r2 = fw.release_region_gfp(va + priv_size as u64, gfp);
                     if r1.is_ok()
                         && r2.is_ok()
                         && !fw.has_region(va)
@@ -184,6 +195,9 @@ impl Bootstrap {
 
         client.record_idle_work(render, va)?;
         self.vm_free_work[index] += 1;
+        // Invalidate any cached Work-space CapBlock EBUSY in the pump so a
+        // waiting job immediately sees the newly provisioned slot.
+        self.retire_gen = self.retire_gen.wrapping_add(1);
         Ok(())
     }
 

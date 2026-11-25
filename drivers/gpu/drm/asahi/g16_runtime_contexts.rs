@@ -250,15 +250,16 @@ impl Bootstrap {
         // on the VM's idle list. Only fully cleaned slots return their
         // unbacked firmware VA to `free_work_va`.
         for render in [false, true] {
+            let gfp = GFP_NOWAIT | __GFP_NOWARN;
             let index = usize::from(render);
             let priv_size = if render { 0x10000u64 } else { 0x4000u64 };
             while space.work_owned(render) != 0 {
-                space.low.reserve_invalidation()?;
+                space.low.reserve_invalidation_gfp(gfp)?;
                 self._address_space
                     .as_mut()
                     .ok_or(EIO)?
                     .low
-                    .reserve_invalidation()?;
+                    .reserve_invalidation_gfp(gfp)?;
                 let Some(va) = space.take_teardown_work(render) else {
                     return Err(EIO);
                 };
@@ -266,7 +267,7 @@ impl Bootstrap {
                 let alias_range =
                     crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, render)
                         .ok_or(EIO)?;
-                let client_unmap = space.unmap_work_alias(alias_range.clone());
+                let client_unmap = space.unmap_work_alias_gfp(alias_range.clone(), gfp);
                 if space.has_pending_tables() {
                     space.sync();
                 }
@@ -275,7 +276,7 @@ impl Bootstrap {
                     ._address_space
                     .as_mut()
                     .ok_or(EIO)?
-                    .unmap_work_alias(alias_range);
+                    .unmap_work_alias_gfp(alias_range, gfp);
                 if let Some(dev_space) = self._address_space.as_ref() {
                     if dev_space.has_pending_tables() {
                         dev_space.sync();
@@ -284,8 +285,8 @@ impl Bootstrap {
                 }
                 dev_unmap?;
                 let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-                fw.release_region(va)?;
-                fw.release_region(va + priv_size)?;
+                fw.release_region_gfp(va, gfp)?;
+                fw.release_region_gfp(va + priv_size, gfp)?;
                 if !fw.has_region(va) && !fw.has_region(va + priv_size) {
                     self.free_work_va[index]
                         .push_within_capacity(va)

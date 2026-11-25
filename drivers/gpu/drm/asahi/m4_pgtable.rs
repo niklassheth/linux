@@ -279,7 +279,7 @@ impl UatPageTable {
 
     /// Record before editing so an allocation failure cannot hide a changed
     /// mapping. Adjacent edits share one invalidation interval.
-    fn changed(&mut self, range: Range<u64>) -> Result {
+    fn changed_gfp(&mut self, range: Range<u64>, gfp: kernel::alloc::Flags) -> Result {
         if range.is_empty()
             || range.start < self.va_range.start
             || range.end > self.va_range.end
@@ -295,7 +295,7 @@ impl UatPageTable {
                 return Ok(());
             }
         }
-        ranges.push(range, GFP_KERNEL)?;
+        ranges.push(range, gfp)?;
         Ok(())
     }
 
@@ -308,7 +308,11 @@ impl UatPageTable {
     }
 
     pub(crate) fn reserve_invalidation(&mut self) -> Result {
-        self.invalidations.get_mut().reserve(1, GFP_KERNEL)?;
+        self.reserve_invalidation_gfp(GFP_KERNEL)
+    }
+
+    pub(crate) fn reserve_invalidation_gfp(&mut self, gfp: kernel::alloc::Flags) -> Result {
+        self.invalidations.get_mut().reserve(1, gfp)?;
         Ok(())
     }
 
@@ -326,18 +330,18 @@ impl UatPageTable {
 
     // Record dirtiness before writing a PTE so allocation failure cannot leave
     // an untracked edit. Read-only walks neither allocate nor dirty metadata.
-    fn mark_dirty(&mut self, phys: PhysicalAddr) -> Result {
+    fn mark_dirty_gfp(&mut self, phys: PhysicalAddr, gfp: kernel::alloc::Flags) -> Result {
         match self.dirty_tables.get(&phys) {
             Some(dirty) if dirty.get() => return Ok(()),
             Some(_) => {}
             None => {
                 self.dirty_tables
-                    .try_create_and_insert(phys, Cell::new(false), GFP_KERNEL)?;
+                    .try_create_and_insert(phys, Cell::new(false), gfp)?;
             }
         }
         // Queue before setting membership or editing a PTE. A failed reserve
         // leaves the table clean and permits a later attempt to enqueue it.
-        self.pending_tables.get_mut().push(phys, GFP_KERNEL)?;
+        self.pending_tables.get_mut().push(phys, gfp)?;
         self.dirty_tables.get(&phys).unwrap().set(true);
         Ok(())
     }
@@ -346,7 +350,20 @@ impl UatPageTable {
         self.ttb
     }
 
-    fn with_pages<F>(&mut self, iova_range: Range<u64>, walk: Walk, mut cb: F) -> Result
+    fn with_pages<F>(&mut self, iova_range: Range<u64>, walk: Walk, cb: F) -> Result
+    where
+        F: FnMut(u64, &[Pte]) -> Result,
+    {
+        self.with_pages_gfp(iova_range, walk, GFP_KERNEL, cb)
+    }
+
+    fn with_pages_gfp<F>(
+        &mut self,
+        iova_range: Range<u64>,
+        walk: Walk,
+        gfp: kernel::alloc::Flags,
+        mut cb: F,
+    ) -> Result
     where
         F: FnMut(u64, &[Pte]) -> Result,
     {
@@ -413,19 +430,19 @@ impl UatPageTable {
                             let mut upte_val = upte.load(Ordering::Relaxed);
                             // Allocate if requested
                             if upte_val == 0 && alloc {
-                                self.mark_dirty(phys)?;
-                                let pt_page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+                                self.mark_dirty_gfp(phys, gfp)?;
+                                let pt_page = Page::alloc_page(gfp | __GFP_ZERO)?;
                                 pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
                                 let pt_paddr = pt_page.phys();
                                 self.owned_tables.push(OwnedTable {
                                     phys: pt_paddr,
                                     parent: phys,
                                     index: upidx,
-                                }, GFP_KERNEL)?;
+                                }, gfp)?;
                                 let _ = Page::into_phys(pt_page);
                                 // The new table's zero entries also need publication.
                                 // Ownership has transferred before this fallible step.
-                                self.mark_dirty(pt_paddr)?;
+                                self.mark_dirty_gfp(pt_paddr, gfp)?;
                                 upte_val = pt_paddr | PTE_TYPE_LEAF_TABLE;
                                 upte.store(upte_val, Ordering::Relaxed);
                             }
@@ -473,7 +490,7 @@ impl UatPageTable {
                 iova
             );
             if write {
-                self.mark_dirty(phys)?;
+                self.mark_dirty_gfp(phys, gfp)?;
             }
             // SAFETY: Page table addresses are either allocated by us, or
             // firmware-managed and safe to borrow a struct page from.
@@ -504,12 +521,43 @@ impl UatPageTable {
         }
     }
 
+    /// Preallocate intermediate page tables, dirty-table tracking, and
+    /// invalidation slot capacity for `iova_range` using `gfp` without writing
+    /// any leaf PTEs. Once this succeeds, `map_pages_gfp` over subranges of
+    /// `iova_range` will not allocate.
+    pub(crate) fn prepare_map_gfp(
+        &mut self,
+        iova_range: Range<u64>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        if iova_range.is_empty()
+            || iova_range.start < self.va_range.start
+            || iova_range.end > self.va_range.end
+            || (iova_range.start | iova_range.end) & UAT_PGMSK as u64 != 0
+        {
+            return Err(EINVAL);
+        }
+        self.reserve_invalidation_gfp(gfp)?;
+        self.with_pages_gfp(iova_range, Walk::Allocate, gfp, |_, _| Ok(()))
+    }
+
     pub(crate) fn map_pages(
+        &mut self,
+        iova_range: Range<u64>,
+        phys: PhysicalAddr,
+        prot: Prot,
+        one_page: bool,
+    ) -> Result {
+        self.map_pages_gfp(iova_range, phys, prot, one_page, GFP_KERNEL)
+    }
+
+    pub(crate) fn map_pages_gfp(
         &mut self,
         iova_range: Range<u64>,
         mut phys: PhysicalAddr,
         prot: Prot,
         one_page: bool,
+        gfp: kernel::alloc::Flags,
     ) -> Result {
         pr_debug!(
             "UATPageTable::map_pages: {:#x?} {:#x?} {:?}\n",
@@ -522,10 +570,10 @@ impl UatPageTable {
             return Err(EINVAL);
         }
 
-        self.changed(iova_range.clone())?;
+        self.changed_gfp(iova_range.clone(), gfp)?;
         let pte_bits = self.pte_bits();
 
-        self.with_pages(iova_range, Walk::Allocate, |iova, ptes| {
+        self.with_pages_gfp(iova_range, Walk::Allocate, gfp, |iova, ptes| {
             for (idx, pte) in ptes.iter().enumerate() {
                 let ptev = pte.load(Ordering::Relaxed);
                 if ptev != 0 {
@@ -564,9 +612,17 @@ impl UatPageTable {
     }
 
     pub(crate) fn unmap_pages(&mut self, iova_range: Range<u64>) -> Result {
-        self.changed(iova_range.clone())?;
+        self.unmap_pages_gfp(iova_range, GFP_KERNEL)
+    }
+
+    pub(crate) fn unmap_pages_gfp(
+        &mut self,
+        iova_range: Range<u64>,
+        gfp: kernel::alloc::Flags,
+    ) -> Result {
+        self.changed_gfp(iova_range.clone(), gfp)?;
         pr_debug!("UATPageTable::unmap_pages: {:#x?}\n", iova_range);
-        self.with_pages(iova_range, Walk::Write, |iova, ptes| {
+        self.with_pages_gfp(iova_range, Walk::Write, gfp, |iova, ptes| {
             for (idx, pte) in ptes.iter().enumerate() {
                 if pte.load(Ordering::Relaxed) & PTE_TYPE_LEAF_TABLE == 0 {
                     pr_err!(

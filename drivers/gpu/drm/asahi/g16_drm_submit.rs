@@ -319,35 +319,130 @@ impl File {
                 vm.compute_ready = true;
             }
         }
+        // Prune signaled fences first so `pending_jobs` reflects live queued
+        // submissions on this VM when sizing per-VM Work pools.
+        vm.pending.retain(|f| {
+            // SAFETY: Each entry owns its live fence reference.
+            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+        });
+        let pending_jobs = vm.pending.len();
+
         // Provision what this queue's or VM root's publication would otherwise
-        // allocate in the job worker (firmware rings, TVB pool, and per-VM
-        // Work slots), so any allocation failure returns here before fence
-        // publication instead of entering reclaim in the fence-signalling
-        // worker.
+        // allocate in the job worker (firmware rings, TVB pool, per-VM Work
+        // slots, and initial scratch backing). Preallocate backing pages with
+        // GFP_KERNEL *outside* device.runtime and VM AddressSpace locks, then
+        // install them inside those locks using only GFP_NOWAIT | __GFP_NOWARN
+        // so reclaim can never deadlock against retirement of earlier fences.
         const MAX_VM_WORK_SLOTS: usize = 64;
         let tvb = renders != 0 && !vm.tvb_ready;
-        let render_work_target = if renders != 0 {
+        let (render_work_target, render_work_add) = if renders != 0 {
             let need = usize::from(renders);
             let space = vm.space.lock();
             let owned = space.work_owned(true);
-            let want = (owned + if space.has_free_work(true) { 0 } else { need })
-                .max(need)
-                .min(MAX_VM_WORK_SLOTS);
-            if owned < want { want } else { 0 }
+            let queued_want = (pending_jobs + 1).saturating_mul(need).min(MAX_VM_WORK_SLOTS);
+            let idle_want = if space.has_free_work(true) {
+                owned
+            } else {
+                owned.saturating_add(need).min(MAX_VM_WORK_SLOTS)
+            };
+            let want = queued_want.max(idle_want);
+            if owned < want {
+                (want, want - owned)
+            } else {
+                (0, 0)
+            }
         } else {
-            0
+            (0, 0)
         };
-        let compute_work_target = if computes != 0 {
+        let (compute_work_target, compute_work_add) = if computes != 0 {
             let need = usize::from(computes);
             let space = vm.compute_space.lock();
             let owned = space.work_owned(false);
-            let want = (owned + if space.has_free_work(false) { 0 } else { need })
-                .max(need)
-                .min(MAX_VM_WORK_SLOTS);
-            if owned < want { want } else { 0 }
+            let queued_want = (pending_jobs + 1).saturating_mul(need).min(MAX_VM_WORK_SLOTS);
+            let idle_want = if space.has_free_work(false) {
+                owned
+            } else {
+                owned.saturating_add(need).min(MAX_VM_WORK_SLOTS)
+            };
+            let want = queued_want.max(idle_want);
+            if owned < want {
+                (want, want - owned)
+            } else {
+                (0, 0)
+            }
         } else {
-            0
+            (0, 0)
         };
+        let mut max_render_scratch = 0usize;
+        if renders != 0 {
+            for p in &parameters {
+                if let Parameters::Render(r) = p {
+                    if let Some((tilemap, tpc)) = r.scratch_sizes() {
+                        let size = tilemap
+                            .checked_add(tpc)
+                            .and_then(|n| n.checked_add(5 * crate::pgtable::UAT_PGSZ))
+                            .and_then(|n| {
+                                n.checked_add(if vm.native_mode.enabled() {
+                                    crate::g16_mesh::Profile::PAYLOAD_BYTES
+                                } else {
+                                    0
+                                })
+                            })
+                            .ok_or(ENOMEM)?;
+                        max_render_scratch = max_render_scratch.max(size);
+                    }
+                }
+            }
+        }
+        let need_render_scratch =
+            max_render_scratch != 0 && vm.space.lock().scratch_max_block(true) < max_render_scratch;
+        let need_compute_scratch =
+            computes != 0 && vm.compute_space.lock().scratch_max_block(false) < 0x28000;
+
+        let alloc_pages = |count: usize| -> Result<KVec<crate::g16_vm::GpuPage>> {
+            let mut pages = KVec::with_capacity(count, GFP_KERNEL)?;
+            for _ in 0..count {
+                pages
+                    .push_within_capacity(crate::g16_vm::GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?)
+                    .map_err(|_| EIO)?;
+            }
+            Ok(pages)
+        };
+        let mut prealloc_render_work = if render_work_add != 0 {
+            alloc_pages(render_work_add * 7)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_compute_work = if compute_work_add != 0 {
+            alloc_pages(compute_work_add * 2)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_render_scratch = if need_render_scratch {
+            alloc_pages(max_render_scratch / crate::pgtable::UAT_PGSZ)?
+        } else {
+            KVec::new()
+        };
+        let mut prealloc_compute_scratch = if need_compute_scratch {
+            alloc_pages(0x28000 / crate::pgtable::UAT_PGSZ)?
+        } else {
+            KVec::new()
+        };
+
+        if need_render_scratch {
+            vm.space.lock().provision_scratch_prealloc(
+                true,
+                max_render_scratch,
+                &mut prealloc_render_scratch,
+            )?;
+        }
+        if need_compute_scratch {
+            vm.compute_space.lock().provision_scratch_prealloc(
+                false,
+                0x28000,
+                &mut prealloc_compute_scratch,
+            )?;
+        }
         if tvb
             || !firmware.lock().provisioned()
             || render_work_target != 0
@@ -364,10 +459,20 @@ impl File {
                 vm.tvb_ready = true;
             }
             if render_work_target != 0 {
-                runtime.provision_work(&mut vm.space.lock(), true, render_work_target)?;
+                runtime.provision_work(
+                    &mut vm.space.lock(),
+                    true,
+                    render_work_target,
+                    &mut prealloc_render_work,
+                )?;
             }
             if compute_work_target != 0 {
-                runtime.provision_work(&mut vm.compute_space.lock(), false, compute_work_target)?;
+                runtime.provision_work(
+                    &mut vm.compute_space.lock(),
+                    false,
+                    compute_work_target,
+                    &mut prealloc_compute_work,
+                )?;
             }
         }
         // Every submission retains the VM's mappings until it completes.
@@ -389,10 +494,6 @@ impl File {
             _mappings: mappings,
             _timestamps: timestamp_bindings,
         };
-        vm.pending.retain(|f| {
-            // SAFETY: Each entry owns its live fence reference.
-            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
-        });
         vm.pending.reserve(1, GFP_KERNEL)?;
         let completion = dma_fence::Fence::from_fence(&unique);
         let worker_completion = completion.clone();

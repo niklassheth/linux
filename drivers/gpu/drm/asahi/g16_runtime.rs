@@ -482,6 +482,9 @@ struct RenderEvents {
     /// Monotonic control-channel epoch of the latest TVB growth/memory-limit
     /// reply sent for this render (0 if none).
     reply_epoch: u64,
+    /// A matched TVB growth or memory-limit event is waiting for control-ring
+    /// space; hold retirement until the reply is committed and observed.
+    pending_event: bool,
 }
 
 /// Firmware VA of the first Work arena; Work offsets from here alias into the

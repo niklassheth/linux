@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 use g16_work_pool::{
     alias_range, stride, SlotVec, VmWorkPool, COMPUTE_ALIAS_BASE, COMPUTE_STRIDE,
     RENDER_ALIAS_BASE, RENDER_STRIDE,
@@ -42,10 +43,11 @@ impl SlotVec for Vec<u64> {
 }
 
 fn provision_one(pool: &mut VmWorkPool<Vec<u64>>, render: bool, va: u64) {
-    let (owned, free) = pool.lists_mut(render);
+    let (owned, free, tearing_down) = pool.lists_mut(render);
     owned.reserve(1);
-    let need_free = (owned.len() + 1).saturating_sub(free.len());
-    free.reserve(need_free);
+    let target = owned.len() + 1;
+    free.reserve(target.saturating_sub(free.len()));
+    tearing_down.reserve(1usize.saturating_sub(tearing_down.len()));
     assert_eq!(pool.record_idle(render, va), Ok(()));
 }
 
@@ -94,12 +96,18 @@ fn two_vms_never_share_work_slots_or_aliases_while_alive() {
     assert_eq!(vm_a.release(true, va_a), Err(()));
 
     // Teardown refuses while VM B still has a leased slot; once idle,
-    // take_teardown removes va_b from circulation immediately before unmap.
-    assert_eq!(vm_b.take_teardown(true), None);
+    // begin_teardown moves va_b out of `free` into `tearing_down` while
+    // retaining ownership until finish_teardown completes.
+    assert_eq!(vm_b.begin_teardown(true), None);
     assert_eq!(vm_b.release(true, va_b), Ok(()));
-    assert_eq!(vm_b.take_teardown(true), Some(va_b));
+    assert_eq!(vm_b.begin_teardown(true), Some(va_b));
     assert!(!vm_b.has_free(true));
     assert_eq!(vm_b.pop_free(true), None);
+    assert_eq!(vm_b.peek_tearing_down(true), Some(va_b));
+    assert_eq!(vm_b.owned_count(true), 1);
+    assert_eq!(vm_b.owned_bytes(), RENDER_STRIDE as usize);
+    assert_eq!(vm_b.finish_teardown(true, va_b), Ok(()));
+    assert_eq!(vm_b.peek_tearing_down(true), None);
     assert_eq!(vm_b.owned_count(true), 0);
     assert_eq!(vm_b.owned_bytes(), 0);
     let _ = next_va;
@@ -132,9 +140,39 @@ fn compute_and_render_accounting_and_alias_windows() {
         None
     );
 
-    // Teardown removes slots immediately from each kind.
-    assert_eq!(vm.take_teardown(false), Some(va_c));
+    // Teardown keeps ownership until finish_teardown for each kind.
+    assert_eq!(vm.begin_teardown(false), Some(va_c));
+    assert_eq!(vm.owned_bytes(), (COMPUTE_STRIDE + RENDER_STRIDE) as usize);
+    assert_eq!(vm.finish_teardown(false, va_c), Ok(()));
     assert_eq!(vm.owned_bytes(), RENDER_STRIDE as usize);
-    assert_eq!(vm.take_teardown(true), Some(va_r));
+    assert_eq!(vm.begin_teardown(true), Some(va_r));
+    assert_eq!(vm.finish_teardown(true, va_r), Ok(()));
+    assert_eq!(vm.owned_bytes(), 0);
+}
+
+#[test]
+fn interrupted_teardown_stays_unleasable_and_resumes_cleanly() {
+    let mut vm = VmWorkPool::<Vec<u64>>::new();
+    let va1 = WORK_BASE;
+    let va2 = WORK_BASE + RENDER_STRIDE;
+    provision_one(&mut vm, true, va1);
+    provision_one(&mut vm, true, va2);
+
+    // Start tearing down va2 and simulate an error before finish_teardown.
+    assert_eq!(vm.begin_teardown(true), Some(va2));
+    // A second begin_teardown refuses until the interrupted slot finishes.
+    assert_eq!(vm.begin_teardown(true), None);
+    // The tearing-down slot cannot be leased or released back to free.
+    assert_eq!(vm.release(true, va2), Err(()));
+    assert_eq!(vm.owned_count(true), 2);
+    assert_eq!(vm.owned_bytes(), 2 * RENDER_STRIDE as usize);
+    // Retry resumes via peek_tearing_down and finishes va2, then va1.
+    assert_eq!(vm.peek_tearing_down(true), Some(va2));
+    assert_eq!(vm.finish_teardown(true, va2), Ok(()));
+    assert_eq!(vm.peek_tearing_down(true), None);
+    assert_eq!(vm.owned_count(true), 1);
+    assert_eq!(vm.begin_teardown(true), Some(va1));
+    assert_eq!(vm.finish_teardown(true, va1), Ok(()));
+    assert_eq!(vm.owned_count(true), 0);
     assert_eq!(vm.owned_bytes(), 0);
 }

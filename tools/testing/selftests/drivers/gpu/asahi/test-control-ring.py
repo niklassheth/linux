@@ -46,7 +46,10 @@ assert 'let target = self.control_ring.commit();' in queues
 assert queues.index('self.destroying_queues\n            .push_within_capacity((base, target))') < queues.index('send_message(0x21,')
 assert 'if !committed {' in queues
 assert 'if !self.control_ring.has_room()' in retire
+assert 'service.pending_event = true;' in retire
 assert 'service.reply_epoch = self.control_ring.commit();' in retire
+assert 'service.pending_event = false;' in retire
+assert '!render.events.pending_event' in retire
 assert 'self.control_ring.reached(render.events.reply_epoch)' in retire
 
 print('test-control-ring: ok')

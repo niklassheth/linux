@@ -338,11 +338,12 @@ impl Bootstrap {
                 }
             }
             // Growth replies can refer to a Work after its main stage stamp.
-            // Wait only for this render's own latest control reply epoch so
-            // unrelated newer control traffic (e.g. queue destroys) cannot
-            // hold a completed render through the watchdog.
+            // Wait only for this render's own pending event or latest control
+            // reply epoch so unrelated newer control traffic (e.g. queue
+            // destroys) cannot hold a completed render through the watchdog.
             if let Some(render) = &flight.render {
-                let replied = self.control_ring.reached(render.events.reply_epoch);
+                let replied = !render.events.pending_event
+                    && self.control_ring.reached(render.events.reply_epoch);
                 blocked |= u32::from(!replied) << 4;
                 done &= replied;
             }
@@ -668,6 +669,7 @@ impl Bootstrap {
                 .observe(head, ack, tail)
                 .map_err(|_| EIO)?;
             if !self.control_ring.has_room() {
+                service.pending_event = true;
                 break;
             }
             let (slot, successor) = self.control_ring.next_slot();
@@ -792,6 +794,7 @@ impl Bootstrap {
             guard.try_write32(successor, 0xd60060)?;
             drop(guard);
             service.reply_epoch = self.control_ring.commit();
+            service.pending_event = false;
             crate::mem::sync();
             self._rtkit
                 .as_mut()

@@ -54,16 +54,18 @@ assert 'GFP_NOWAIT | __GFP_NOWARN' in prov_fn and 'GFP_KERNEL' not in prov_fn
 assert 'self.retire_gen = self.retire_gen.wrapping_add(1);' in prov_fn
 assert 'if !fw.has_region(va)' in prov_fn
 
-# VM teardown detaches contexts, requires all Work slots idle, removes each
-# slot from circulation via take_teardown_work BEFORE the first destructive
-# unmap, invalidates context 0, releases firmware regions, and only then
-# returns the unbacked VA.
+# VM teardown detaches contexts, requires all Work slots idle, moves each slot
+# into tearing_down via begin_teardown_work BEFORE the first destructive unmap
+# (and resumes via peek_tearing_down_work on retry), invalidates context 0,
+# releases firmware regions, and only then finishes ownership and returns VA.
 rel = contexts[contexts.index('pub(crate) fn release_render_vm('):]
 assert rel.index('!space.work_pool_all_idle()') < rel.index('self.set_context(index, None)?')
-assert rel.index('space.take_teardown_work(render)') < rel.index('space.unmap_work_alias_gfp(')
+assert rel.index('space.peek_tearing_down_work(render)') < rel.index('space.begin_teardown_work(render)')
+assert rel.index('space.begin_teardown_work(render)') < rel.index('space.unmap_work_alias_gfp(')
 assert rel.index('space.unmap_work_alias_gfp(') < rel.index('fw.release_region_gfp(va, gfp)?')
 assert rel.index('self.invalidate_client(dev_space);') < rel.index('fw.release_region_gfp(va, gfp)?')
-assert rel.index('fw.release_region_gfp(va + priv_size, gfp)?') < rel.index('self.free_work_va[index]')
+assert rel.index('fw.release_region_gfp(va + priv_size, gfp)?') < rel.index('space.finish_teardown_work(render, va)?')
+assert rel.index('space.finish_teardown_work(render, va)?') < rel.index('self.free_work_va[index]')
 
 # JobNotifier retains owner_client so retired owner slots return strictly to it.
 assert 'owner_client: Arc<Mutex<g16_vm::AddressSpace>>' in runtime

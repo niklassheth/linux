@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 use g16_work_pool::{LeaseSink, PrepGuard, SlotVec, VmWorkPool};
 
 impl SlotVec for Vec<u64> {
@@ -56,9 +57,10 @@ impl FakeRuntime {
     }
 
     fn alloc_work(&mut self, render: bool, va: u64) -> u64 {
-        let (owned, free) = self.work_pool.lists_mut(render);
+        let (owned, free, tearing_down) = self.work_pool.lists_mut(render);
         owned.reserve(1);
         free.reserve(1);
+        tearing_down.reserve(1);
         self.work_pool.record_idle(render, va).unwrap();
         self.work_pool.pop_free(render).unwrap()
     }

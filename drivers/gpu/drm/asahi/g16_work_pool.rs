@@ -64,12 +64,15 @@ pub(crate) trait SlotVec: Default {
 
 /// Per-VM Work slot pool (`0 = compute`, `1 = render`).
 ///
-/// Invariant: for each kind `i`, `free[i].len() + leased[i] == owned[i].len()`,
-/// every element of `free[i]` is a distinct member of `owned[i]`, and slots in
-/// `owned[i]` never move to any other `VmWorkPool` while this VM is alive.
+/// Invariant: for each kind `i`,
+/// `free[i].len() + leased[i] + tearing_down[i].len() == owned[i].len()`,
+/// `free[i]` and `tearing_down[i]` are disjoint subsets of `owned[i]`, and
+/// slots in `owned[i]` never move to any other `VmWorkPool` while this VM is
+/// alive.
 pub(crate) struct VmWorkPool<V: SlotVec> {
     owned: [V; 2],
     free: [V; 2],
+    tearing_down: [V; 2],
     leased: [usize; 2],
 }
 
@@ -78,6 +81,7 @@ impl<V: SlotVec> Default for VmWorkPool<V> {
         Self {
             owned: [V::default(), V::default()],
             free: [V::default(), V::default()],
+            tearing_down: [V::default(), V::default()],
             leased: [0; 2],
         }
     }
@@ -109,9 +113,13 @@ impl<V: SlotVec> VmWorkPool<V> {
             + self.owned[1].len() * RENDER_STRIDE as usize
     }
 
-    pub(crate) fn lists_mut(&mut self, render: bool) -> (&mut V, &mut V) {
+    pub(crate) fn lists_mut(&mut self, render: bool) -> (&mut V, &mut V, &mut V) {
         let idx = usize::from(render);
-        (&mut self.owned[idx], &mut self.free[idx])
+        (
+            &mut self.owned[idx],
+            &mut self.free[idx],
+            &mut self.tearing_down[idx],
+        )
     }
 
     /// Reuse an already-mapped idle Work slot owned by this VM.
@@ -124,7 +132,8 @@ impl<V: SlotVec> VmWorkPool<V> {
 
     /// Record a freshly provisioned and mapped Work slot directly as owned and
     /// idle in this VM (used by `SUBMIT` ioctl provisioning before fence
-    /// publication). Caller must have reserved capacity in `owned` and `free`.
+    /// publication). Caller must have reserved capacity in `owned`, `free`, and
+    /// `tearing_down`.
     pub(crate) fn record_idle(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
         let idx = usize::from(render);
         if self.owned[idx].contains_slot(va) {
@@ -139,12 +148,14 @@ impl<V: SlotVec> VmWorkPool<V> {
     }
 
     /// Return a retired or rolled-back Work slot to this VM's idle free list.
-    /// Never allocates; rejects slots not owned by this VM or already free.
+    /// Never allocates; rejects slots not owned by this VM, already free, or
+    /// currently being torn down.
     pub(crate) fn release(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
         let idx = usize::from(render);
         if self.leased[idx] == 0
             || !self.owned[idx].contains_slot(va)
             || self.free[idx].contains_slot(va)
+            || self.tearing_down[idx].contains_slot(va)
         {
             return Err(());
         }
@@ -153,21 +164,39 @@ impl<V: SlotVec> VmWorkPool<V> {
         Ok(())
     }
 
-    /// Remove the next owned idle slot from circulation BEFORE any destructive
-    /// teardown unmap or region release, so a partial teardown error can never
-    /// leave a dismantled slot on the VM's idle list.
-    pub(crate) fn take_teardown(&mut self, render: bool) -> Option<u64> {
+    /// Return a slot whose teardown was started earlier and interrupted before
+    /// completion so a retry can finish cleaning it up.
+    pub(crate) fn peek_tearing_down(&self, render: bool) -> Option<u64> {
+        self.tearing_down[usize::from(render)].last_slot()
+    }
+
+    /// Move the next idle slot into `tearing_down` BEFORE any destructive
+    /// unmap or region release. The slot leaves `free` (so it can never be
+    /// leased again) while remaining in `owned` (so retry tracking and fdinfo
+    /// accounting stay accurate until `finish_teardown`).
+    pub(crate) fn begin_teardown(&mut self, render: bool) -> Option<u64> {
         let idx = usize::from(render);
-        if self.leased[idx] != 0 {
+        if self.leased[idx] != 0 || !self.tearing_down[idx].is_empty() {
             return None;
         }
-        let va = self.owned[idx].last_slot()?;
-        if !self.free[idx].contains_slot(va) {
+        let va = self.free[idx].pop_slot()?;
+        if self.tearing_down[idx].push_within(va).is_err() {
+            let _ = self.free[idx].push_within(va);
             return None;
         }
-        let _ = self.free[idx].remove_slot(va);
-        let _ = self.owned[idx].pop_slot();
         Some(va)
+    }
+
+    /// Drop ownership of a slot ONLY after every alias unmap and firmware
+    /// region release for `va` has completed.
+    pub(crate) fn finish_teardown(&mut self, render: bool, va: u64) -> core::result::Result<(), ()> {
+        let idx = usize::from(render);
+        if !self.tearing_down[idx].contains_slot(va) || !self.owned[idx].contains_slot(va) {
+            return Err(());
+        }
+        let _ = self.tearing_down[idx].remove_slot(va);
+        let _ = self.owned[idx].remove_slot(va);
+        Ok(())
     }
 }
 

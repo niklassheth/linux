@@ -243,16 +243,17 @@ impl Bootstrap {
                 self.set_context(index, None)?;
             }
         }
-        // Detach and free every Work slot owned by this VM. Reserve
-        // invalidation entries before removing each slot from circulation, and
-        // take the slot out of `space`'s pool BEFORE the first destructive
-        // unmap so a partial teardown error can never leave a dismantled slot
-        // on the VM's idle list. Only fully cleaned slots return their
-        // unbacked firmware VA to `free_work_va`.
+        // Detach and free every Work slot owned by this VM. Move each idle slot
+        // into `tearing_down` BEFORE any destructive unmap or region release so
+        // it can never be leased again while remaining tracked in `owned` for
+        // retry and fdinfo accounting. Drop ownership and return the firmware VA
+        // to `free_work_va` only after all alias unmaps and both region releases
+        // succeed; any earlier error leaves the slot resumable on retry.
         for render in [false, true] {
             let gfp = GFP_NOWAIT | __GFP_NOWARN;
             let index = usize::from(render);
             let priv_size = if render { 0x10000u64 } else { 0x4000u64 };
+            let pgsz = crate::pgtable::UAT_PGSZ;
             while space.work_owned(render) != 0 {
                 space.low.reserve_invalidation_gfp(gfp)?;
                 self._address_space
@@ -260,23 +261,45 @@ impl Bootstrap {
                     .ok_or(EIO)?
                     .low
                     .reserve_invalidation_gfp(gfp)?;
-                let Some(va) = space.take_teardown_work(render) else {
-                    return Err(EIO);
+                let va = if let Some(va) = space.peek_tearing_down_work(render) {
+                    va
+                } else {
+                    let Some(va) = space.begin_teardown_work(render) else {
+                        return Err(EIO);
+                    };
+                    self.vm_free_work[index] =
+                        self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
+                    va
                 };
-                self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
                 let alias_range =
                     crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, render)
                         .ok_or(EIO)?;
-                let client_unmap = space.unmap_work_alias_gfp(alias_range.clone(), gfp);
+                let mut client_unmap = Ok(());
+                for addr in (alias_range.start..alias_range.end).step_by(pgsz) {
+                    if space.low.translate(addr)?.is_some() {
+                        if let Err(err) = space.unmap_work_alias_gfp(addr..addr + pgsz as u64, gfp)
+                        {
+                            client_unmap = Err(err);
+                            break;
+                        }
+                    }
+                }
                 if space.has_pending_tables() {
                     space.sync();
                 }
                 client_unmap?;
-                let dev_unmap = self
-                    ._address_space
-                    .as_mut()
-                    .ok_or(EIO)?
-                    .unmap_work_alias_gfp(alias_range, gfp);
+                let mut dev_unmap = Ok(());
+                for addr in (alias_range.start..alias_range.end).step_by(pgsz) {
+                    let dev_space = self._address_space.as_mut().ok_or(EIO)?;
+                    if dev_space.low.translate(addr)?.is_some() {
+                        if let Err(err) =
+                            dev_space.unmap_work_alias_gfp(addr..addr + pgsz as u64, gfp)
+                        {
+                            dev_unmap = Err(err);
+                            break;
+                        }
+                    }
+                }
                 if let Some(dev_space) = self._address_space.as_ref() {
                     if dev_space.has_pending_tables() {
                         dev_space.sync();
@@ -285,13 +308,19 @@ impl Bootstrap {
                 }
                 dev_unmap?;
                 let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-                fw.release_region_gfp(va, gfp)?;
-                fw.release_region_gfp(va + priv_size, gfp)?;
-                if !fw.has_region(va) && !fw.has_region(va + priv_size) {
-                    self.free_work_va[index]
-                        .push_within_capacity(va)
-                        .map_err(|_| EIO)?;
+                if fw.has_region(va) {
+                    fw.release_region_gfp(va, gfp)?;
                 }
+                if fw.has_region(va + priv_size) {
+                    fw.release_region_gfp(va + priv_size, gfp)?;
+                }
+                if fw.has_region(va) || fw.has_region(va + priv_size) {
+                    return Err(EIO);
+                }
+                space.finish_teardown_work(render, va)?;
+                self.free_work_va[index]
+                    .push_within_capacity(va)
+                    .map_err(|_| EIO)?;
             }
         }
         if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root_low) {

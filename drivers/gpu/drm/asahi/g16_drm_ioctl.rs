@@ -37,6 +37,9 @@ impl File {
         file: &DrmFile,
     ) -> Result<u32> {
         let device: &Device = device;
+        if device.failed.load(Ordering::Acquire) {
+            return Err(EIO);
+        }
         if data.pad != 0
             || data.kernel_start < 0x4000
             || data.kernel_end > VM_END

@@ -189,10 +189,11 @@ impl AddressSpace {
         render: bool,
         gfp: kernel::alloc::Flags,
     ) -> Result {
-        let (owned, free) = self.work_pool.lists_mut(render);
+        let (owned, free, tearing_down) = self.work_pool.lists_mut(render);
         owned.reserve(1, gfp)?;
-        let need_free = (owned.len() + 1).saturating_sub(free.len());
-        free.reserve(need_free, gfp)?;
+        let target = owned.len() + 1;
+        free.reserve(target.saturating_sub(free.len()), gfp)?;
+        tearing_down.reserve(1usize.saturating_sub(tearing_down.len()), gfp)?;
         Ok(())
     }
 
@@ -204,8 +205,16 @@ impl AddressSpace {
         self.work_pool.release(render, va).map_err(|_| EIO)
     }
 
-    pub(crate) fn take_teardown_work(&mut self, render: bool) -> Option<u64> {
-        self.work_pool.take_teardown(render)
+    pub(crate) fn peek_tearing_down_work(&self, render: bool) -> Option<u64> {
+        self.work_pool.peek_tearing_down(render)
+    }
+
+    pub(crate) fn begin_teardown_work(&mut self, render: bool) -> Option<u64> {
+        self.work_pool.begin_teardown(render)
+    }
+
+    pub(crate) fn finish_teardown_work(&mut self, render: bool, va: u64) -> Result {
+        self.work_pool.finish_teardown(render, va).map_err(|_| EIO)
     }
 
     /// Bytes of backing owned by this root (render private storage, scratch,

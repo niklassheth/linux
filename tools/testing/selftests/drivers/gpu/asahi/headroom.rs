@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 use g16_headroom::{
     caps_safe, check_exact_caps, check_headroom, CapBlock, CapPair, FlightCharge, HeadroomBlock,
     LaneLoad,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 use g16_control_ring::{ControlRing, CAPACITY, MAX_IN_FLIGHT};
 
 #[test]

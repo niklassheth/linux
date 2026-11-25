@@ -55,6 +55,10 @@ assert unbind_arm.index('let mut runtime = device.runtime.lock();') < unbind_arm
 assert unbind_arm.index('device.failed.load(Ordering::Acquire)') < unbind_arm.index('runtime.release_timestamp(')
 assert unbind_arm.index('runtime.release_timestamp(') < unbind_arm.index('state.retained_timestamps.swap_remove(')
 
+# 2b. vm_create() refuses on a failed device before allocating AddressSpaces.
+vc = function(ioctl, 'vm_create')
+assert vc.index('device.failed.load(Ordering::Acquire)') < vc.index('AddressSpace::new()')
+
 # 3. File::drop() checks device.failed || runtime.render_failed() under runtime.lock()
 #    and forgets file state only when VMs or retained timestamps exist (empty
 #    files drop cleanly without leaking).

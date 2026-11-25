@@ -217,7 +217,7 @@ impl Bootstrap {
         let ordinal = queue.compute_count;
         // Wrap pre-publication leases (scratch + per-VM Work slot) in an RAII
         // Drop guard so any `?` error before publication returns both cleanly.
-        let (scratch, alias, reused, mut a) = {
+        let (scratch, alias, mut a) = {
             let mut sink = RuntimeLeaseSink {
                 runtime: self,
                 client,
@@ -225,7 +225,7 @@ impl Bootstrap {
             let mut prep = crate::g16_work_pool::PrepGuard::new(&mut sink, false);
             let scratch = prep.sink_mut().client.prepare_compute(&mut params)?;
             prep.set_scratch(scratch);
-            let (work, reused) = {
+            let (work, _reused) = {
                 let s = prep.sink_mut();
                 s.runtime.allocate_work(s.client, false)?
             };
@@ -233,9 +233,6 @@ impl Bootstrap {
             let alias = crate::g16_work_pool::alias_range(work, WORK_BASE, WORK_WINDOW, false)
                 .ok_or(ENOSPC)?
                 .start;
-            // Firmware save state is independent of shader resource tables.
-            // The upper half of the zeroed Work page is GPU-addressable storage.
-            params.save_area = alias + 0x2000;
             let mut a = compute::Addresses::publication(
                 prep.sink_mut().runtime.compute_publication,
                 ordinal,
@@ -259,7 +256,7 @@ impl Bootstrap {
             a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
             a.register_identity = (u64::from(a.context) << 32) | 1;
             let (scratch, _work) = prep.commit().ok_or(EIO)?;
-            (scratch, alias, reused, a)
+            (scratch, alias, a)
         };
         self.render_failed = true;
         let dep_stamps = dependencies.map(|d| d.map(|r| r.stamp));
@@ -304,11 +301,6 @@ impl Bootstrap {
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             let mut writer = fw.writer();
-            if reused {
-                // Reused slot: clear the GPU-writable CDM save_area upper half
-                // (fresh slots are already zeroed by __GFP_ZERO).
-                writer.zero_staged(a.work + 0x2000, 0x2000)?;
-            }
             writer.write_u32_staged(support_shared, submitted as u32)?;
             writer.write_staged(a.work, &self.encodings.compute)?;
             writer.write_staged(a.work + compute::ENTRY_OFFSET, &entry_bytes)?;

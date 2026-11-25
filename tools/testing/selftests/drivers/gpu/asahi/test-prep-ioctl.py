@@ -37,7 +37,7 @@ for source, name in [(runtime, 'submit_render_pool'), (runtime, 'publish_render'
                      (runtime, 'submit_compute_queue'), (runtime, 'submit_render'),
                      (runtime, 'submit_render_queue'), (runtime, 'submit_compute'),
                      (vm, 'write_staged'), (vm, 'write_u32_staged'),
-                     (vm, 'write_u64_staged'), (vm, 'zero_staged'),
+                     (vm, 'write_u64_staged'),
                      (vm, 'update_batch')]:
     body = function(source, name)
     assert 'GFP_KERNEL' not in body, f'{name} allocates'

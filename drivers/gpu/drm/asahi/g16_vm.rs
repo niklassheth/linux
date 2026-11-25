@@ -128,9 +128,13 @@ pub(crate) struct Scratch {
 }
 
 impl AddressSpace {
-    /// Install a freshly allocated Work alias in this VM. Reused slots stay
-    /// permanently mapped in their owning VM and never call this again; any
-    /// pre-existing PTE at `va` is rejected so aliases cannot collide.
+    /// Install a freshly allocated Work alias in this VM as GPU read-only.
+    /// The GPU only reads register tables and the CDM entry trampoline from
+    /// this page; GPU-writable compute save storage lives on separate scratch
+    /// backing (`prepare_compute`), so client shaders can never overwrite live
+    /// firmware Work control data. Reused slots stay permanently mapped in
+    /// their owning VM and never call this again; any pre-existing PTE at `va`
+    /// is rejected so aliases cannot collide.
     pub(crate) fn map_work_alias(&mut self, va: u64, pa: u64) -> Result {
         if self.low.translate(va)?.is_some() {
             return Err(EEXIST);
@@ -138,7 +142,7 @@ impl AddressSpace {
         self.low.map_pages(
             va..va + UAT_PGSZ as u64,
             pa,
-            prot::PROT_GPU_SHARED_RW,
+            prot::PROT_GPU_SHARED_RO,
             false,
         )
     }
@@ -517,10 +521,15 @@ impl AddressSpace {
         p: &mut crate::g16_compute::Parameters,
     ) -> Result<Scratch> {
         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PREPARE_COMPUTE);
-        let scratch = self.lease_scratch(false, 0x24000, 0x20000)?;
+        // 0x00000..0x20000: compute scratch; 0x20000..0x24000: marker;
+        // 0x24000..0x28000: GPU-writable CDM save_area (kept on separate client
+        // backing so the firmware Work control page stays GPU read-only).
+        // `metadata = 0x20000` clears both marker and save_area on reuse.
+        let scratch = self.lease_scratch(false, 0x28000, 0x20000)?;
         let base = scratch.range.start;
         p.scratch = base;
         p.marker = base + 0x20000;
+        p.save_area = base + 0x24000;
         Ok(scratch)
     }
 
@@ -1357,27 +1366,6 @@ impl<'a> FirmwareWriter<'a> {
             unsafe { p.cast::<u64>().write_volatile(value.to_le()) };
             Ok(())
         })
-    }
-
-    /// Zero a byte range in coherent firmware memory without per-write barriers.
-    pub(crate) fn zero_staged(&mut self, va: u64, size: usize) -> Result {
-        if size == 0 {
-            return Ok(());
-        }
-        let region = self.resolve(va, size)?;
-        let start = (va - region.va) as usize;
-        let end = start + size;
-        for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
-            let base = index * UAT_PGSZ;
-            let within = start.saturating_sub(base);
-            let limit = (end - base).min(UAT_PGSZ);
-            region.pages[index].with_page_mapped(|p| {
-                // SAFETY: `resolve` verified `[start, end)` lies within this
-                // owned region, and the caller holds exclusive host ownership.
-                unsafe { core::ptr::write_bytes(p.add(within), 0, limit - within) };
-            });
-        }
-        Ok(())
     }
 }
 

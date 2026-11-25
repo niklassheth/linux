@@ -111,7 +111,7 @@ checks += 1
 # aligned u32/u64, P_LIVE timed once per writer(), zero allocations.
 writer_fn = function(vm, 'writer')
 assert 'P_LIVE' in writer_fn
-for name in ('write_staged', 'write_u32_staged', 'write_u64_staged', 'zero_staged'):
+for name in ('write_staged', 'write_u32_staged', 'write_u64_staged'):
     body = function(vm, name)
     assert 'dsb' not in body and 'dmb' not in body
     assert 'GFP_KERNEL' not in body and 'KVec::' not in body
@@ -140,13 +140,12 @@ kick_pos = flush_fn.index('send_message(', sync2_pos)
 assert rel_pos < head_pos < sync1_pos < mmio_pos < sync2_pos < kick_pos
 checks += 1
 
-# 11. Compute save_area zeroing is skipped on fresh __GFP_ZERO slots and staged
-# inside the single writer batch on reused slots.
+# 11. Compute save_area lives in dedicated client scratch (cleared by
+# lease_scratch) rather than on the GPU-read-only firmware Work control page.
 scq_fn = function(compute, 'submit_compute_queue')
-assert re.search(
-    r'if reused \{\s*(?://[^\n]*\n\s*)*writer\.zero_staged\(a\.work \+ 0x2000, 0x2000\)\?;',
-    scq_fn,
-)
+assert 'save_area = alias' not in scq_fn
+assert 'zero_staged(a.work + 0x2000' not in scq_fn
+assert 'p.save_area = base + 0x24000;' in function(vm, 'prepare_compute')
 checks += 1
 
 # 12. RX consumer cursor updates order acquire_barrier() -> write_u32_staged() -> dsb_oshst().

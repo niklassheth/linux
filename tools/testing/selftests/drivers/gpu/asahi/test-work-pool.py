@@ -34,9 +34,12 @@ contexts = (driver / 'g16_runtime_contexts.rs').read_text()
 retire = (driver / 'g16_runtime_retire.rs').read_text()
 runtime = (driver / 'g16_runtime.rs').read_text()
 
-# Device-wide Work free list is gone; Work aliases reject any pre-existing PTE.
+# Device-wide Work free list is gone; Work aliases reject any pre-existing PTE
+# and map strictly GPU read-only so clients cannot write firmware control data.
 assert not re.search(r'\bfree_work:', (driver / 'g16.rs').read_text())
 assert 'if self.low.translate(va)?.is_some() {\n            return Err(EEXIST);' in vm
+mwa = vm[vm.index('pub(crate) fn map_work_alias('):vm.index('pub(crate) fn unmap_work_alias(')]
+assert 'prot::PROT_GPU_SHARED_RO' in mwa and 'PROT_GPU_SHARED_RW' not in mwa
 assert 'self.owned_bytes + self.work_pool.owned_bytes()' in vm
 
 # allocate_work recycles strictly from `client`, never from another VM.

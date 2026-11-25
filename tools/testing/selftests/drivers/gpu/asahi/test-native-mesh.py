@@ -108,6 +108,25 @@ assert re.search(
 assert 'RenderReject::VmDisabled => reject(' in render_params_src
 assert 'RenderReject::FewPrimitivesConflict => reject(' in render_params_src
 assert 'p.mesh = mesh;' in render_params_src
+# Standard userspace errnos only: unknown flags -> EINVAL (reject), recognized
+# unimplemented flags/helpers -> EOPNOTSUPP (unsupported), never ENOTSUPP (524).
+assert 'ENOTSUPP' not in drm
+assert 'log_rejection(EOPNOTSUPP, "EOPNOTSUPP", why)' in drm
+assert 'unknown render flags' in render_params_src and 'unsupported render flags' in render_params_src
+assert render_params_src.index('RenderReject::VmDisabled') < render_params_src.index('unsupported render flags')
+assert render_params_src.index('RenderReject::FewPrimitivesConflict') < render_params_src.index('vertex/fragment helper program')
+assert 'unknown command type' in drm_submit
+assert 'compute flags {:#x} (must be 0)' in drm_submit
+
+# 5b. Native mesh renders share the hardened per-VM Work pool (PROT_GPU_SHARED_RO)
+#     and PrepGuard RAII rollback in submit_render_pool().
+submit_pool_src = item(runtime, r'pub\(super\) fn submit_render_pool\(')
+assert 'crate::g16_work_pool::PrepGuard::new(&mut sink, true)' in submit_pool_src
+assert 'prep.sink_mut().client.prepare_render(&mut params)?' in submit_pool_src
+assert 'prep.set_scratch(scratch);' in submit_pool_src
+assert 's.runtime.allocate_work(s.client, true)?' in submit_pool_src
+assert 'prep.set_work(va);' in submit_pool_src
+assert 'PROT_GPU_SHARED_RO' in item(vm_src, r'pub\(crate\) fn map_work_alias_gfp\(')
 
 # 6. submit_render keeps defense-in-depth !support.native check with diagnostic,
 #    counts published native_mesh_renders once via note_render_published, and
@@ -129,6 +148,12 @@ assert re.search(
 )
 assert submit_render_src.count('NATIVE_MESH_RENDERS') == 1
 assert 'native: params.mesh.is_some(),' in runtime and 'pool_has_native,' in runtime
+assert re.search(
+    r'let pool_has_native = crate::g16_mesh::pool_has_native_flight\(\s*'
+    r'render\.native,\s*render\.root,\s*self\.flights\s*\.iter\(\)\s*'
+    r'\.filter_map\(\|f\| f\.render\.as_ref\(\)\.map\(\|r\| \(r\.native, r\.root\)\)\),\s*\);',
+    runtime,
+)
 assert re.search(
     r'if native \{\s*(//[^\n]*\n\s*)*tl::NATIVE_TVB_REFUSED\.fetch_add\(1, Relaxed\);\s*'
     r'if !tl::NATIVE_TVB_REFUSED_WARNED\.swap\(true, Relaxed\) \{\s*dev_warn!',

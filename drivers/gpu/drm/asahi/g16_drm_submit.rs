@@ -87,7 +87,7 @@ impl File {
                         attachments.push(attachment, GFP_KERNEL)?;
                     }
                 }
-                kind => return Err(unsupported(format_args!("command type {}", kind))),
+                kind => return Err(reject(format_args!("unknown command type {}", kind))),
             }
         }
         if renders + computes == 0 {
@@ -299,7 +299,9 @@ impl File {
                     }
                     let support = vm.render_support.clone().ok_or(EIO)?;
                     let pool = vm.render_pool.ok_or(EIO)?;
-                    let end = pool.end().ok_or(EINVAL)?;
+                    let end = pool
+                        .end()
+                        .ok_or_else(|| reject(format_args!("render operand pool end overflow")))?;
                     let count = ((end - pool.directory) as usize) / crate::pgtable::UAT_PGSZ;
                     let mut pages = KVec::with_capacity(count, GFP_KERNEL)?;
                     vm.space.lock().fill_render_pool_pages(&pool, &mut pages)?;
@@ -698,8 +700,11 @@ impl Vm {
     }
 
     pub(super) fn compute_parameters(&self, c: &uapi::drm_asahi_cmd_compute) -> Result<compute::Parameters> {
-        if c.flags != 0 || c.helper.binary != 0 || c.helper.cfg != 0 || c.helper.data != 0 {
-            return Err(unsupported(format_args!("compute flags {:#x} or a helper program", c.flags)));
+        if c.flags != 0 {
+            return Err(reject(format_args!("compute flags {:#x} (must be 0)", c.flags)));
+        }
+        if c.helper.binary != 0 || c.helper.cfg != 0 || c.helper.data != 0 {
+            return Err(unsupported(format_args!("compute helper program")));
         }
         let size = c
             .cdm_ctrl_stream_end
@@ -735,26 +740,27 @@ impl Vm {
             drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT as DBIAS_IS_INT,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_FEW_PRIMITIVES as FEW_PRIMITIVES,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_NATIVE_MESH as NATIVE_MESH,
+            drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING as NO_VERTEX_CLUSTERING,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES as PROCESS_EMPTY_TILES,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT as VDM_BARRIER_FRAGMENT,
+            drm_asahi_render_flags_DRM_ASAHI_RENDER_VERTEX_SCRATCH as VERTEX_SCRATCH,
         };
 
-        if c.flags
+        let rejected_flags = c.flags
             & !(PROCESS_EMPTY_TILES
                 | DBIAS_IS_INT
                 | VDM_BARRIER_FRAGMENT
                 | FEW_PRIMITIVES
-                | NATIVE_MESH)
-            != 0
-            || c.vertex_helper.binary != 0
-            || c.vertex_helper.cfg != 0
-            || c.vertex_helper.data != 0
-            || c.fragment_helper.binary != 0
-            || c.fragment_helper.cfg != 0
-            || c.fragment_helper.data != 0
-        {
-            return Err(unsupported(format_args!(
-                "render flags {:#x} (known {:#x}) or a vertex/fragment helper program",
+                | NATIVE_MESH);
+        let flag_reject = (rejected_flags != 0).then(|| {
+            crate::g16_mesh::classify_rejected_render_flags(
+                rejected_flags,
+                VERTEX_SCRATCH | NO_VERTEX_CLUSTERING,
+            )
+        });
+        if flag_reject == Some(crate::g16_mesh::RenderFlagsReject::Unknown) {
+            return Err(reject(format_args!(
+                "unknown render flags {:#x} (accepted {:#x})",
                 c.flags,
                 PROCESS_EMPTY_TILES
                     | DBIAS_IS_INT
@@ -763,6 +769,8 @@ impl Vm {
                     | NATIVE_MESH
             )));
         }
+        // Validate invalid bit-28 latch/conflict (EINVAL) before reporting
+        // recognized-but-unimplemented options (EOPNOTSUPP).
         let mesh = crate::g16_mesh::render_profile(
             self.native_mesh,
             c.flags & NATIVE_MESH != 0,
@@ -776,6 +784,26 @@ impl Vm {
                 "DRM_ASAHI_RENDER_NATIVE_MESH cannot be combined with DRM_ASAHI_RENDER_FEW_PRIMITIVES"
             )),
         })?;
+        if flag_reject == Some(crate::g16_mesh::RenderFlagsReject::Unsupported) {
+            return Err(unsupported(format_args!(
+                "unsupported render flags {:#x} (accepted {:#x})",
+                c.flags,
+                PROCESS_EMPTY_TILES
+                    | DBIAS_IS_INT
+                    | VDM_BARRIER_FRAGMENT
+                    | FEW_PRIMITIVES
+                    | NATIVE_MESH
+            )));
+        }
+        if c.vertex_helper.binary != 0
+            || c.vertex_helper.cfg != 0
+            || c.vertex_helper.data != 0
+            || c.fragment_helper.binary != 0
+            || c.fragment_helper.cfg != 0
+            || c.fragment_helper.data != 0
+        {
+            return Err(unsupported(format_args!("vertex/fragment helper program")));
+        }
         let mut p = render::Parameters::default();
         p.mesh = mesh;
         p.tgid = kernel::current!().group_leader().pid();

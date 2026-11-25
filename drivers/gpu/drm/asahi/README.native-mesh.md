@@ -41,6 +41,10 @@ leave output incomplete.
   with `EINVAL`.
 - `DRM_ASAHI_RENDER_NATIVE_MESH` is mutually exclusive with
   `DRM_ASAHI_RENDER_FEW_PRIMITIVES`; combining them is rejected with `EINVAL`.
+- Unknown render/compute flags and unknown command types are rejected with
+  `EINVAL`; recognized-but-unimplemented upstream flags (`VERTEX_SCRATCH`,
+  `NO_VERTEX_CLUSTERING`) and helper programs are rejected with `EOPNOTSUPP`
+  (never kernel-private `524`).
 
 ## Hardware state and memory management
 
@@ -67,7 +71,8 @@ leave output incomplete.
   render scratch lease (bounded inside 40-bit VA space) through both TA and
   fragment retirement.
 - **Zero-allocation & partial-clear reuse:** Render scratch pages are allocated
-  with `__GFP_ZERO` once per VM (`alloc_low`), preserving cross-VM isolation.
+  with `__GFP_ZERO` once per VM (`provision_scratch_prealloc` /
+  `lease_scratch`), preserving cross-VM isolation.
   On same-VM scratch reuse, `lease_scratch` re-zeroes only the 5 render
   metadata pages (`80 KiB`) and skips re-zeroing the hardware-written `512 KiB`
   payload pages. If a released native lease is later split and reused by an
@@ -99,8 +104,8 @@ Flipping the knob at runtime is safe at any time:
 
 Debugfs `/sys/kernel/debug/asahi_m4/dep_stats` tracks:
 
-- `native_mesh_renders`: published renders submitted with
-  `DRM_ASAHI_RENDER_NATIVE_MESH` (counted once on publication, not on `EBUSY`
-  retries).
+- `native_mesh_renders`: renders submitted with
+  `DRM_ASAHI_RENDER_NATIVE_MESH` that were staged for firmware publication
+  (counted once on staging, not on `EBUSY` retries).
 - `native_tvb_refused`: refused TVB growth requests on pools with an in-flight
   native mesh render (also warned once per boot).

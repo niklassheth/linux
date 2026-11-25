@@ -46,6 +46,28 @@ pub(crate) fn set_enabled(enable: bool) {
     ENABLED.store(enable, core::sync::atomic::Ordering::Release);
 }
 
+/// Classification of non-accepted bits in `drm_asahi_cmd_render::flags`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenderFlagsReject {
+    /// At least one unrecognized/reserved bit is set (`EINVAL`).
+    Unknown,
+    /// Only recognized-but-unimplemented UAPI bits are set (`EOPNOTSUPP`).
+    Unsupported,
+}
+
+/// Classify non-zero rejected render flag bits (`c.flags & !accepted`) into
+/// unknown bits (`EINVAL`) vs recognized-but-unimplemented bits (`EOPNOTSUPP`).
+pub(crate) fn classify_rejected_render_flags(
+    rejected_flags: u32,
+    known_unsupported: u32,
+) -> RenderFlagsReject {
+    if rejected_flags & !known_unsupported != 0 {
+        RenderFlagsReject::Unknown
+    } else {
+        RenderFlagsReject::Unsupported
+    }
+}
+
 /// Frontend `SUBMIT` rejection reasons for `DRM_ASAHI_RENDER_NATIVE_MESH`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenderReject {
@@ -75,7 +97,24 @@ pub(crate) fn render_profile(
     Ok(Some(Profile::default()))
 }
 
-/// Count a published native mesh render exactly once (never on `EBUSY`
+/// Whether a refused TVB growth on `selected_root` affects a pool with at
+/// least one in-flight native render: either the selected render itself is
+/// native, or another live render flight on the same VM root is native.
+pub(crate) fn pool_has_native_flight<I>(
+    selected_native: bool,
+    selected_root: u64,
+    other_renders: I,
+) -> bool
+where
+    I: IntoIterator<Item = (bool, u64)>,
+{
+    selected_native
+        || other_renders
+            .into_iter()
+            .any(|(native, root)| native && root == selected_root)
+}
+
+/// Count a staged native mesh render exactly once (never on `EBUSY`
 /// retries or failed submissions).
 pub(crate) fn note_render_published(
     published: bool,

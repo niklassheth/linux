@@ -31,10 +31,20 @@ bodies['Mapping::cover'] = m.group()
 for name, body in bodies.items():
     # Sync-entry slicing (try_into of fixed 16-byte chunks) can't fail and keeps its plain mapping.
     stripped = re.sub(r'\.try_into\(\)\.map_err\(\|_\| EINVAL\)', '', body)
-    for bare in ('Err(EINVAL)', 'ok_or(EINVAL)', 'Err(ENOTSUPP)', 'ok_or(ENOTSUPP)'):
+    for bare in (
+        'Err(EINVAL)',
+        'ok_or(EINVAL)',
+        'Err(ENOTSUPP)',
+        'ok_or(ENOTSUPP)',
+        'Err(EOPNOTSUPP)',
+        'ok_or(EOPNOTSUPP)',
+    ):
         assert bare not in stripped, (name, bare)
+# Kernel-internal ENOTSUPP (524) must never leak to userspace DRM ioctl callers.
+assert 'ENOTSUPP' not in drm
+assert 'log_rejection(EOPNOTSUPP, "EOPNOTSUPP", why)' in drm
 checks += 1
-assert sum(b.count('reject(format_args!(') for b in bodies.values()) >= 25
+assert sum(b.count('reject(format_args!(') for b in bodies.values()) >= 28
 assert sum(b.count('unsupported(format_args!(') for b in bodies.values()) == 3
 checks += 1
 assert 'const REJECT_LOG: u64 = 32;' in drm

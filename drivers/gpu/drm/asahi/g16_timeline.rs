@@ -511,7 +511,7 @@ pub(crate) static PARTIAL_RENDERS: core::sync::atomic::AtomicU64 = core::sync::a
 pub(crate) static TVB_REFUSED_CAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static TVB_REFUSED_VA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static TVB_REFUSED_MEMORY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// DRM_IOCTL_ASAHI_SUBMIT calls rejected with EINVAL or ENOTSUPP; each names
+/// DRM_IOCTL_ASAHI_SUBMIT calls rejected with EINVAL or EOPNOTSUPP; each names
 /// its check in the kernel log, up to a per-boot budget.
 pub(crate) static SUBMIT_REJECTED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Commands deferred (EBUSY) and retried after a retirement, and the

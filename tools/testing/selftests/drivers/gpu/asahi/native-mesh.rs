@@ -80,6 +80,81 @@ fn render_profile_enforces_vm_latch_and_few_primitives_mutual_exclusion() {
 }
 
 #[test]
+fn rejected_render_flags_separate_unknown_einval_from_recognized_eopnotsupp() {
+    use g16_mesh::{classify_rejected_render_flags, RenderFlagsReject};
+    const ACCEPTED: u32 = (1 << 1) | (1 << 18) | (1 << 28) | (1 << 29) | (1 << 30);
+    const KNOWN_UNSUPPORTED: u32 = (1 << 0) | (1 << 2);
+    const EOPNOTSUPP: i32 = 95;
+    const ENOTSUPP_INTERNAL: i32 = 524;
+
+    let to_errno = |rejected: u32| match classify_rejected_render_flags(rejected, KNOWN_UNSUPPORTED) {
+        RenderFlagsReject::Unknown => EINVAL,
+        RenderFlagsReject::Unsupported => EOPNOTSUPP,
+    };
+
+    // Recognized unimplemented upstream flags -> EOPNOTSUPP (95), never 524.
+    for flags in [1u32 << 0, 1u32 << 2, (1u32 << 0) | (1u32 << 2)] {
+        let rejected = flags & !ACCEPTED;
+        assert_ne!(rejected, 0);
+        assert_eq!(
+            classify_rejected_render_flags(rejected, KNOWN_UNSUPPORTED),
+            RenderFlagsReject::Unsupported
+        );
+        assert_eq!(to_errno(rejected), EOPNOTSUPP);
+        assert_ne!(to_errno(rejected), ENOTSUPP_INTERNAL);
+    }
+
+    // Every single unknown bit (including legacy downstream bit 3 and bit 31)
+    // and any mix of unknown + recognized-unsupported -> EINVAL (22).
+    for bit in 0..32u32 {
+        let flag = 1u32 << bit;
+        if flag & (ACCEPTED | KNOWN_UNSUPPORTED) != 0 {
+            continue;
+        }
+        assert_eq!(
+            classify_rejected_render_flags(flag, KNOWN_UNSUPPORTED),
+            RenderFlagsReject::Unknown,
+            "bit {bit} must be Unknown (EINVAL)"
+        );
+        assert_eq!(to_errno(flag), EINVAL);
+        assert_eq!(
+            classify_rejected_render_flags(flag | KNOWN_UNSUPPORTED, KNOWN_UNSUPPORTED),
+            RenderFlagsReject::Unknown,
+            "bit {bit} combined with recognized-unsupported must still be Unknown (EINVAL)"
+        );
+    }
+}
+
+#[test]
+fn pool_has_native_flight_attributes_tvb_refusal_strictly_by_vm_root() {
+    use g16_mesh::pool_has_native_flight;
+    const ROOT_A: u64 = 0x10_0000_0000;
+    const ROOT_B: u64 = 0x20_0000_0000;
+
+    // 1. Selected render itself is native (already taken out of self.flights).
+    assert!(pool_has_native_flight(true, ROOT_A, []));
+    assert!(pool_has_native_flight(true, ROOT_A, [(false, ROOT_B)]));
+
+    // 2. Selected render is ordinary, but a peer render on the SAME root is native.
+    assert!(pool_has_native_flight(
+        false,
+        ROOT_A,
+        [(false, ROOT_A), (true, ROOT_A), (false, ROOT_B)]
+    ));
+
+    // 3. Selected render is ordinary, and native peers exist ONLY on OTHER roots:
+    //    must NOT charge ROOT_A's ordinary pool for another VM's native render.
+    assert!(!pool_has_native_flight(
+        false,
+        ROOT_A,
+        [(false, ROOT_A), (true, ROOT_B)]
+    ));
+
+    // 4. All ordinary renders -> false.
+    assert!(!pool_has_native_flight(false, ROOT_A, [(false, ROOT_A)]));
+}
+
+#[test]
 fn native_mesh_render_counter_increments_once_on_publish_not_ebusy_retries() {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     let counter = AtomicU64::new(0);

@@ -143,11 +143,13 @@ impl Bootstrap {
             };
             let flight_id = self.flights[index].id;
             let mut render = self.flights[index].render.take().ok_or(EIO)?;
-            let pool_has_native = render.native
-                || self
-                    .flights
+            let pool_has_native = crate::g16_mesh::pool_has_native_flight(
+                render.native,
+                render.root,
+                self.flights
                     .iter()
-                    .any(|f| f.render.as_ref().is_some_and(|r| r.native && r.root == render.root));
+                    .filter_map(|f| f.render.as_ref().map(|r| (r.native, r.root))),
+            );
             let pool_index = self
                 .tvb_pools
                 .iter()

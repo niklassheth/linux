@@ -920,9 +920,10 @@ fn reject(why: core::fmt::Arguments<'_>) -> Error {
     log_rejection(EINVAL, "EINVAL", why)
 }
 
-/// ENOTSUPP for a submission using something this driver doesn't implement.
+/// EOPNOTSUPP for a submission using a recognized UAPI feature this driver
+/// does not implement (standard userspace errno 95, never kernel-private 524).
 fn unsupported(why: core::fmt::Arguments<'_>) -> Error {
-    log_rejection(ENOTSUPP, "ENOTSUPP", why)
+    log_rejection(EOPNOTSUPP, "EOPNOTSUPP", why)
 }
 
 fn log_rejection(error: Error, name: &str, why: core::fmt::Arguments<'_>) -> Error {

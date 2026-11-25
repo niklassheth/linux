@@ -39,7 +39,7 @@ checks += 1
 assert re.search(r'if add == 1 \{\s*self\.refusal = Some\(.*?\);\s*return Ok\(false\);\s*\}\s*new = old \+ add / 2;', grow, re.S)
 checks += 1
 # Every allocation in alloc_tvb_blocks takes the caller's flags; none fails the context.
-assert 'Page::alloc_page(gfp | __GFP_ZERO)' in blocks and 'RBTreeNode::new(va, page, gfp)' in blocks
+assert 'GpuPage::alloc(gfp | __GFP_ZERO)' in blocks and 'RBTreeNode::new(va, page, gfp)' in blocks
 assert 'pages.reserve(count * 8, gfp)' in blocks and 'push_within_capacity(node)' in blocks
 for failure in re.findall(r'Err\(_\) => return ([^,]+),', blocks):
     assert failure == 'Ok(None)', failure

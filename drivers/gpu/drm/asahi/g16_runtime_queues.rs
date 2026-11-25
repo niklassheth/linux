@@ -263,22 +263,34 @@ impl Bootstrap {
             let Some(base) = self.retired_queues.lock().pop() else {
                 return Ok(());
             };
-            match self.destroy_queue_context(base)? {
-                Some(target) => self.destroying_queues.push((base, target), GFP_KERNEL)?,
-                None => {
+            let mut committed = false;
+            match self.destroy_queue_context(base, &mut committed) {
+                Ok(true) => {}
+                Ok(false) => {
                     // The control ring reached its half-ring in-flight bound.
                     // Its slot in retired_queues was just vacated.
                     let _ = self.retired_queues.lock().push_within_capacity(base);
                     return Ok(());
+                }
+                Err(err) => {
+                    // Preserve `base` if we failed before publishing to the
+                    // control ring; once committed, `(base, target)` is already
+                    // recorded in `destroying_queues`.
+                    if !committed {
+                        let _ = self.retired_queues.lock().push_within_capacity(base);
+                    }
+                    return Err(err);
                 }
             }
         }
     }
 
     /// Publish a context destruction without waiting, as growth replies are.
-    /// Returns the monotonic control epoch that acknowledges it, or None when
-    /// the half-ring in-flight window is full.
-    pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u64>> {
+    /// Records `(base, target)` in `destroying_queues` immediately on tail
+    /// commit (before the fallible RTKit kick) so no queue storage record is
+    /// lost on error. Returns `Ok(true)` when published, `Ok(false)` when the
+    /// half-ring in-flight window is full.
+    pub(super) fn destroy_queue_context(&mut self, base: u64, committed: &mut bool) -> Result<bool> {
         let context = base + 0x4140;
         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
         let ids = fw.read_u32(context)?;
@@ -297,7 +309,7 @@ impl Bootstrap {
             .observe(head, ack, tail)
             .map_err(|_| EIO)?;
         if !self.control_ring.has_room() {
-            return Ok(None);
+            return Ok(false);
         }
         let (slot, successor) = self.control_ring.next_slot();
         let control = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS).channels[12].ring;
@@ -309,12 +321,17 @@ impl Bootstrap {
         let guard = self._sgx.try_access().ok_or(ENODEV)?;
         guard.try_write32(successor, 0xd60060)?;
         drop(guard);
+        *committed = true;
         let target = self.control_ring.commit();
+        // Capacity was reserved in recycle_queues() before popping `base`.
+        self.destroying_queues
+            .push_within_capacity((base, target))
+            .map_err(|_| EIO)?;
         crate::mem::sync();
         self._rtkit
             .as_mut()
             .send_message(0x21, 0x0084_0000_0000_0011)?;
-        Ok(Some(target))
+        Ok(true)
     }
 
     /// Initialize three lanes in `base`, which is newly allocated or recycled.

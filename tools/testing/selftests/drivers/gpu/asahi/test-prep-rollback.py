@@ -40,10 +40,13 @@ for src in (compute, render):
     assert 'prep.set_work(' in src
     assert src.index('prep.commit()') < src.index('self.render_failed = true;')
 
-# AddressSpace::prepare_render rolls back scratch on write_low error, and
+# AddressSpace::prepare_render rolls back scratch on write_low error,
+# lease_scratch stages arena advancement until all pages/nodes allocate, and
 # release_scratch uses push_within_capacity (never allocates).
 pr = vm[vm.index('pub(crate) fn prepare_render('):vm.index('pub(crate) fn alloc_compute_pool(')]
 assert 'let _ = self.release_scratch(scratch);' in pr
+ls = vm[vm.index('fn lease_scratch('):vm.index('pub(crate) fn release_scratch(')]
+assert ls.index('GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?') < ls.index('self.render_arena = next_arena;')
 rs = vm[vm.index('pub(crate) fn release_scratch('):vm.index('pub(crate) fn tvb_va_blocks(')]
 assert 'push_within_capacity(range)' in rs and 'GFP_KERNEL' not in rs
 

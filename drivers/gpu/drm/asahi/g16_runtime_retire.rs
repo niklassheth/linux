@@ -184,7 +184,7 @@ impl Bootstrap {
         // Device-wide transport state is the same for every flight: read each
         // register once per scan instead of once per flight.
         let mut channel_state: [Option<[u32; 2]>; 12] = [None; 12];
-        let control_replied = {
+        {
             let guard = self._sgx.try_access().ok_or(ENODEV)?;
             let head = guard.try_read32(0xd640c0)?;
             let ack = guard.try_read32(0xd640c8)?;
@@ -193,8 +193,7 @@ impl Bootstrap {
             self.control_ring
                 .observe(head, ack, tail)
                 .map_err(|_| EIO)?;
-            self.control_ring.drained()
-        };
+        }
         // Preallocated to MAX_FLIGHTS, which bounds the flights scanned here.
         if self.retired.capacity() < self.flights.len() {
             return Err(EIO);
@@ -339,9 +338,13 @@ impl Bootstrap {
                 }
             }
             // Growth replies can refer to a Work after its main stage stamp.
-            if flight.render.is_some() {
-                blocked |= u32::from(!control_replied) << 4;
-                done &= control_replied;
+            // Wait only for this render's own latest control reply epoch so
+            // unrelated newer control traffic (e.g. queue destroys) cannot
+            // hold a completed render through the watchdog.
+            if let Some(render) = &flight.render {
+                let replied = self.control_ring.reached(render.events.reply_epoch);
+                blocked |= u32::from(!replied) << 4;
+                done &= replied;
             }
             {
                 let flight = &mut self.flights[index];
@@ -788,7 +791,7 @@ impl Bootstrap {
             let guard = self._sgx.try_access().ok_or(ENODEV)?;
             guard.try_write32(successor, 0xd60060)?;
             drop(guard);
-            let _ = self.control_ring.commit();
+            service.reply_epoch = self.control_ring.commit();
             crate::mem::sync();
             self._rtkit
                 .as_mut()

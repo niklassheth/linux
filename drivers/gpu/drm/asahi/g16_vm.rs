@@ -567,14 +567,39 @@ impl AddressSpace {
             }
             start..end
         } else {
-            let arena = if render {
-                &mut self.render_arena
+            // Stage the arena advance and preallocate all pages/tree nodes
+            // before mutating the arena or page tables so ENOMEM never strands
+            // scratch VA. Partial PTE edits still quarantine the range.
+            let mut next_arena = if render {
+                self.render_arena.clone()
             } else {
-                &mut self.compute_arena
+                self.compute_arena.clone()
             };
-            // Partially allocated failures stay quarantined until VM teardown.
-            let range = arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?;
-            self.alloc_low(range.start, size, prot::PROT_GPU_SHARED_RW)?;
+            let range = next_arena.alloc(size as u64, UAT_PGSZ as u64).ok_or(ENOMEM)?;
+            let mut nodes = KVec::new();
+            nodes.reserve(size / UAT_PGSZ, GFP_KERNEL)?;
+            for v in (range.start..range.end).step_by(UAT_PGSZ) {
+                if self.pages.get(&v).is_some() || self.low.translate(v)?.is_some() {
+                    return Err(EEXIST);
+                }
+                let page = GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?;
+                let node = RBTreeNode::new(v, page, GFP_KERNEL)?;
+                nodes.push_within_capacity(node).map_err(|_| EIO)?;
+            }
+            if render {
+                self.render_arena = next_arena;
+            } else {
+                self.compute_arena = next_arena;
+            }
+            for node in nodes {
+                self.pages.insert(node);
+                self.owned_bytes += UAT_PGSZ;
+            }
+            for v in (range.start..range.end).step_by(UAT_PGSZ) {
+                let phys = self.pages.get(&v).ok_or(EIO)?.phys();
+                self.low
+                    .map_pages(v..v + UAT_PGSZ as u64, phys, prot::PROT_GPU_SHARED_RW, false)?;
+            }
             range
         };
         self.scratch_users[index] += 1;

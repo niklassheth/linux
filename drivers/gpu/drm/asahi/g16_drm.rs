@@ -837,11 +837,14 @@ impl PinnedDrop for File {
         }
         let mut runtime = self.device.runtime.lock();
         if self.device.failed.load(Ordering::Acquire) || runtime.render_failed() {
-            // Retain roots and timestamp backing after any device/runtime fault
-            // until reset establishes firmware quiescence.
-            drop(runtime);
-            drop(state);
-            core::mem::forget(self.state.clone());
+            if !state.vms.is_empty() || !state.retained_timestamps.is_empty() {
+                // Retain roots and timestamp backing after any device/runtime
+                // fault until reset establishes firmware quiescence. Empty
+                // files with no published resources drop normally.
+                drop(runtime);
+                drop(state);
+                core::mem::forget(self.state.clone());
+            }
             return;
         }
         for vm in state.vms.iter().rev() {

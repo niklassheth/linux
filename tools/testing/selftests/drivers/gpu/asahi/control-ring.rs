@@ -22,7 +22,6 @@ fn half_ring_bound_blocks_128th_unacked_destroy_and_never_falsely_completes() {
     // modular reached(0, 129, 256)) MUST be rejected while cursors stay at 0.
     assert_eq!(ring.observe(hw_head, hw_ack, hw_tail), Ok(()));
     assert!(!ring.has_room());
-    assert!(!ring.drained());
     for &t in &targets {
         assert!(!ring.reached(t));
     }
@@ -93,10 +92,19 @@ fn delayed_collection_across_multiple_wraps_and_mixed_tvb_traffic() {
     hw_head = hw_tail;
     hw_ack = hw_tail;
     assert_eq!(ring.observe(hw_head, hw_ack, hw_tail), Ok(()));
-    assert!(ring.drained());
     for t in pending {
         assert!(ring.reached(t));
     }
+
+    // A render whose own TVB reply epoch was reached (or 0 for no reply) is
+    // not blocked by newer unacknowledged queue destroys.
+    let (_, succ) = ring.next_slot();
+    hw_tail = succ;
+    let newer_destroy = ring.commit();
+    assert_eq!(ring.observe(hw_head, hw_ack, hw_tail), Ok(()));
+    assert!(ring.reached(0));
+    assert!(ring.reached(early_destroy));
+    assert!(!ring.reached(newer_destroy));
 }
 
 #[test]

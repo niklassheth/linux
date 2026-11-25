@@ -87,10 +87,4 @@ impl ControlRing {
     pub(crate) fn reached(&self, target: u64) -> bool {
         self.head >= target && self.ack >= target
     }
-
-    /// Whether every published control message has been read and acknowledged.
-    #[inline]
-    pub(crate) fn drained(&self) -> bool {
-        self.head == self.tail && self.ack == self.tail
-    }
 }

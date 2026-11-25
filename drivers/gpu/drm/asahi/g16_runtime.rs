@@ -479,6 +479,9 @@ impl Drop for Support {
 #[derive(Default)]
 struct RenderEvents {
     memory_limit: bool,
+    /// Monotonic control-channel epoch of the latest TVB growth/memory-limit
+    /// reply sent for this render (0 if none).
+    reply_epoch: u64,
 }
 
 /// Firmware VA of the first Work arena; Work offsets from here alias into the

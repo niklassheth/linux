@@ -37,12 +37,16 @@ assert 'self.control_ring = crate::g16_control_ring::ControlRing::new(3);' in g1
 assert 'destroying_queues: KVec<(u64, u64)>,' in g16
 
 # destroy_queue_context, collect_destroyed_queues, and service_render_events
-# all enforce ControlRing::observe / has_room / commit / reached.
+# all enforce ControlRing::observe / has_room / commit / reached; destroy
+# records (base, target) before send_message() and restores base on pre-commit
+# error; render retirement checks per-render reply_epoch instead of global drain.
 assert 'self.control_ring.reached(target)' in queues
 assert 'if !self.control_ring.has_room()' in queues
 assert 'let target = self.control_ring.commit();' in queues
+assert queues.index('self.destroying_queues\n            .push_within_capacity((base, target))') < queues.index('send_message(0x21,')
+assert 'if !committed {' in queues
 assert 'if !self.control_ring.has_room()' in retire
-assert 'let _ = self.control_ring.commit();' in retire
-assert 'self.control_ring.drained()' in retire
+assert 'service.reply_epoch = self.control_ring.commit();' in retire
+assert 'self.control_ring.reached(render.events.reply_epoch)' in retire
 
 print('test-control-ring: ok')

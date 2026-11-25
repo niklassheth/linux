@@ -56,13 +56,15 @@ assert unbind_arm.index('device.failed.load(Ordering::Acquire)') < unbind_arm.in
 assert unbind_arm.index('runtime.release_timestamp(') < unbind_arm.index('state.retained_timestamps.swap_remove(')
 
 # 3. File::drop() checks device.failed || runtime.render_failed() under runtime.lock()
-#    and forgets file state rather than detaching VMs or releasing timestamps.
+#    and forgets file state only when VMs or retained timestamps exist (empty
+#    files drop cleanly without leaking).
 fdrop = drm[drm.index('impl PinnedDrop for File'):drm.index('static FENCE_KEY')]
 lock_pos = fdrop.index('let mut runtime = self.device.runtime.lock();')
 guard_pos = fdrop.index('self.device.failed.load(Ordering::Acquire) || runtime.render_failed()', lock_pos)
-detach_pos = fdrop.index('vm.detach(', guard_pos)
+non_empty_pos = fdrop.index('!state.vms.is_empty() || !state.retained_timestamps.is_empty()', guard_pos)
+detach_pos = fdrop.index('vm.detach(', non_empty_pos)
 rel_pos = fdrop.index('.release_timestamp(', detach_pos)
-assert lock_pos < guard_pos < detach_pos < rel_pos
+assert lock_pos < guard_pos < non_empty_pos < detach_pos < rel_pos
 
 # 4. Behavioral Rust test modeling the quarantine state machine across faulted
 #    unbind + rebind attempts.

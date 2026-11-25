@@ -77,6 +77,8 @@ pub(crate) struct AddressSpace {
     render_arena: Arena,
     scratch_free: [KVec<core::ops::Range<u64>>; 2],
     scratch_users: [usize; 2],
+    /// Firmware Work slots owned and recycled strictly within this VM.
+    work_pool: crate::g16_work_pool::VmWorkPool<KVec<u64>>,
     /// The support of this compute root's FList (a private pool's own lease,
     /// or the VM's render support when sharing its pool). Pending and
     /// quarantined Works retain it with the root, so its hardware slot is not
@@ -87,6 +89,37 @@ pub(crate) struct AddressSpace {
     _pool_owner: Option<kernel::sync::Arc<kernel::sync::Mutex<AddressSpace>>>,
 }
 
+impl crate::g16_work_pool::SlotVec for KVec<u64> {
+    fn len(&self) -> usize {
+        KVec::len(self)
+    }
+
+    fn pop_slot(&mut self) -> Option<u64> {
+        self.pop()
+    }
+
+    fn last_slot(&self) -> Option<u64> {
+        self.last().copied()
+    }
+
+    fn push_within(&mut self, va: u64) -> core::result::Result<(), u64> {
+        self.push_within_capacity(va).map_err(|_| va)
+    }
+
+    fn contains_slot(&self, va: u64) -> bool {
+        self.iter().any(|&v| v == va)
+    }
+
+    fn remove_slot(&mut self, va: u64) -> bool {
+        if let Some(pos) = self.iter().position(|&v| v == va) {
+            self.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// An exclusive suballocation; its backing remains owned by the VM.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Scratch {
@@ -95,24 +128,70 @@ pub(crate) struct Scratch {
 }
 
 impl AddressSpace {
-    /// Reused Work retains the same alias and backing. Existing aliases need
-    /// no PTE edit or invalidation; conflicting client mappings are rejected.
+    /// Install a freshly allocated Work alias in this VM. Reused slots stay
+    /// permanently mapped in their owning VM and never call this again; any
+    /// pre-existing PTE at `va` is rejected so aliases cannot collide.
     pub(crate) fn map_work_alias(&mut self, va: u64, pa: u64) -> Result {
-        match self.low.translate(va)? {
-            Some(existing) if existing == pa => Ok(()),
-            Some(_) => Err(EEXIST),
-            None => self.low.map_pages(
-                va..va + UAT_PGSZ as u64,
-                pa,
-                prot::PROT_GPU_SHARED_RW,
-                false,
-            ),
+        if self.low.translate(va)?.is_some() {
+            return Err(EEXIST);
         }
+        self.low.map_pages(
+            va..va + UAT_PGSZ as u64,
+            pa,
+            prot::PROT_GPU_SHARED_RW,
+            false,
+        )
     }
+
+    /// Remove Work alias PTEs during VM teardown or failed slot installation.
+    pub(crate) fn unmap_work_alias(&mut self, range: core::ops::Range<u64>) -> Result {
+        self.low.unmap_pages(range)
+    }
+
+    pub(crate) fn has_free_work(&self, render: bool) -> bool {
+        self.work_pool.has_free(render)
+    }
+
+    pub(crate) fn work_leased(&self, render: bool) -> usize {
+        self.work_pool.leased_count(render)
+    }
+
+    pub(crate) fn work_pool_all_idle(&self) -> bool {
+        self.work_pool.all_idle()
+    }
+
+    pub(crate) fn pop_free_work(&mut self, render: bool) -> Option<u64> {
+        self.work_pool.pop_free(render)
+    }
+
+    pub(crate) fn reserve_work_slot(&mut self, render: bool) -> Result {
+        let (owned, free) = self.work_pool.lists_mut(render);
+        owned.reserve(1, GFP_KERNEL)?;
+        let need_free = (owned.len() + 1).saturating_sub(free.len());
+        free.reserve(need_free, GFP_KERNEL)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_fresh_work(&mut self, render: bool, va: u64) -> Result {
+        self.work_pool.record_fresh(render, va).map_err(|_| EIO)
+    }
+
+    pub(crate) fn release_work(&mut self, render: bool, va: u64) -> Result {
+        self.work_pool.release(render, va).map_err(|_| EIO)
+    }
+
+    pub(crate) fn peek_teardown_work(&self, render: bool) -> Option<u64> {
+        self.work_pool.peek_teardown(render)
+    }
+
+    pub(crate) fn complete_teardown_work(&mut self, render: bool, va: u64) -> Result {
+        self.work_pool.complete_teardown(render, va).map_err(|_| EIO)
+    }
+
     /// Bytes of backing owned by this root (render private storage, scratch,
-    /// tiler blocks and work aliases), for fdinfo.
+    /// tiler blocks and per-VM firmware Work slots), for fdinfo.
     pub(crate) fn owned_bytes(&self) -> usize {
-        self.owned_bytes
+        self.owned_bytes + self.work_pool.owned_bytes()
     }
 
     pub(crate) fn roots(&self) -> Roots {
@@ -152,6 +231,7 @@ impl AddressSpace {
             render_arena: Arena::default(),
             scratch_free: [KVec::new(), KVec::new()],
             scratch_users: [0; 2],
+            work_pool: crate::g16_work_pool::VmWorkPool::new(),
             compute_support: None,
             _pool_owner: None,
         })

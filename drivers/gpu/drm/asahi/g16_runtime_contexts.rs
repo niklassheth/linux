@@ -211,26 +211,67 @@ impl Bootstrap {
         Ok(slot as u32)
     }
 
-    pub(crate) fn release_render_vm(&mut self, space: g16_vm::Roots) -> Result {
+    pub(crate) fn release_render_vm(&mut self, space: &mut g16_vm::AddressSpace) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
-        // A later VM can reuse this root's address: forget which free slots
-        // have their alias mapped in it.
-        for slots in &mut self.free_work {
-            for slot in slots.iter_mut().filter(|(_, root)| *root == space.low) {
-                slot.1 = 0;
+        let root_low = space.roots().low;
+        if !space.work_pool_all_idle() {
+            return Err(EBUSY);
+        }
+        for index in 1..64 {
+            if self.context_roots[index].is_some_and(|r| r.low == root_low)
+                && self.context_users[index] != 0
+            {
+                return Err(EBUSY);
             }
         }
         for index in 1..64 {
-            if self.context_roots[index].is_some_and(|r| r.low == space.low) {
-                if self.context_users[index] != 0 {
-                    return Err(EBUSY);
-                }
+            if self.context_roots[index].is_some_and(|r| r.low == root_low) {
                 self.set_context(index, None)?;
             }
         }
-        if let Some(index) = self.tvb_pools.iter().position(|p| p.root == space.low) {
+        // Detach and free every Work slot owned by this VM: unmap aliases from
+        // this root and context 0, invalidate context 0, release firmware
+        // backing pages, then return only the unbacked firmware VA for reuse.
+        for render in [false, true] {
+            let index = usize::from(render);
+            let priv_size = if render { 0x10000u64 } else { 0x4000u64 };
+            while let Some(va) = space.peek_teardown_work(render) {
+                let alias_range =
+                    crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, render)
+                        .ok_or(EIO)?;
+                space.low.reserve_invalidation()?;
+                self._address_space
+                    .as_mut()
+                    .ok_or(EIO)?
+                    .low
+                    .reserve_invalidation()?;
+                space.unmap_work_alias(alias_range.clone())?;
+                space.sync();
+                let dev_unmap = self
+                    ._address_space
+                    .as_mut()
+                    .ok_or(EIO)?
+                    .unmap_work_alias(alias_range);
+                if let Some(dev_space) = self._address_space.as_ref() {
+                    if dev_space.has_pending_tables() {
+                        dev_space.sync();
+                    }
+                    self.invalidate_client(dev_space);
+                }
+                dev_unmap?;
+                let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+                fw.release_region(va)?;
+                fw.release_region(va + priv_size)?;
+                space.complete_teardown_work(render, va)?;
+                self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
+                self.free_work_va[index]
+                    .push_within_capacity(va)
+                    .map_err(|_| EIO)?;
+            }
+        }
+        if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root_low) {
             let a = self.tvb_pools[index].addresses;
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             fw.write_live(0xfffffc2000128000 + a.buffer_manager_slot * 16, &[0; 16])?;

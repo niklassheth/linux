@@ -18,9 +18,9 @@ retire = (driver / 'g16_runtime_retire.rs').read_text()
 
 # JobNotifier carries the flushed flag.
 assert re.search(r'pub\(crate\) struct JobNotifier \{[\s\S]*?flushed: bool,', runtime)
-# New JobNotifiers start unflushed, and reuse requires !j.flushed && j.owner_root.is_none().
+# New JobNotifiers start unflushed, and reuse requires !j.flushed && !j.owner_retired.
 assert re.search(
-    r'\.find\(\|j\| j\.job == job && !j\.flushed && j\.owner_root\.is_none\(\)\)',
+    r'\.find\(\|j\| j\.job == job && !j\.flushed && !j\.owner_retired\)',
     render,
 )
 assert re.search(r'JobNotifier \{[\s\S]*?flushed: false,', render)

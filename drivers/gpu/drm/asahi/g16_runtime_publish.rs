@@ -96,16 +96,18 @@ impl Bootstrap {
         queue: &FirmwareQueues,
         render: bool,
         root: u64,
+        client_has_free_work: bool,
+        client_work_leased: usize,
         entries: [u32; 3],
     ) -> Result {
         if self.render_failed {
             return Err(EIO);
         }
-        // Work storage is bounded by its GPU alias window. When the window is
-        // full, outstanding Works return storage as they retire, so admission
-        // waits; with nothing in flight it can never clear, so fail.
-        if !self.work_space_left(render) {
-            if self.flights.is_empty() {
+        // Work storage is owned per VM and bounded globally by its 4 GiB alias
+        // window. When the window is full and this VM has no idle slot, only
+        // this VM's own leased slots will return to it on retirement.
+        if !client_has_free_work && !self.global_work_space_left(render) {
+            if client_work_leased == 0 {
                 return Err(ENOSPC);
             }
             self.report_pressure(64, "Work storage");

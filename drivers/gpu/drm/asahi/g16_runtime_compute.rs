@@ -165,6 +165,8 @@ impl Bootstrap {
             &queue,
             false,
             client.roots().low,
+            client.has_free_work(false),
+            client.work_leased(false),
             [0, 0, 1 + dependencies.iter().flatten().count() as u32],
         )?;
         self.prepare_queues(&mut queue)?;
@@ -210,29 +212,13 @@ impl Bootstrap {
             return Err(EINVAL);
         }
         let ordinal = queue.compute_count;
-        let (work, aliased) = self.allocate_work(false)?;
-        let alias = 0x71_0000_0000 + (work - WORK_BASE);
-        if alias + 0x4000 > 0x72_0000_0000 {
-            return Err(ENOSPC);
-        }
+        let (work, reused) = self.allocate_work(client, false)?;
+        let alias = crate::g16_work_pool::alias_range(work, WORK_BASE, WORK_WINDOW, false)
+            .ok_or(ENOSPC)?
+            .start;
         // Firmware save state is independent of shader resource tables.
         // The upper half of the zeroed Work page is GPU-addressable storage.
         params.save_area = alias + 0x2000;
-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        // As for renders: reused slots skip aliases that already exist and
-        // no-op PTE syncs. Fresh slots (aliased.is_none()) were allocated
-        // with __GFP_ZERO so their upper half save_area is already zeroed;
-        // reused slots clear save_area inside the single staged writer batch.
-        if aliased.is_none() || aliased != Some(space.low) {
-            let pa = fw.physical(work)?;
-            if aliased.is_none() {
-                self._address_space
-                    .as_mut()
-                    .ok_or(EIO)?
-                    .map_work_alias(alias, pa)?;
-            }
-            client.map_work_alias(alias, pa)?;
-        }
         let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
         let support = client.compute_support().ok_or(EIO)?;
         a.support = support.address();
@@ -240,16 +226,6 @@ impl Bootstrap {
         a.driver_stamp = work + 0x4000;
         a.firmware_stamp = lane.firmware_stamp();
         a.event = queue.event(2)?;
-        if fw.has_pending_tables() {
-            fw.sync();
-        }
-        if aliased.is_none() {
-            let dev_space = self._address_space.as_ref().ok_or(EIO)?;
-            if dev_space.has_pending_tables() {
-                dev_space.sync();
-            }
-            self.invalidate_client(dev_space);
-        }
         if client.has_pending_tables() {
             client.sync();
         }
@@ -296,7 +272,7 @@ impl Bootstrap {
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             let mut writer = fw.writer();
-            if aliased.is_some() {
+            if reused {
                 // Reused slot: clear the GPU-writable CDM save_area upper half
                 // (fresh slots are already zeroed by __GFP_ZERO).
                 writer.zero_staged(a.work + 0x2000, 0x2000)?;

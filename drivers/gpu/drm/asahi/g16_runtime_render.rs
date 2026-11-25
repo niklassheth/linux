@@ -173,7 +173,14 @@ impl Bootstrap {
         let resolved =
             self.resolve_render_dependencies(&mut queue, params, timestamped, dependencies, &mut tally)?;
         let dependencies = &resolved;
-        let root = owner.lock().roots().low;
+        let (root, client_has_free_work, client_work_leased) = {
+            let client = owner.lock();
+            (
+                client.roots().low,
+                client.has_free_work(true),
+                client.work_leased(true),
+            )
+        };
         let initbm = !self
             .tvb_pools
             .iter()
@@ -190,6 +197,8 @@ impl Bootstrap {
             &queue,
             true,
             root,
+            client_has_free_work,
+            client_work_leased,
             [1 + u32::from(initbm) + stage_deps[0], 2 + stage_deps[1], 0],
         )?;
         self.prepare_queues(&mut queue)?;
@@ -307,7 +316,7 @@ impl Bootstrap {
         // within each lane, even when other queues publish between them.
         a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
         a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
-        let (va, aliased) = self.allocate_work(true)?;
+        let (va, _reused) = self.allocate_work(client, true)?;
         a.tiling_shared_tail = va + 0x10000;
         a.fragment_shared_tail = va + 0x14000;
         // The notifier pass stores driver stamps, then sends the IRQ after
@@ -344,7 +353,7 @@ impl Bootstrap {
             let owner = self
                 .job_notifiers
                 .iter()
-                .find(|j| j.job == job && !j.flushed && j.owner_root.is_none())
+                .find(|j| j.job == job && !j.flushed && !j.owner_retired)
                 .map(|j| j.owner);
             let owner_va = owner.unwrap_or(va);
             a.event_control = owner_va + 0x200;
@@ -371,26 +380,12 @@ impl Bootstrap {
 
         a.tiling_firmware_stamp = lanes[0].firmware_stamp();
         a.fragment_firmware_stamp = lanes[1].firmware_stamp();
-        let alias = 0x72_0000_0000 + (va - WORK_BASE);
-        if alias + 0x8000 > 0x73_0000_0000 {
-            return Err(ENOSPC);
-        }
-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-        // A reused slot keeps its device alias, and its client alias when it
-        // returns to the same root: skip those page-table walks and no-op syncs.
-        let client_mapped = aliased == Some(space.low);
+        let alias = crate::g16_work_pool::alias_range(va, WORK_BASE, WORK_WINDOW, true)
+            .ok_or(ENOSPC)?
+            .start;
         for stage in 0..2u64 {
             let work_page = va + stage * 0x8000;
             let register_page = alias + stage * 0x4000;
-            if aliased.is_none() || !client_mapped {
-                let pa = fw.physical(work_page)?;
-                if aliased.is_none() {
-                    self._address_space.as_mut().ok_or(EIO)?.map_work_alias(register_page, pa)?;
-                }
-                if !client_mapped {
-                    client.map_work_alias(register_page, pa)?;
-                }
-            }
             if stage == 0 {
                 a.tiling_work = work_page + (a.tiling_work & 0x3fff);
                 a.tiling_microsequence = work_page + 0x4000 + (a.tiling_microsequence & 0x3fff);
@@ -402,16 +397,6 @@ impl Bootstrap {
                 a.fragment_prelude = work_page + 0x4000;
                 a.fragment_register_alias = register_page + (a.fragment_register_alias & 0x3fff);
             }
-        }
-        if fw.has_pending_tables() {
-            fw.sync();
-        }
-        if aliased.is_none() {
-            let dev_space = self._address_space.as_ref().ok_or(EIO)?;
-            if dev_space.has_pending_tables() {
-                dev_space.sync();
-            }
-            self.invalidate_client(dev_space);
         }
         if client.has_pending_tables() {
             client.sync();
@@ -513,7 +498,8 @@ impl Bootstrap {
                         .push_within_capacity(JobNotifier {
                             job,
                             owner: owner_va,
-                            owner_root: None,
+                            owner_client: owner.clone(),
+                            owner_retired: false,
                             flushed: false,
                             works: 0,
                             refs: 0,

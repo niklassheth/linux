@@ -368,7 +368,7 @@ impl Bootstrap {
                             self.job_notifiers
                                 .iter()
                                 .find(|j| j.owner == owner)
-                                .is_some_and(|j| j.owner_root.is_some()),
+                                .is_some_and(|j| j.owner_retired),
                         ),
                     };
                     let (count, total) = notifier_seen.unwrap_or((u32::MAX, u32::MAX));
@@ -456,31 +456,44 @@ impl Bootstrap {
                 self.diagnostics.retire_log[slot] = entry;
             }
             self.diagnostics.retire_next = self.diagnostics.retire_next.wrapping_add(1);
-            flight.client.lock().release_scratch(flight.scratch)?;
-            // allocate_work reserved a slot for every outstanding lease. A
-            // render whose submission shares its notifier keeps the owner
-            // Work's storage leased until the last render using it retires.
-            let mut free = [Some((id, root)), None];
+            let mut client = flight.client.lock();
+            client.release_scratch(flight.scratch)?;
+            // allocate_work reserved a slot in the owning VM's pool for every
+            // outstanding lease. A render whose submission shares its notifier
+            // keeps the owner Work's storage leased until the last render
+            // using it retires, then returns it strictly to `owner_client`.
+            let mut free_self = Some(id);
+            let mut free_owner = None;
             if let Some(owner_va) = flight.job_notifier {
                 if let Some(p) = self.job_notifiers.iter().position(|j| j.owner == owner_va) {
                     let entry = &mut self.job_notifiers[p];
                     entry.refs = entry.refs.saturating_sub(1);
                     if id == owner_va {
-                        entry.owner_root = Some(root);
-                        free[0] = None;
+                        entry.owner_retired = true;
+                        free_self = None;
                     }
-                    if entry.refs == 0 {
-                        if let Some(owner_root) = entry.owner_root {
-                            free[1] = Some((owner_va, owner_root));
-                            self.job_notifiers.swap_remove(p);
-                        }
+                    if entry.refs == 0 && entry.owner_retired {
+                        let entry = self.job_notifiers.swap_remove(p);
+                        free_owner = Some((owner_va, entry.owner_client));
                     }
                 }
             }
-            for (va, root) in free.into_iter().flatten() {
-                self.free_work[usize::from(render_work)]
-                    .push_within_capacity((va, root))
-                    .map_err(|_| EIO)?;
+            if let Some(va) = free_self {
+                Self::release_work_counted(&mut self.vm_free_work, &mut client, render_work, va)?;
+            }
+            if let Some((owner_va, owner_client)) = free_owner {
+                if Arc::ptr_eq(&owner_client, &flight.client) {
+                    Self::release_work_counted(&mut self.vm_free_work, &mut client, true, owner_va)?;
+                } else {
+                    drop(client);
+                    let mut owner_guard = owner_client.lock();
+                    Self::release_work_counted(
+                        &mut self.vm_free_work,
+                        &mut owner_guard,
+                        true,
+                        owner_va,
+                    )?;
+                }
             }
             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
         }

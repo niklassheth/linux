@@ -9,12 +9,12 @@ use super::*;
 impl Vm {
     pub(super) fn detach(&self, runtime: &mut crate::g16::Bootstrap) -> Result {
         {
-            let space = self.space.lock();
+            let mut space = self.space.lock();
             runtime.report_vm_detach(space.roots().low);
-            runtime.release_render_vm(space.roots())?;
+            runtime.release_render_vm(&mut space)?;
         }
-        let compute = self.compute_space.lock();
-        runtime.release_render_vm(compute.roots())?;
+        let mut compute = self.compute_space.lock();
+        runtime.release_render_vm(&mut compute)?;
         Ok(())
     }
 

@@ -28,6 +28,7 @@ mod g16_timeline;
 mod g16_tvb;
 mod g16_vm;
 mod g16_wait_state;
+mod g16_work_pool;
 #[path = "m4_mem.rs"]
 mod mem;
 #[path = "m4_pgtable.rs"]

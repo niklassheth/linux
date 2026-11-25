@@ -144,7 +144,7 @@ checks += 1
 # inside the single writer batch on reused slots.
 scq_fn = function(compute, 'submit_compute_queue')
 assert re.search(
-    r'if aliased\.is_some\(\) \{\s*(?://[^\n]*\n\s*)*writer\.zero_staged\(a\.work \+ 0x2000, 0x2000\)\?;',
+    r'if reused \{\s*(?://[^\n]*\n\s*)*writer\.zero_staged\(a\.work \+ 0x2000, 0x2000\)\?;',
     scq_fn,
 )
 checks += 1

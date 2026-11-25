@@ -258,12 +258,14 @@ pub(crate) struct Bootstrap {
     next_work_va: u64,
     /// Queue identities and TVB pools; see render_runtime::OBJECT_BASE.
     next_object_va: u64,
-    work_arenas: [core::ops::Range<u64>; 2],
-    /// Retired Work slots: VA and the client root their alias was last
-    /// mapped into (the device alias is mapped on first use).
-    free_work: [KVec<(u64, u64)>; 2],
-    /// Work slots carved from arenas so far; free_work keeps room for all.
-    work_slots: [usize; 2],
+    /// Unbacked firmware Work VAs reclaimed on VM teardown after all aliases
+    /// were unmapped, invalidated, and firmware backing pages released.
+    free_work_va: [KVec<u64>; 2],
+    /// Firmware Work VA slots carved from `next_work_va` per kind so teardown
+    /// never allocates when reclaiming VAs.
+    work_va_slots: [usize; 2],
+    /// Total idle Work slots currently held in live VMs' per-VM free lists.
+    vm_free_work: [usize; 2],
     /// shared_notifier=1: per-submission notifiers, capacity MAX_FLIGHTS.
     job_notifiers: KVec<render_runtime::JobNotifier>,
     /// The current retire scan follows a timed-out notification wait, so
@@ -839,9 +841,9 @@ impl Bootstrap {
             diagnostics,
             next_work_va: render_runtime::WORK_BASE,
             next_object_va: render_runtime::OBJECT_BASE,
-            work_arenas: [0..0, 0..0],
-            free_work: [KVec::new(), KVec::new()],
-            work_slots: [0, 0],
+            free_work_va: [KVec::new(), KVec::new()],
+            work_va_slots: [0, 0],
+            vm_free_work: [0, 0],
             job_notifiers: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
             poll_scan: false,
             compute_publication: crate::module_parameters::fw_counter_start.value(),

@@ -7,74 +7,188 @@
 use super::*;
 
 impl Bootstrap {
-    /// Work storage must stay inside the 4 GiB windows that alias it for the
-    /// GPU (0x71/0x72_0000_0000 + offset): Work arenas grow from WORK_BASE,
-    /// and every other firmware object (queue identities, TVB pools) takes
-    /// its VA from OBJECT_BASE above the window. Before #174 they shared one
-    /// cursor, so context churn (about 0.4 MiB per queue and VM) pushed new
-    /// Work past the window after enough contexts in one boot: CTS on #173
-    /// failed renders with ENOSPC at offset 5.3 GiB.
-    pub(super) fn work_space_left(&self, render: bool) -> bool {
+    /// Whether unbacked firmware VA space remains in the 4 GiB Work alias
+    /// window (`0x71/0x72_0000_0000 + offset`) for a fresh Work slot.
+    pub(super) fn global_work_space_left(&self, render: bool) -> bool {
         let index = usize::from(render);
-        let stride = if render { 0x1c000 } else { 0x8000 };
-        !self.free_work[index].is_empty()
-            || !self.work_arenas[index].is_empty()
-            || self.next_work_va + 16 * stride <= WORK_BASE + WORK_WINDOW
+        let stride = crate::g16_work_pool::stride(render);
+        !self.free_work_va[index].is_empty()
+            || self
+                .next_work_va
+                .checked_add(stride)
+                .is_some_and(|end| end <= WORK_BASE + WORK_WINDOW)
     }
 
-    /// Lease Work storage until notifier/driver stamps and transport retire.
-    /// Backing stays mapped. Queue-owned wrapping stamps outlive reused Work,
-    /// so a pending dependency never follows a recycled completion address.
-    /// A Work slot and, for a reused one, the client root its alias is
-    /// already mapped into; the device alias exists for every reused slot.
-    pub(super) fn allocate_work(&mut self, render: bool) -> Result<(u64, Option<u64>)> {
+    /// Lower-bound check for `check_cap_headroom`: true if either global Work
+    /// VA space remains or at least one live VM already holds an idle slot.
+    pub(super) fn work_space_left(&self, render: bool) -> bool {
+        let index = usize::from(render);
+        self.vm_free_work[index] != 0 || self.global_work_space_left(render)
+    }
+
+    /// Lease a per-VM Work slot until notifier/driver stamps and transport
+    /// retire. Returns `(va, reused)` where `reused == true` means the slot
+    /// was popped from `client`'s own idle pool (zero allocations, zero PTE
+    /// edits, zero TLB invalidations), and `reused == false` means a fresh
+    /// slot was allocated with `__GFP_ZERO` backing and mapped strictly into
+    /// firmware, context 0, and `client`.
+    pub(super) fn allocate_work(
+        &mut self,
+        client: &mut g16_vm::AddressSpace,
+        render: bool,
+    ) -> Result<(u64, bool)> {
+        use crate::g16_work_pool as wp;
         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
         let index = usize::from(render);
-        if let Some((va, root)) = self.free_work[index].pop() {
-            return Ok((va, Some(root)));
+        if let Some(va) = client.pop_free_work(render) {
+            self.vm_free_work[index] = self.vm_free_work[index].checked_sub(1).ok_or(EIO)?;
+            return Ok((va, true));
         }
-        let stride = if render { 0x1c000 } else { 0x8000 };
-        if self.work_arenas[index].is_empty() {
-            // Retirement must not allocate, so the free list keeps room for
-            // every slot ever carved. Counting flights instead misses slots
-            // still leased after their own flight retired (a submission's
-            // notifier owner, held for its later renders).
-            let slots = self.work_slots[index] + 16;
-            self.free_work[index].reserve(slots - self.free_work[index].len(), GFP_KERNEL)?;
-            let base = self.next_work_va;
-            let end = base.checked_add(16 * stride).ok_or(ENOSPC)?;
+        let stride = wp::stride(render);
+        let (priv_size, shared_size) = if render {
+            (0x10000usize, 0xc000usize)
+        } else {
+            (0x4000usize, 0x4000usize)
+        };
+        // Reserve VM and teardown capacities up front so retirement and VM
+        // teardown never allocate.
+        client.reserve_work_slot(render)?;
+        let from_free = !self.free_work_va[index].is_empty();
+        let va = if from_free {
+            *self.free_work_va[index].last().ok_or(EIO)?
+        } else {
+            let end = self.next_work_va.checked_add(stride).ok_or(ENOSPC)?;
             if end > WORK_BASE + WORK_WINDOW {
                 return Err(ENOSPC);
             }
-            // Work VA only grows; a steady rise under constant load means
-            // leaked Work allocations.
-            pr_info!(
-                "G16: work arena refill render={} base={:#x} free=[{}, {}] flights={}\n",
-                render,
-                base,
-                self.free_work[0].len(),
-                self.free_work[1].len(),
-                self.flights.len()
-            );
-            // Failed refills retain their partial allocations, but no part of
-            // that range becomes available for a later Work or another arena.
-            self.next_work_va = end;
+            let slots = self.work_va_slots[index] + 1;
+            self.free_work_va[index].reserve(slots - self.free_work_va[index].len(), GFP_KERNEL)?;
+            self.next_work_va
+        };
+        let alias_range = wp::alias_range(va, WORK_BASE, WORK_WINDOW, render).ok_or(ENOSPC)?;
+        if from_free {
+            let popped = self.free_work_va[index].pop().ok_or(EIO)?;
+            if popped != va {
+                return Err(EIO);
+            }
+        } else {
+            self.next_work_va += stride;
+            self.work_va_slots[index] += 1;
+        }
+
+        let stages = if render { 2usize } else { 1usize };
+        let mut pas = [0u64; 2];
+        {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
-            for va in (base..end).step_by(stride as usize) {
-                fw.alloc(va, if render { 0x10000 } else { 0x4000 }, PROT_FW_PRIV_RW)?;
-                if render {
-                    fw.alloc(va + 0x10000, 0xc000, PROT_FW_SHARED_RW)?;
-                } else {
-                    fw.alloc(va + 0x4000, 0x4000, PROT_FW_SHARED_RW)?;
+            if let Err(err) = fw.alloc(va, priv_size, PROT_FW_PRIV_RW) {
+                let _ = self.free_work_va[index].push_within_capacity(va);
+                return Err(err);
+            }
+            if let Err(err) = fw.alloc(va + priv_size as u64, shared_size, PROT_FW_SHARED_RW) {
+                if fw.release_region(va).is_ok() {
+                    let _ = self.free_work_va[index].push_within_capacity(va);
+                }
+                return Err(err);
+            }
+            for (stage, pa_slot) in pas.iter_mut().take(stages).enumerate() {
+                match fw.physical(va + stage as u64 * 0x8000) {
+                    Ok(pa) => *pa_slot = pa,
+                    Err(err) => {
+                        let r1 = fw.release_region(va);
+                        let r2 = fw.release_region(va + priv_size as u64);
+                        if r1.is_ok() && r2.is_ok() {
+                            let _ = self.free_work_va[index].push_within_capacity(va);
+                        }
+                        return Err(err);
+                    }
                 }
             }
-            fw.sync();
-            self.work_arenas[index] = base..end;
-            self.work_slots[index] = slots;
         }
-        let va = self.work_arenas[index].start;
-        self.work_arenas[index].start += stride;
-        Ok((va, None))
+
+        let mut dev_mapped = 0u64;
+        let mut client_mapped = 0u64;
+        let map_res: Result = (|| {
+            for (stage, &pa) in pas.iter().take(stages).enumerate() {
+                let register_page = alias_range.start + stage as u64 * 0x4000;
+                self._address_space
+                    .as_mut()
+                    .ok_or(EIO)?
+                    .map_work_alias(register_page, pa)?;
+                dev_mapped = stage as u64 + 1;
+                client.map_work_alias(register_page, pa)?;
+                client_mapped = stage as u64 + 1;
+            }
+            Ok(())
+        })();
+        if let Err(err) = map_res {
+            let mut clean = true;
+            if client_mapped != 0 {
+                let end = alias_range.start + client_mapped * 0x4000;
+                if client.unmap_work_alias(alias_range.start..end).is_err() {
+                    clean = false;
+                }
+                if client.has_pending_tables() {
+                    client.sync();
+                }
+                self.invalidate_client(client);
+            }
+            if dev_mapped != 0 {
+                let end = alias_range.start + dev_mapped * 0x4000;
+                if let Some(dev_space) = self._address_space.as_mut() {
+                    if dev_space.unmap_work_alias(alias_range.start..end).is_err() {
+                        clean = false;
+                    }
+                    if dev_space.has_pending_tables() {
+                        dev_space.sync();
+                    }
+                }
+                if let Some(dev_space) = self._address_space.as_ref() {
+                    self.invalidate_client(dev_space);
+                }
+            }
+            if clean {
+                if let Some(fw) = self._firmware_space.as_mut() {
+                    let r1 = fw.release_region(va);
+                    let r2 = fw.release_region(va + priv_size as u64);
+                    if r1.is_ok() && r2.is_ok() {
+                        let _ = self.free_work_va[index].push_within_capacity(va);
+                    }
+                }
+            }
+            return Err(err);
+        }
+
+        if let Some(fw) = self._firmware_space.as_ref() {
+            if fw.has_pending_tables() {
+                fw.sync();
+            }
+        }
+        let dev_space = self._address_space.as_ref().ok_or(EIO)?;
+        if dev_space.has_pending_tables() {
+            dev_space.sync();
+        }
+        self.invalidate_client(dev_space);
+        if client.has_pending_tables() {
+            client.sync();
+        }
+        self.invalidate_client(client);
+
+        client.record_fresh_work(render, va)?;
+        Ok((va, false))
+    }
+
+    /// Return a retired or rolled-back Work slot to its owning VM's idle pool.
+    /// Split-borrow signature allows callers holding a `FirmwareReader` over
+    /// `self._firmware_space`. Never allocates.
+    pub(super) fn release_work_counted(
+        vm_free_work: &mut [usize; 2],
+        client: &mut g16_vm::AddressSpace,
+        render: bool,
+        va: u64,
+    ) -> Result {
+        client.release_work(render, va)?;
+        vm_free_work[usize::from(render)] += 1;
+        Ok(())
     }
 
     /// Collect storage whose context destruction firmware has consumed. Retire

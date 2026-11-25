@@ -236,8 +236,10 @@ pub(super) struct Flight {
 pub(crate) struct JobNotifier {
     job: u64,
     owner: u64,
-    /// The owner's free_work root, set once the owner itself has retired.
-    owner_root: Option<u64>,
+    /// Owning VM address space for `owner`; its Work slot always returns here.
+    owner_client: Arc<Mutex<g16_vm::AddressSpace>>,
+    /// Set once the owner render itself has retired and only waits on members.
+    owner_retired: bool,
     /// Set once `flush()` exposes this notifier's renders to firmware; later
     /// renders of the same submission must not raise its Work count because
     /// firmware may already have drained it.

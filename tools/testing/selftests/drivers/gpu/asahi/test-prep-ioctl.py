@@ -98,7 +98,8 @@ assert 'map_pages_gfp' in function(vm, 'alloc_tvb_blocks')
 assert 'scratch_needs_prealloc' in submit
 assert submit.index('scratch_needs_prealloc') < submit.index('let alloc_pages')
 assert submit.index('provision_queue_recycled(') < submit.index('let alloc_pages')
-assert 'may_be_native' in submit
+assert 'r.mesh.is_some()' in submit
+assert 'may_be_native' not in submit and 'command_word' not in submit
 checks += 1
 
 # Retirement and the retire log never allocate: capacity is set at init.

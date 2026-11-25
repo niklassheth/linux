@@ -89,6 +89,10 @@ impl File {
                 compute_space.lock().roots().low
             );
         }
+        // Inherit the DRM file's latched native_mesh state so GET_PARAMS and
+        // VM_CREATE on the same file descriptor always agree across runtime
+        // debugfs toggles.
+        let native_mesh = inner.native_mesh;
         state.vms.push(
             Vm {
                 id,
@@ -107,10 +111,7 @@ impl File {
                 reservation,
                 render_support: None,
                 render_pool: None,
-                // The module parameter was validated at probe and debugfs
-                // writes are bounded, so the mode always parses.
-                native_mode: crate::g16_mesh::Mode::from_parameter(crate::g16_mesh::snapshot().1)
-                    .unwrap_or(crate::g16_mesh::Mode::Disabled),
+                native_mesh,
                 render_ready: false,
                 tvb_ready: false,
                 compute_ready: false,
@@ -202,7 +203,7 @@ impl File {
         device: &RegDevice,
         _reg: &RegData<'_>,
         data: &mut uapi::drm_asahi_get_params,
-        _file: &DrmFile,
+        file: &DrmFile,
     ) -> Result<u32> {
         let device: &Device = device;
         if data.param_group != 0 || data.pad != 0 {
@@ -215,6 +216,11 @@ impl File {
                     && crate::module_parameters::soft_faults.value() != 0
                 {
                     u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SOFT_FAULTS)
+                } else {
+                    0
+                }
+                | if file.inner().native_mesh {
+                    u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_NATIVE_MESH)
                 } else {
                     0
                 },

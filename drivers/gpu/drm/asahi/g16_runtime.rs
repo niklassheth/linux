@@ -13,7 +13,7 @@ use crate::util::comm_str;
 
 use kernel::io::Io;
 use super::Bootstrap;
-use crate::{g16_compute as compute, g16_fw, g16_mesh, g16_render as render, g16_stamp, g16_vm};
+use crate::{g16_compute as compute, g16_fw, g16_render as render, g16_stamp, g16_vm};
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::time::{Instant, Monotonic};
 use kernel::{
@@ -458,11 +458,9 @@ pub(crate) struct Support {
     slots: Arc<AtomicU64>,
     index: u32,
     submissions: AtomicU64,
-    /// Initialized in native pool mode (native_mesh was nonzero when this VM
+    /// Initialized in native pool mode (`native_mesh` was enabled when this VM
     /// was created). Fixed for the support lifetime.
     native: bool,
-    /// The VM's latched native mesh mode, which decodes all its renders.
-    mode: g16_mesh::Mode,
 }
 impl Support {
     pub(crate) fn address(&self) -> u64 {

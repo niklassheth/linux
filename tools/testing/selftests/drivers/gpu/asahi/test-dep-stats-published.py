@@ -24,7 +24,7 @@ assert runtime.count('if result.is_ok() {\n            tally.publish();\n       
 assert re.search(r'Err\(EBUSY\) if !runtime\.render_failed\(\) => \{\s*crate::g16_timeline::DEFERRED\.fetch_add\(1, Ordering::Relaxed\);', drm)
 assert 'crate::g16_timeline::DEFERRED_BY.get(bit.trailing_zeros() as usize)' in runtime
 assert re.search(r'deferred \{\}\\ndeferred_asids \{\}', timeline)
-# CPU holds are counted where they return EBUSY, not inferred.
-assert runtime.count('crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);\n') == 2
+# CPU holds are counted where they return EBUSY, not inferred (compute cross-queue hold).
+assert runtime.count('crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);\n') == 1
 assert 'deferred_cpu_hold {}' in timeline
 print('dep_stats published: ok')

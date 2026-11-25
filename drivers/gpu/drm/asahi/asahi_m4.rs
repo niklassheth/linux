@@ -72,6 +72,7 @@ impl platform::Driver for M4Gpu {
         if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value())
             || module_parameters::dependency_kind.value() > 1
             || module_parameters::cross_dependency_kind.value() > 1
+            || crate::g16_mesh::parse_parameter(module_parameters::native_mesh.value()).is_none()
             || (module_parameters::fast_die_limit_c.value() != 0
                 && module_parameters::extra0.value() == 0)
         {
@@ -192,7 +193,7 @@ kernel::module_platform_driver! {
         },
         native_mesh: u32 {
             default: 0,
-            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16/T32 one-parent profile, 2=unqualified multiple-parent profile, 3=research admission of wider mesh state (not qualified); no capability advertisement. Runtime: debugfs asahi_m4/native_mesh (a VM keeps the support mode of its first render)",
+            description: "Experimental native object/mesh renders via DRM_ASAHI_FEATURE_NATIVE_MESH / DRM_ASAHI_RENDER_NATIVE_MESH (bit 28): 0=disabled (default), 1 (or legacy alias 4)=enabled. Runtime: debugfs asahi_m4/native_mesh (latched per DRM file open so GET_PARAMS and VM_CREATE always agree)",
         },
         cross_dependency_kind: u32 {
             default: 0,

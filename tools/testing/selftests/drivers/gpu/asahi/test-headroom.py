@@ -43,11 +43,10 @@ assert 'CAPS.update_lane(value)' in timeline and 'CAPS.update_queue(value)' in t
 assert 'crate::g16_timeline::CAPS.load()' in publish
 
 # submit_render checks headroom with a consistent cap snapshot before
-# native-mesh command_word / decode and dep resolution, and passes the same cap
-# into reserve_flight.
+# owner.lock() and dep resolution, and passes the same cap into reserve_flight.
 sr = render[render.index('pub(crate) fn submit_render('):render.index('pub(super) fn submit_render_queue(')]
 assert sr.index('let cap = self.cap_state();') < sr.index('self.check_cap_headroom(&queue, true, cap)?')
-assert sr.index('self.check_cap_headroom(&queue, true, cap)?') < sr.index('command_word(')
+assert sr.index('self.check_cap_headroom(&queue, true, cap)?') < sr.index('owner.lock()')
 assert sr.index('self.check_cap_headroom(&queue, true, cap)?') < sr.index('resolve_render_dependencies(')
 assert 'FlightCharge::render(initbm, stage_deps[0], stage_deps[1])' in sr
 

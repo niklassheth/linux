@@ -262,7 +262,7 @@ impl File {
             // `acquire_*_support()` performs zero allocations under the lock.
             if (renders != 0 || share) && !vm.render_ready {
                 // Native mesh keeps its qualified full-size pool.
-                let buffers = if vm.native_mode.enabled() {
+                let buffers = if vm.native_mesh {
                     render::OPERAND_BUFFERS_MAX
                 } else {
                     crate::g16_timeline::RENDER_OPERAND_BUFFERS.load(Ordering::Relaxed)
@@ -274,7 +274,7 @@ impl File {
                     if runtime.render_failed() {
                         return Err(EIO);
                     }
-                    runtime.acquire_render_support(&pool, vm.native_mode)?
+                    runtime.acquire_render_support(&pool, vm.native_mesh)?
                 };
                 // Acquire scarce support and its Arc before editing this
                 // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
@@ -358,7 +358,6 @@ impl File {
         vm.pending.retain(keep_live);
         vm.pending_render.retain(keep_live);
         vm.pending_compute.retain(keep_live);
-        let pending_jobs = vm.pending.len();
         let pending_renders = vm.pending_render.len();
         let pending_computes = vm.pending_compute.len();
 
@@ -406,21 +405,13 @@ impl File {
         };
         let mut max_render_scratch = 0usize;
         if renders != 0 {
-            let producer_pending = data.in_sync_count != 0 || pending_jobs != 0;
             for p in &parameters {
                 if let Parameters::Render(r) = p {
                     if let Some((tilemap, tpc)) = r.scratch_sizes() {
-                        // When no producer is pending, the CPU already wrote
-                        // the encoder header so the native check is exact; when
-                        // a producer may still write it, reserve mesh headroom.
-                        let mesh_extra = if vm.native_mode.enabled()
-                            && (producer_pending
-                                || vm
-                                    .space
-                                    .lock()
-                                    .command_word(r.encoder)
-                                    .is_ok_and(crate::g16_mesh::may_be_native))
-                        {
+                        // `DRM_ASAHI_RENDER_NATIVE_MESH` already populated
+                        // `r.mesh` in `render_parameters()`, so scratch sizing
+                        // is exact without reading command-stream memory.
+                        let mesh_extra = if r.mesh.is_some() {
                             crate::g16_mesh::Profile::PAYLOAD_BYTES
                         } else {
                             0
@@ -743,11 +734,18 @@ impl Vm {
         use uapi::{
             drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT as DBIAS_IS_INT,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_FEW_PRIMITIVES as FEW_PRIMITIVES,
+            drm_asahi_render_flags_DRM_ASAHI_RENDER_NATIVE_MESH as NATIVE_MESH,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES as PROCESS_EMPTY_TILES,
             drm_asahi_render_flags_DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT as VDM_BARRIER_FRAGMENT,
         };
 
-        if c.flags & !(PROCESS_EMPTY_TILES | DBIAS_IS_INT | VDM_BARRIER_FRAGMENT | FEW_PRIMITIVES) != 0
+        if c.flags
+            & !(PROCESS_EMPTY_TILES
+                | DBIAS_IS_INT
+                | VDM_BARRIER_FRAGMENT
+                | FEW_PRIMITIVES
+                | NATIVE_MESH)
+            != 0
             || c.vertex_helper.binary != 0
             || c.vertex_helper.cfg != 0
             || c.vertex_helper.data != 0
@@ -758,10 +756,28 @@ impl Vm {
             return Err(unsupported(format_args!(
                 "render flags {:#x} (known {:#x}) or a vertex/fragment helper program",
                 c.flags,
-                PROCESS_EMPTY_TILES | DBIAS_IS_INT | VDM_BARRIER_FRAGMENT | FEW_PRIMITIVES
+                PROCESS_EMPTY_TILES
+                    | DBIAS_IS_INT
+                    | VDM_BARRIER_FRAGMENT
+                    | FEW_PRIMITIVES
+                    | NATIVE_MESH
             )));
         }
+        let mesh = crate::g16_mesh::render_profile(
+            self.native_mesh,
+            c.flags & NATIVE_MESH != 0,
+            c.flags & FEW_PRIMITIVES != 0,
+        )
+        .map_err(|reason| match reason {
+            crate::g16_mesh::RenderReject::VmDisabled => reject(format_args!(
+                "DRM_ASAHI_RENDER_NATIVE_MESH on a VM without native mesh enabled"
+            )),
+            crate::g16_mesh::RenderReject::FewPrimitivesConflict => reject(format_args!(
+                "DRM_ASAHI_RENDER_NATIVE_MESH cannot be combined with DRM_ASAHI_RENDER_FEW_PRIMITIVES"
+            )),
+        })?;
         let mut p = render::Parameters::default();
+        p.mesh = mesh;
         p.tgid = kernel::current!().group_leader().pid();
         p.comm = current_comm();
         p.vdm_barrier_fragment = c.flags & VDM_BARRIER_FRAGMENT != 0;

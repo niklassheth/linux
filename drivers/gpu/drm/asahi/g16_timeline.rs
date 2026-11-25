@@ -389,24 +389,25 @@ impl FlagKnob {
     };
 }
 
-/// debugfs `asahi_m4/native_mesh`: the runtime native mesh mode. Each write
-/// starts a new generation (see `g16_mesh::set_mode`).
+/// debugfs `asahi_m4/native_mesh`: runtime enable gate for opaque bit-28
+/// native object/mesh renders (`DRM_ASAHI_FEATURE_NATIVE_MESH` /
+/// `DRM_ASAHI_RENDER_NATIVE_MESH`). Accepts `0` (disabled) or `1`/`4`
+/// (enabled); latched per DRM file open so `GET_PARAMS` and `VM_CREATE` on a
+/// file descriptor always agree.
 pub(crate) struct NativeMeshKnob;
 
 impl kernel::debugfs::Writer for NativeMeshKnob {
     fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        writeln!(f, "{}", crate::g16_mesh::mode())
+        writeln!(f, "{}", u32::from(crate::g16_mesh::enabled()))
     }
 }
 
 impl kernel::debugfs::Reader for NativeMeshKnob {
     fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
         let value = knob_u32(reader)?;
-        if value > crate::g16_mesh::MAX_MODE {
-            return Err(EINVAL);
-        }
-        let generation = crate::g16_mesh::set_mode(value);
-        pr_info!("G16: native_mesh={} (generation {})\n", value, generation);
+        let enabled = crate::g16_mesh::parse_parameter(value).ok_or(EINVAL)?;
+        crate::g16_mesh::set_enabled(enabled);
+        pr_info!("G16: native_mesh={}\n", u32::from(enabled));
         Ok(())
     }
 }
@@ -451,7 +452,7 @@ impl kernel::debugfs::Writer for DepStats {
              tvb_refused_cap {}\ntvb_refused_va {}\ntvb_refused_memory {}\nsubmit_rejected {}\n\
              deferred {}\ndeferred_asids {}\ndeferred_channel {}\ndeferred_scenes {}\ndeferred_events {}\n\
              deferred_queue {}\ndeferred_lane_entries {}\ndeferred_work_storage {}\ndeferred_flights {}\n\
-             deferred_cpu_hold {}\nnative_tvb_refused {}",
+             deferred_cpu_hold {}\nnative_mesh_renders {}\nnative_tvb_refused {}",
             DEP_WORKS.load(Relaxed),
             DEP_ITEMS.load(Relaxed),
             DEP_SAME_LANE.load(Relaxed),
@@ -479,6 +480,7 @@ impl kernel::debugfs::Writer for DepStats {
             DEFERRED_BY[6].load(Relaxed),
             DEFERRED_BY[7].load(Relaxed),
             DEFERRED_CPU_HOLD.load(Relaxed),
+            NATIVE_MESH_RENDERS.load(Relaxed),
             NATIVE_TVB_REFUSED.load(Relaxed)
         )
     }
@@ -521,8 +523,11 @@ pub(crate) static DEFERRED: core::sync::atomic::AtomicU64 = core::sync::atomic::
 pub(crate) static DEFERRED_BY: [core::sync::atomic::AtomicU64; 8] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 8];
 /// Deferrals for a dependency held on the CPU, a host round trip each: a
-/// compute waiting on another queue's stamp, or a native render's producers.
+/// compute waiting on another queue's stamp.
 pub(crate) static DEFERRED_CPU_HOLD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Renders submitted with `DRM_ASAHI_RENDER_NATIVE_MESH` that were staged for
+/// firmware publication.
+pub(crate) static NATIVE_MESH_RENDERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Refused TVB growths on a pool with an in-flight native object/mesh render
 /// (also in `tvb_refused`). Because a TVB request belongs to the pool, this
 /// fires whenever any in-flight render on the refused pool is native.

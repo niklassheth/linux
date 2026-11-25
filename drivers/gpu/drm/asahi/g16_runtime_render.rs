@@ -113,62 +113,18 @@ impl Bootstrap {
         if self.render_failed {
             return Err(EIO);
         }
-        // Fast O(1) capacity check before VM locks, native-mesh page-table
-        // walks/decode, or dependency resolution (lock order: queues -> owner).
+        // Fast O(1) capacity check before VM locks or dependency resolution
+        // (lock order: queues -> owner).
         let mut queue = queues.lock();
         let cap = self.cap_state();
         self.check_cap_headroom(&queue, true, cap)?;
-        let mut mesh_params;
-        // The VM's latched mode, not the current one: a VM created native keeps
-        // decoding its streams after a runtime switch to 0.
-        let mesh_mode = support.mode;
-        // Peek at the first word without waiting for producers: an ordinary
-        // header publishes as at native_mesh=0, with no stall behind earlier
-        // work. Userspace writes a native header on the CPU before SUBMIT, and
-        // no GPU job rewrites a render's first word (Honeykrisp audit,
-        // 2026-10-24), so a stale read can only see a native header that is
-        // gone by now: that case still waits and decodes, which is
-        // authoritative. An unreadable first word also waits and then fails
-        // in the decode, as before.
-        let params = if mesh_mode.enabled()
-            && owner.lock().command_word(params.encoder).map_or(true, g16_mesh::may_be_native)
-        {
-            mesh_params = *params;
-            let params = &mut mesh_params;
-            // These are the raw producer dependencies, before same-lane wait
-            // elision. A firmware barrier alone cannot protect a CPU read.
-            let mut reader = self._firmware_space.as_ref().ok_or(EIO)?.reader();
-            for dep in dependencies.iter().flatten() {
-                if !g16_stamp::reached(reader.read_u32_relaxed(dep.address)?, dep.value) {
-                    crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
-                    return Err(EBUSY);
-                }
-            }
-            // Order subsequent CPU decode reads of client command memory after
-            // observing all producer completion stamps.
-            reader.acquire_barrier();
-            drop(reader);
-            let mut client = owner.lock();
-            params.mesh = g16_mesh::decode(params.encoder, mesh_mode, |va| client.command_word(va).ok())
-                .map_err(|error| match error {
-                    g16_mesh::DecodeError::Unmapped => EFAULT,
-                    g16_mesh::DecodeError::Unsupported => EOPNOTSUPP,
-                })?;
-            drop(client);
-            if params.mesh.is_some() && (params.samples != 1 || params.layers != 1) {
-                return Err(EOPNOTSUPP);
-            }
-            // A VM that first rendered with native_mesh=0 keeps its ordinary
-            // support header, which cannot run a native stream.
-            if params.mesh.is_some() && !support.native {
-                return Err(EOPNOTSUPP);
-            }
-            // The VM already owns and advertises all 24 operand buffers.
-            // This initialized pool serves both ordinary and native Work.
-            &mesh_params
-        } else {
-            params
-        };
+        // Defense in depth: SUBMIT already rejected DRM_ASAHI_RENDER_NATIVE_MESH
+        // on VMs without native mesh enabled, and support.native matches that
+        // VM latch.
+        if params.mesh.is_some() && !support.native {
+            pr_err!("G16: native mesh render reached backend with non-native support object\n");
+            return Err(EINVAL);
+        }
         let mut tally = DepTally::default();
         let timestamped = timestamps.iter().any(|&t| t != 0);
         let resolved =
@@ -220,6 +176,11 @@ impl Bootstrap {
         if result.is_ok() {
             tally.publish();
         }
+        crate::g16_mesh::note_render_published(
+            result.is_ok(),
+            params.mesh.is_some(),
+            &crate::g16_timeline::NATIVE_MESH_RENDERS,
+        );
         result
     }
 

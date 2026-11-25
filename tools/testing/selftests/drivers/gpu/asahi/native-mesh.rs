@@ -1,655 +1,138 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Included by test-native-mesh.py, together with the actual production methods.
-use g16_mesh::{DecodeError, Mode, Profile};
+use g16_mesh::{Profile, RenderReject};
 
-fn stream() -> Vec<u32> {
-    // T16 mesh state with the research carrier's scalar object dispatch.
-    vec![
-        0x40000d2c, 0x504, 0x10, 0, 0, 0x01000000, 0x22224, 0x01000000, 0x22220, 1, 0, 0x400810, 0,
-        5, 0x500, 0x4001000, 0x20000013, 0x70000600, 1, 1, 1, 1, 1, 1, 0xc0000000,
-    ]
-}
-fn decode(words: &[u32], base: u64) -> std::result::Result<Option<Profile>, DecodeError> {
-    g16_mesh::decode(base, Mode::MultipleParents, |va| {
-        words.get(((va - base) / 4) as usize).copied()
-    })
+#[test]
+fn parameter_parsing_accepts_zero_one_and_legacy_four_only() {
+    assert_eq!(g16_mesh::parse_parameter(0), Some(false));
+    assert_eq!(g16_mesh::parse_parameter(1), Some(true));
+    assert_eq!(g16_mesh::parse_parameter(4), Some(true));
+    for invalid in [2, 3, 5, 6, 16, 255, u32::MAX] {
+        assert_eq!(g16_mesh::parse_parameter(invalid), None, "value {invalid}");
+    }
 }
 
 #[test]
-fn mode_values_keep_disabled_and_single_parent_behavior_explicit() {
-    for (value, expected) in [
-        (0, Mode::Disabled),
-        (1, Mode::SingleParent),
-        (2, Mode::MultipleParents),
-        (3, Mode::Research),
-        (4, Mode::Qualified),
-    ] {
-        let mode = Mode::from_parameter(value).unwrap();
-        assert_eq!(mode, expected);
-        assert_eq!(mode.enabled(), value != 0);
-    }
-    for value in [5, 6, 255, u32::MAX] {
-        assert_eq!(Mode::from_parameter(value), None);
-    }
+fn a_runtime_enable_gate_starts_off_and_file_latch_prevents_aba_discovery_race() {
+    // Runs first under --test-threads=1: verifies the static AtomicBool starts false.
+    assert!(!g16_mesh::enabled(), "native_mesh gate must default to disabled");
+
+    // Client A opens DRM fd while gate is off; later runtime enable does not
+    // mutate Client A's GET_PARAMS or VM_CREATE latch.
+    let file_a = g16_mesh::enabled();
+    assert!(!file_a);
+    g16_mesh::set_enabled(true);
+    assert!(g16_mesh::enabled());
+    let vm_a = file_a;
     assert_eq!(
-        g16_mesh::decode(3, Mode::Disabled, |_| {
-            panic!("disabled native mode must not read command memory")
-        }),
-        Ok(None)
+        g16_mesh::render_profile(vm_a, true, false),
+        Err(RenderReject::VmDisabled)
     );
+    assert_eq!(g16_mesh::render_profile(vm_a, false, false), Ok(None));
+    assert_eq!(g16_mesh::render_profile(vm_a, false, true), Ok(None));
+
+    // Client B opens DRM fd while gate is on. Even if root toggles 1 -> 0 -> 1
+    // between open(), GET_PARAMS, and VM_CREATE (the ABA race), Client B's
+    // file latch keeps GET_PARAMS and VM_CREATE identical.
+    let file_b = g16_mesh::enabled();
+    assert!(file_b);
+    let get_params_before = file_b;
+    g16_mesh::set_enabled(false);
+    assert!(!g16_mesh::enabled());
+    let vm_b = file_b;
+    g16_mesh::set_enabled(true);
+    let get_params_after = file_b;
+    assert!(get_params_before && vm_b && get_params_after);
+    assert_eq!(
+        g16_mesh::render_profile(vm_b, true, false),
+        Ok(Some(Profile::default()))
+    );
+    assert_eq!(
+        g16_mesh::render_profile(vm_b, true, true),
+        Err(RenderReject::FewPrimitivesConflict)
+    );
+
+    // Restore default-off state for any subsequent tests.
+    g16_mesh::set_enabled(false);
+    assert!(!g16_mesh::enabled());
 }
 
 #[test]
-fn native_packets_are_relocatable_and_bounded() {
-    for base in [0x1004000000, 0x10d1233ffc] {
-        // includes a page boundary
-        let mut words = stream();
-        assert_eq!(decode(&words, base), Ok(Some(Profile { payload: 0 })));
-        words[6] = 0x12340;
-        words[8] = 0x80004;
-        words[15] = 0xc010000;
-        assert_eq!(decode(&words, base), Ok(Some(Profile { payload: 0 })));
-        for len in 0..words.len() {
-            assert!(decode(&words[..len], base).is_err(), "truncated at {len}");
-        }
-    }
-    assert_eq!(decode(&stream(), 3), Err(DecodeError::Unsupported));
-    let mut words = stream()[..14].to_vec();
-    words.extend(std::iter::repeat_n(0x20000013, 1100));
-    assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
-}
-
-#[test]
-fn object_dispatch_accepts_complete_scalar_or_physical_t16_t32_grids() {
-    for base in [0x1004000000, 0x10d1233ffc] {
-        for (mesh, width) in [(16, 1), (16, 16), (16, 32), (32, 1), (32, 16), (32, 32)] {
-            let mut words = stream();
-            words[11] = 0x400800 | mesh;
-            words[21] = width;
-            for groups in [
-                [1, 1, 1],
-                [2, 1, 1],
-                [32, 1, 1],
-                [1, 2, 1],
-                [1, 1, 32],
-                [2, 3, 4],
-                [32, 32, 32],
-                [65535, 1, 1],
-            ] {
-                words[18..21].copy_from_slice(&[groups[0] * width, groups[1], groups[2]]);
-                assert_eq!(decode(&words, base), Ok(Some(Profile { payload: 0 })));
-                let single = g16_mesh::decode(base, Mode::SingleParent, |va| {
-                    words.get(((va - base) / 4) as usize).copied()
-                });
-                assert_eq!(
-                    single,
-                    if groups == [1, 1, 1] {
-                        Ok(Some(Profile { payload: 0 }))
-                    } else {
-                        Err(DecodeError::Unsupported)
-                    }
-                );
-                for len in 0..words.len() {
-                    assert!(decode(&words[..len], base).is_err(), "truncated at {len}");
-                }
-                for index in 18..21 {
-                    let mut bad = words.clone();
-                    bad[index] = 0;
-                    assert_eq!(decode(&bad, base), Err(DecodeError::Unsupported));
-                }
-            }
-            words[18..21].copy_from_slice(&[width, 1, 1]);
-            // Partial workgroups and wider/nonlinear local shapes stay out.
-            if width > 1 {
-                for total in [1, width - 1, width + 1, 32 * width - 1, u32::MAX] {
-                    let mut bad = words.clone();
-                    bad[18] = total;
-                    assert_eq!(decode(&bad, base), Err(DecodeError::Unsupported));
-                }
-            }
-            for dimensions in [
-                [0, 1, 1],
-                [16, 0, 1],
-                [32, 1, 0],
-                [2, 1, 1],
-                [31, 1, 1],
-                [33, 1, 1],
-                [64, 1, 1],
-                [128, 1, 1],
-                [1, 16, 1],
-                [1, 1, 16],
-                [16, 2, 1],
-                [16, 1, 2],
-                [1, 32, 1],
-                [1, 1, 32],
-                [32, 2, 1],
-                [32, 1, 2],
-            ] {
-                let mut bad = words.clone();
-                bad[18..21].copy_from_slice(&dimensions);
-                bad[21..24].copy_from_slice(&dimensions);
-                assert_eq!(decode(&bad, base), Err(DecodeError::Unsupported));
-            }
-            let mut twice = words.clone();
-            twice.pop();
-            twice.extend_from_slice(&words[17..]);
-            assert_eq!(decode(&twice, base), Err(DecodeError::Unsupported));
-        }
-    }
-}
-
-#[test]
-fn mesh_physical_width_accepts_only_exact_t16_t32_state() {
-    for width in 0..=255 {
-        let mut words = stream();
-        words[11] = 0x400800 | width;
-        let result = decode(&words, 0x1004000000);
-        if width == 16 || width == 32 {
-            assert_eq!(result, Ok(Some(Profile { payload: 0 })));
-        } else {
-            assert_eq!(result, Err(DecodeError::Unsupported));
-        }
-    }
-    for state in [0x400810, 0x400820] {
-        for bit in 0..32 {
-            let mut words = stream();
-            words[11] = state ^ (1 << bit);
-            assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
-        }
-    }
-}
-
-#[test]
-fn child_grid_and_launch_backing_are_not_cpu_admission_inputs() {
-    // Direct API XYZ and indirect buffer XYZ both live behind the object
-    // launch's argument pointer. The GPU reads them after submission. Neither
-    // that pointer, the grid, nor the USC frame/allocation bytes are packet
-    // fields, and the parser must not chase them or snapshot a GPU-produced grid.
-    let base = 0x1004003ffc;
-    for mesh in [16, 32] {
-        let mut words = stream();
-        words[11] = 0x400800 | mesh;
-        words[18] = 16;
-        words[21] = 16;
-        let mut reads = Vec::new();
-        let result = g16_mesh::decode(base, Mode::MultipleParents, |va| {
-            reads.push(va);
-            // All launch, argument, indirect and count-buffer backing is
-            // intentionally absent from this CPU command-memory view.
-            let offset: usize = va.checked_sub(base)?.try_into().ok()?;
-            words.get(offset / 4).copied()
-        });
-        assert_eq!(result, Ok(Some(Profile { payload: 0 })));
+fn render_profile_enforces_vm_latch_and_few_primitives_mutual_exclusion() {
+    let cases = [
+        // (vm_native_mesh, native_mesh_flag, few_primitives_flag, expected)
+        (false, false, false, Ok(None)),
+        (false, false, true, Ok(None)),
+        (false, true, false, Err(RenderReject::VmDisabled)),
+        (false, true, true, Err(RenderReject::VmDisabled)),
+        (true, false, false, Ok(None)),
+        (true, false, true, Ok(None)),
+        (true, true, false, Ok(Some(Profile::default()))),
+        (true, true, true, Err(RenderReject::FewPrimitivesConflict)),
+    ];
+    for (vm_native, flag_native, flag_few, expected) in cases {
         assert_eq!(
-            reads,
-            (0..words.len())
-                .map(|i| base + 4 * i as u64)
-                .collect::<Vec<_>>()
+            g16_mesh::render_profile(vm_native, flag_native, flag_few),
+            expected,
+            "vm={vm_native} native={flag_native} few={flag_few}"
         );
     }
 }
 
 #[test]
-fn ordinary_data_is_not_searched_for_mesh_magic() {
-    let words = [0x4000002e, 0x40000d2c, 0x504, 0x10];
-    let mut reads = 0;
+fn native_mesh_render_counter_increments_once_on_publish_not_ebusy_retries() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let counter = AtomicU64::new(0);
+    // Ordinary renders never increment, whether deferred or published.
+    g16_mesh::note_render_published(false, false, &counter);
+    g16_mesh::note_render_published(true, false, &counter);
+    assert_eq!(counter.load(Relaxed), 0);
+    // Native mesh render deferred twice (EBUSY) before publishing increments once.
+    g16_mesh::note_render_published(false, true, &counter);
+    g16_mesh::note_render_published(false, true, &counter);
+    assert_eq!(counter.load(Relaxed), 0);
+    g16_mesh::note_render_published(true, true, &counter);
+    assert_eq!(counter.load(Relaxed), 1);
+    // Second published native mesh render increments to 2.
+    g16_mesh::note_render_published(true, true, &counter);
+    assert_eq!(counter.load(Relaxed), 2);
+}
+
+#[test]
+fn profile_constants_and_payload_register_bounds_are_exact() {
+    assert_eq!(Profile::default(), Profile { payload: 0 });
+    assert_eq!(g16_mesh::CLUSTER_PAYLOAD_BYTES, 0x40000);
+    assert_eq!(g16_mesh::NUM_CLUSTERS, 2);
+    assert_eq!(Profile::PAYLOAD_BYTES, 0x80000);
     assert_eq!(
-        g16_mesh::decode(0x1004000000, Mode::MultipleParents, |va| {
-            reads += 1;
-            Some(words[((va - 0x1004000000) / 4) as usize])
-        }),
-        Ok(None)
+        Profile::PAYLOAD_BYTES,
+        g16_mesh::NUM_CLUSTERS * g16_mesh::CLUSTER_PAYLOAD_BYTES
     );
-    assert_eq!(reads, 1);
-    assert_eq!(
-        decode(&[0x40000d2d], 0x1004000000),
-        Err(DecodeError::Unsupported)
-    );
-}
-
-#[test]
-fn vertex_attributes_accept_the_bounded_scalar_and_row_relationship() {
-    for components in 4..=128 {
-        let mut words = stream();
-        words[1] = components | ((components + 1) << 8);
-        words[13] = components + 1;
-        assert_eq!(
-            decode(&words, 0x1004003ffc),
-            Ok(Some(Profile { payload: 0 }))
-        );
-        // Cover all supported counts, including those between device fixtures.
-        for wrong_rows in [0, components, components + 2, u32::MAX] {
-            words[13] = wrong_rows;
-            assert_eq!(decode(&words, 0x1004003ffc), Err(DecodeError::Unsupported));
-        }
-        words[13] = components + 1;
-        for bit in 8..32 {
-            words[1] ^= 1 << bit;
-            assert_eq!(decode(&words, 0x1004003ffc), Err(DecodeError::Unsupported));
-            words[1] ^= 1 << bit;
-        }
-    }
-}
-
-#[test]
-fn attributes_do_not_admit_other_output_or_execution_classes() {
-    for components in (0..4).chain(129..=255) {
-        let mut words = stream();
-        words[1] = components | ((components + 1) << 8);
-        words[13] = components + 1;
-        assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
-    }
-    for components in [7, 12, 128] {
-        for (index, value) in [
-            (2, 0xd0), // primitive output mode
-            (3, 1),
-            (4, 1), // unqualified state/payload
-            (9, 0), // missing object stage
-            (10, 1),
-            (10, 1 << 30),  // more primitives, culling
-            (11, 0x400840), // physical T64 remains excluded
-            (12, 1),        // primitive output components
-            (18, 0),        // empty parent dispatch
-        ] {
-            let mut words = stream();
-            words[1] = components | ((components + 1) << 8);
-            words[13] = components + 1;
-            words[index] = value;
-            assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
-        }
-    }
-}
-
-#[test]
-fn reject_unqualified_resource_classes_and_packets() {
-    for (index, value) in [
-        (1, 0x605),
-        (2, 0xd0),
-        (9, 0),
-        (10, 1),
-        (11, 0x400840),
-        (12, 3),
-        (13, 9),
-        (17, 0x74000600),
-        (18, 0),
+    assert_eq!(Profile::TA_SIZE, 0x13300);
+    assert_eq!(Profile::GATE, 0xec_0040_0020);
+    for bad_payload in [
+        0u64,
+        1,
+        0x3fff,
+        0x10e4000004,
+        (1 << 40) - Profile::PAYLOAD_BYTES as u64 + 0x4000,
+        (1 << 40) - 0x4000,
+        1 << 40,
+        u64::MAX,
     ] {
-        let mut words = stream();
-        words[index] = value;
+        assert_eq!(Profile { payload: bad_payload }.payload_register(), None);
+    }
+    for ok_payload in [
+        0x4000u64,
+        0x10e6ad4000, // 16 KiB-aligned, non-256 KiB-aligned base
+        0x10e4040000, // 256 KiB-aligned base
+        (1 << 40) - Profile::PAYLOAD_BYTES as u64,
+    ] {
         assert_eq!(
-            decode(&words, 0x1004000000),
-            Err(DecodeError::Unsupported),
-            "word {index}"
+            Profile { payload: ok_payload }.payload_register(),
+            Some(0x0200_0000_0000_0000 | ok_payload)
         );
     }
-    for tail in [
-        vec![0xc0000000],
-        vec![0x80000000, 0x4000000],
-        vec![0x60000600],
-        vec![0x40000d2c],
-    ] {
-        let mut words = stream()[..14].to_vec();
-        words.extend(tail);
-        assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
-    }
-    let mut twice = stream();
-    twice.pop();
-    twice.extend_from_slice(&stream()[17..]);
-    assert_eq!(decode(&twice, 0x1004000000), Err(DecodeError::Unsupported));
-}
-
-// Research admission (native_mesh=3). `research` builds a stream forward from
-// the study's model; the decoder must accept exactly those streams.
-fn research(planes: u32, primitives: u32, quads: u32, components: u32, draw: u32) -> Vec<u32> {
-    let mut words = stream();
-    words[1] = planes | ((planes + 1) << 8);
-    words[2] = if components > 0 { 0xd0 } else { 0x10 };
-    words[10] = (primitives - 1) | ((primitives.div_ceil(16) - 1) << 16);
-    words[12] = primitives * components;
-    words[13] = 1 + quads * planes;
-    words[17] = draw;
-    words
-}
-fn decode_mode(words: &[u32], mode: Mode) -> std::result::Result<Option<Profile>, DecodeError> {
-    let base = 0x1004003ffc;
-    g16_mesh::decode(base, mode, |va| words.get(((va - base) / 4) as usize).copied())
-}
-fn model_output(planes: u32, primitives: u32, quads: u32, components: u32) -> u32 {
-    quads * 16 * (planes - u32::from(components > 0)) + 4 * primitives * components
-}
-const DRAWS: [u32; 3] = [0x70000000, 0x70000100, 0x70000600];
-const ACCEPT: std::result::Result<Option<Profile>, DecodeError> = Ok(Some(Profile { payload: 0 }));
-const REJECT: std::result::Result<Option<Profile>, DecodeError> = Err(DecodeError::Unsupported);
-
-#[test]
-fn research_mode_admits_the_capability_study_fixtures() {
-    // check_admission.py's nine fixtures: (V, P, n, C, draw).
-    for (v, p, n, c, draw) in [
-        (3, 1, 4, 0, 0x70000600),
-        (4, 2, 4, 0, 0x70000600),
-        (16, 16, 4, 0, 0x70000600),
-        (64, 128, 4, 0, 0x70000600),
-        (128, 256, 4, 0, 0x70000600),
-        (256, 512, 4, 0, 0x70000600),
-        (4, 4, 5, 0, 0x70000000),
-        (16, 16, 4, 0, 0x70000100),
-        (4, 2, 5, 4, 0x70000600),
-    ] {
-        let words = research(n, p, u32::div_ceil(v, 4), c, draw);
-        assert_eq!(decode_mode(&words, Mode::Research), ACCEPT, "V{v} P{p}");
-        let narrow = (v, p, c, draw) == (3, 1, 0, 0x70000600);
-        for mode in [Mode::SingleParent, Mode::MultipleParents] {
-            assert_eq!(decode_mode(&words, mode), if narrow { ACCEPT } else { REJECT });
-        }
-    }
-}
-
-#[test]
-fn research_mode_accepts_the_model_range_and_nothing_beyond_it() {
-    for planes in [3, 4, 5, 6, 32, 127, 128, 129] {
-        for primitives in (1..=513).filter(|p| *p <= 17 || p % 31 == 0 || *p >= 511) {
-            for quads in [0, 1, 2, 16, 63, 64, 65] {
-                for components in [0, 1, 4, 15, 64, 128, 129] {
-                    let words = research(planes, primitives, quads, components, 0x70000600);
-                    let valid = (4..=128).contains(&planes)
-                        && primitives <= 512
-                        && (1..=64).contains(&quads)
-                        && components <= 128
-                        && (components == 0 || planes >= 5)
-                        && model_output(planes, primitives, quads, components) <= 0x8000;
-                    let result = decode_mode(&words, Mode::Research);
-                    assert_eq!(result, if valid { ACCEPT } else { REJECT },
-                               "n{planes} P{primitives} q{quads} C{components}");
-                }
-            }
-        }
-    }
-    // The compiler's largest accepted case: V256 with seven float4 varyings.
-    assert_eq!(decode_mode(&research(32, 1, 64, 0, 0x70000600), Mode::Research), ACCEPT);
-    assert_eq!(decode_mode(&research(33, 1, 64, 0, 0x70000600), Mode::Research), REJECT);
-}
-
-#[test]
-fn research_mutations_are_rejected_or_reproduce_the_model() {
-    for (n, p, q, c) in [(4, 1, 1, 0), (4, 512, 64, 0), (5, 2, 1, 4), (17, 33, 9, 3), (128, 1, 1, 0)] {
-        for draw in DRAWS {
-            let words = research(n, p, q, c, draw);
-            assert_eq!(decode_mode(&words, Mode::Research), ACCEPT);
-            for index in [1, 2, 3, 4, 9, 10, 11, 12, 13, 17] {
-                for bit in 0..32 {
-                    let mut bad = words.clone();
-                    bad[index] ^= 1 << bit;
-                    if decode_mode(&bad, Mode::Research) != ACCEPT {
-                        continue;
-                    }
-                    // An accepted mutation must itself be a model stream.
-                    let n = bad[1] & 0xff;
-                    let p = (bad[10] & 0xffff) + 1;
-                    let c = bad[12] / p;
-                    let q = (bad[13] - 1) / n;
-                    let draw = bad[17];
-                    let mut expected = research(n, p, q, c, draw);
-                    expected[11] = bad[11];
-                    assert_eq!(bad, expected, "word {index} bit {bit}");
-                    assert!(DRAWS.contains(&draw));
-                    assert!(model_output(n, p, q, c) <= 0x8000);
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn research_mode_keeps_stream_structure_and_read_bounds() {
-    for draw in DRAWS {
-        let words = research(4, 512, 64, 0, draw);
-        let mut culled = words.clone();
-        culled[10] |= 1 << 30;
-        assert_eq!(decode_mode(&culled, Mode::Research), REJECT);
-        for header in [0x70000200, 0x70000700, 0x74000600, draw | 1] {
-            let mut bad = words.clone();
-            bad[17] = header;
-            assert_eq!(decode_mode(&bad, Mode::Research), REJECT);
-        }
-        let mut twice = words.clone();
-        twice.pop();
-        twice.extend_from_slice(&words[17..]);
-        assert_eq!(decode_mode(&twice, Mode::Research), REJECT);
-        for len in 0..words.len() {
-            assert!(decode_mode(&words[..len], Mode::Research).is_err());
-        }
-        // Multiple parents, as in mode 2.
-        let mut parents = words.clone();
-        parents[18] = 4;
-        assert_eq!(decode_mode(&parents, Mode::Research), ACCEPT);
-        assert_eq!(decode_mode(&parents, Mode::SingleParent), REJECT);
-        // Exactly one sequential read per packet word, as in modes 1 and 2.
-        let base = 0x1004003ffc;
-        let mut reads = Vec::new();
-        let result = g16_mesh::decode(base, Mode::Research, |va| {
-            reads.push(va);
-            words.get(((va - base) / 4) as usize).copied()
-        });
-        assert_eq!(result, ACCEPT);
-        assert_eq!(reads, (0..words.len()).map(|i| base + 4 * i as u64).collect::<Vec<_>>());
-    }
-    let mut words = stream()[..14].to_vec();
-    words.extend(std::iter::repeat_n(0x20000013, 1100));
-    assert_eq!(decode_mode(&words, Mode::Research), REJECT);
-}
-
-#[test]
-fn modes_one_and_two_are_unchanged_by_research_admission() {
-    // Every wider model stream stays rejected outside mode 3.
-    for draw in DRAWS {
-        for (n, p, q, c) in [(4, 2, 1, 0), (4, 1, 2, 0), (5, 1, 1, 1), (4, 512, 64, 0)] {
-            let words = research(n, p, q, c, draw);
-            assert_eq!(decode_mode(&words, Mode::Research), ACCEPT);
-            for mode in [Mode::SingleParent, Mode::MultipleParents] {
-                assert_eq!(decode_mode(&words, mode), REJECT);
-            }
-        }
-    }
-    for draw in [0x70000000, 0x70000100] {
-        for mode in [Mode::SingleParent, Mode::MultipleParents] {
-            assert_eq!(decode_mode(&research(4, 1, 1, 0, draw), mode), REJECT);
-        }
-    }
-}
-
-#[test]
-fn research_mode_admits_physical_w64_only_for_the_probe_shape() {
-    const W64: u32 = 0x400840;
-    for draw in DRAWS {
-        // The W64 study's shape: 4 planes, one primitive, one quad, no data.
-        let mut words = research(4, 1, 1, 0, draw);
-        words[11] = W64;
-        assert_eq!(decode_mode(&words, Mode::Research), ACCEPT);
-        for mode in [Mode::SingleParent, Mode::MultipleParents] {
-            assert_eq!(decode_mode(&words, mode), REJECT);
-        }
-        // Any other model shape stays T16/T32-only at W64.
-        for (n, p, q, c) in [(5, 1, 1, 0), (4, 2, 1, 0), (4, 1, 2, 0), (5, 1, 1, 1)] {
-            let mut wide = research(n, p, q, c, draw);
-            assert_eq!(decode_mode(&wide, Mode::Research), ACCEPT);
-            wide[11] = W64;
-            assert_eq!(decode_mode(&wide, Mode::Research), REJECT, "n{n} P{p} q{q} C{c}");
-        }
-        // Wider physical widths and other mesh state words stay rejected.
-        for state in [0x400880, 0x400900, 0x400841, 0x400040] {
-            let mut bad = words.clone();
-            bad[11] = state;
-            assert_eq!(decode_mode(&bad, Mode::Research), REJECT);
-        }
-    }
-}
-
-// The 31 qualified classes, (physical width, maximum V, maximum P), in
-// Mesa's hk_apple9_native_index_shapes.def order.
-const QUALIFIED_CLASSES: [(u32, u32, u32); 31] = [
-    (16, 3, 1), (16, 3, 2), (16, 3, 3), (16, 3, 4), (16, 3, 5), (16, 3, 6), (16, 3, 7), (16, 3, 8),
-    (16, 3, 11), (16, 3, 17), (16, 3, 20), (16, 3, 21), (16, 4, 1), (16, 4, 2), (16, 6, 2), (16, 8, 3),
-    (16, 8, 5), (16, 8, 8), (16, 16, 4), (16, 16, 8), (16, 16, 17), (16, 16, 21), (32, 3, 1), (32, 24, 3),
-    (32, 24, 17), (32, 24, 31), (32, 24, 32), (32, 32, 16), (32, 32, 32), (32, 32, 41), (32, 32, 42),
-];
-fn width_word(width: u32) -> u32 {
-    if width == 16 { 0x400810 } else { 0x400820 }
-}
-fn qualified_stream(width: u32, vertices: u32, primitives: u32) -> Vec<u32> {
-    let mut words = research(4, primitives, vertices.div_ceil(4), 0, 0x70000600);
-    words[11] = width_word(width);
-    words
-}
-
-#[test]
-fn qualified_mode_admits_the_31_classes() {
-    for (t, v, p) in QUALIFIED_CLASSES {
-        // The scalar fixture carrier and Honeykrisp's (16, 1, 1) single parent.
-        for local in [1, 16] {
-            let mut words = qualified_stream(t, v, p);
-            words[18..24].copy_from_slice(&[local, 1, 1, local, 1, 1]);
-            assert_eq!(decode_mode(&words, Mode::Qualified), ACCEPT, "T{t}V{v}P{p} local {local}");
-            // The research mode they were qualified under admits them too.
-            assert_eq!(decode_mode(&words, Mode::Research), ACCEPT, "T{t}V{v}P{p} local {local}");
-        }
-    }
-}
-
-#[test]
-fn qualified_mode_admits_nothing_else_from_the_research_model() {
-    let layout = |t: u32, q: u32, p: u32| {
-        QUALIFIED_CLASSES.iter().any(|&(ct, cv, cp)| ct == t && cv.div_ceil(4) == q && cp == p)
-    };
-    let mut admitted = 0;
-    for t in [16, 32] {
-        for planes in [4, 5, 8] {
-            for components in [0, 1] {
-                for quads in 1..=10 {
-                    for p in 1..=64 {
-                        for draw in DRAWS {
-                            let mut words = research(planes, p, quads, components, draw);
-                            words[11] = width_word(t);
-                            if components > 0 && planes < 5 {
-                                continue;
-                            }
-                            let expected = planes == 4 && components == 0 && draw == 0x70000600 && layout(t, quads, p);
-                            let result = decode_mode(&words, Mode::Qualified);
-                            assert_eq!(result, if expected { ACCEPT } else { REJECT },
-                                       "T{t} n{planes} C{components} q{quads} P{p} draw {draw:#x}");
-                            admitted += usize::from(expected);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // 29 layouts: V3 and V4 share one at P1 and P2.
-    assert_eq!(admitted, 29);
-    // Excluded on purpose: T16V16P16, W64 and multi-parent dispatch.
-    assert_eq!(decode_mode(&qualified_stream(16, 16, 16), Mode::Qualified), REJECT);
-    let mut w64 = research(4, 1, 1, 0, 0x70000600);
-    w64[11] = 0x400840;
-    assert_eq!(decode_mode(&w64, Mode::Research), ACCEPT);
-    assert_eq!(decode_mode(&w64, Mode::Qualified), REJECT);
-    // Multiple parents (scalar or T16), and the T32 local size, stay rejected.
-    for dispatch in [[2, 1, 1, 1, 1, 1], [32, 1, 1, 16, 1, 1], [16, 2, 1, 16, 1, 1], [32, 1, 1, 32, 1, 1], [64, 1, 1, 32, 1, 1]] {
-        let mut words = qualified_stream(16, 3, 1);
-        words[18..24].copy_from_slice(&dispatch);
-        assert_eq!(decode_mode(&words, Mode::Qualified), REJECT, "dispatch {dispatch:?}");
-    }
-}
-
-#[test]
-fn qualified_mutations_are_rejected() {
-    for (t, v, p) in QUALIFIED_CLASSES {
-        let words = qualified_stream(t, v, p);
-        for index in 1..words.len() {
-            for flip in [1u32, 0x10, 0x100, 0x10000, 0x80000000] {
-                let mut bad = words.clone();
-                bad[index] ^= flip;
-                let result = decode_mode(&bad, Mode::Qualified);
-                if result != ACCEPT {
-                    continue;
-                }
-                // Only a flip that lands on another qualified layout may pass,
-                // or one outside the state, draw and dispatch: launch handles
-                // (words 5..8, consumed as submitted) and the PPP update and
-                // coherency barrier (words 14..16), which every mode accepts
-                // alike, as the research mode confirms.
-                let other = QUALIFIED_CLASSES.iter().any(|&(ct, cv, cp)| qualified_stream(ct, cv, cp) == bad);
-                let structural = (5..=8).contains(&index)
-                    || ((14..=16).contains(&index) && decode_mode(&bad, Mode::Research) == ACCEPT);
-                assert!(other || structural, "T{t}V{v}P{p} word {index} ^ {flip:#x}");
-            }
-        }
-    }
-}
-
-#[test]
-fn the_unwaited_peek_agrees_with_decode_on_every_first_word() {
-    // decode returns Ok(None) after reading only the first word exactly when
-    // may_be_native is false; otherwise it reads on (and decides only then).
-    let mut first_words: Vec<u32> = vec![0x40000d2c, 0x40000d2d, 0x40000c2c, 0x4000082c, 0x40000000, 0x5fffffff,
-                                        0, 1, 0x20000013, 0x70000600, 0xc0000000, 0x60000000, u32::MAX];
-    let mut x = 0x9e3779b9u32;
-    for _ in 0..20000 {
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        first_words.push(x);
-        first_words.push((x & !0xe000_0000) | 0x4000_0000);
-    }
-    for first in first_words {
-        for mode in [Mode::SingleParent, Mode::MultipleParents, Mode::Research, Mode::Qualified] {
-            let mut reads = 0;
-            let result = g16_mesh::decode(0x1000, mode, |va| {
-                reads += 1;
-                (va == 0x1000).then_some(first)
-            });
-            if g16_mesh::may_be_native(first) {
-                assert!(result.is_err() || reads > 1, "{first:#x} {mode:?}");
-            } else {
-                assert_eq!((result, reads), (Ok(None), 1), "{first:#x} {mode:?}");
-            }
-        }
-    }
-    assert!(g16_mesh::may_be_native(stream()[0]));
-}
-
-#[test]
-fn every_mode_write_starts_a_new_generation() {
-    // The only test touching the runtime mode, so it owns the static.
-    g16_mesh::init_mode(4);
-    assert_eq!(g16_mesh::snapshot(), (0, 4));
-    assert_eq!(g16_mesh::set_mode(0), 1);
-    assert_eq!(g16_mesh::snapshot(), (1, 0));
-    // Rewriting the current value still bumps the generation.
-    assert_eq!(g16_mesh::set_mode(0), 2);
-    assert_eq!(g16_mesh::set_mode(4), 3);
-    assert_eq!(g16_mesh::snapshot(), (3, 4));
-    assert_eq!(g16_mesh::mode(), 4);
-    // Out-of-range values are clamped (debugfs rejects them before this).
-    g16_mesh::set_mode(200);
-    assert_eq!(g16_mesh::snapshot(), (4, g16_mesh::MAX_MODE));
-    g16_mesh::init_mode(0);
-}
-
-#[test]
-fn the_advertisement_line_is_exact_per_mode() {
-    let line = |generation, mode| {
-        let mut out = String::new();
-        g16_mesh::advertise(generation, mode, &mut out).unwrap();
-        out
-    };
-    let hash = g16_mesh::QUALIFIED_CLASSES_SHA256;
-    assert_eq!(line(7, 4), format!("asahi-native-mesh v1 generation=7 profile=qualified classes={hash}\n"));
-    assert_eq!(line(0, 3), "asahi-native-mesh v1 generation=0 profile=research classes=-\n");
-    for mode in [0, 1, 2] {
-        assert_eq!(line(3, mode), "asahi-native-mesh v1 generation=3 profile=none classes=-\n");
-    }
-    // The longest line fits the sysfs buffer bound.
-    assert!(line(u64::MAX >> 8, 4).len() <= g16_mesh::ADVERTISEMENT_MAX);
-    assert_eq!(hash.len(), 64);
-    assert!(hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 }
 
 fn read32(buf: &[u8], off: usize) -> u32 {
@@ -696,6 +179,7 @@ fn initialized_pool_covers_all_advertised_native_pages() {
         }
     }
 }
+
 macro_rules! parameters {
     ($module:ident, $scene:expr, $layers:expr, $samples:expr) => {{
         let mut p = $module::Parameters::default();
@@ -775,15 +259,116 @@ fn mesh_ta_has_ordered_extension_and_preserves_scene_selection() {
         assert_eq!(read32(&work, 0x86c), 1);
         assert_eq!(read64(&work, 0x908), 0x13300);
     }
-    for payload in [0, 1, 0x10e4000001, 1 << 40] {
-        assert_eq!(Profile { payload }.payload_register(), None);
+}
+
+#[test]
+fn mesh_ta_and_fragment_preserve_multilayer_and_msaa_encoding() {
+    let a = g16_render::Addresses::bootstrap();
+    for layers in [1u64, 2, 4, 16, 2048] {
+        for samples in [1u64, 2, 4] {
+            let mut p = parameters!(g16_render, 7, layers, samples);
+            if samples == 4 {
+                p.utile_width = 32;
+                p.utile_height = 16;
+            } else {
+                p.utile_width = 32;
+                p.utile_height = 32;
+            }
+            p.sample_size = 16;
+            p.tib_blocks = (p.sample_size * p.utile_width * p.utile_height * samples).div_ceil(2048);
+            p.utile_config = (p.utile_width / 16) << 12
+                | (p.utile_height / 16) << 14
+                | match samples {
+                    1 => 0,
+                    2 => 1,
+                    4 => 2,
+                    _ => unreachable!(),
+                };
+            p.tile_config = 0x280 | u64::from(layers > 1);
+            p.multisample_control = match samples {
+                1 => 0x88,
+                2 => 0x4c_c4,
+                4 => 0x26_e2_6e_a6,
+                _ => unreachable!(),
+            };
+            p.layermeta = p.heapmeta;
+            if layers > 1 {
+                p.heapmeta += 0x100;
+            }
+
+            let ordinary_ta_regs = p.tiling_registers().unwrap();
+            let ordinary_frag_regs = p.fragment_registers().unwrap();
+            let mut ordinary_ta = [0; 0x940];
+            let mut ordinary_frag = [0; 0xcc0];
+            p.tiling_work(&a, &mut ordinary_ta).unwrap();
+            p.fragment_work(&a, &mut ordinary_frag).unwrap();
+
+            let payload = 0x10e4010000;
+            p.mesh = Some(Profile { payload });
+            let mesh_ta_regs = p.tiling_registers().unwrap();
+            let mesh_frag_regs = p.fragment_registers().unwrap();
+            let mut mesh_ta = [0; 0x940];
+            let mut mesh_frag = [0; 0xcc0];
+            p.tiling_work(&a, &mut mesh_ta).unwrap();
+            p.fragment_work(&a, &mut mesh_frag).unwrap();
+
+            // 3D stage is identical between ordinary and native mesh renders.
+            assert_eq!(mesh_frag_regs, ordinary_frag_regs);
+            assert_eq!(mesh_frag, ordinary_frag);
+            assert_eq!(read32(&mesh_frag, 0x50), samples as u32);
+            assert_eq!(read32(&mesh_frag, 0xbac), u32::from(samples > 1));
+            assert_eq!(read64(&mesh_frag, 0xbe8), layers - 1);
+            assert_eq!(
+                read64(&mesh_frag, 0xc50),
+                0x113a0 | if layers > 1 { 1 << 62 } else { 0 }
+            );
+
+            // TA register list preserves every layer and MSAA register.
+            assert_eq!(mesh_ta_regs[55].0, 0x10799);
+            assert_eq!(mesh_ta_regs[56], (0x1ca48, 0x0200000000000000 | payload));
+            assert!(!mesh_ta_regs.iter().any(|r| r.0 == 0x10209));
+            for &(reg, value) in &ordinary_ta_regs {
+                if reg != 0x10209 && reg != 0xa5a1 {
+                    assert!(
+                        mesh_ta_regs.contains(&(reg, value)),
+                        "missing TA reg {reg:#x}={value:#x} for layers={layers} samples={samples}"
+                    );
+                }
+            }
+            let target_layers = if layers > 1 { 0xe000 | (layers - 1) } else { 0x8000 };
+            assert_eq!(mesh_ta_regs.iter().find(|r| r.0 == 0x10149).unwrap().1, p.utile_config);
+            assert_eq!(mesh_ta_regs.iter().find(|r| r.0 == 0x10139).unwrap().1, p.multisample_control);
+            assert_eq!(mesh_ta_regs.iter().find(|r| r.0 == 0x10169).unwrap().1, target_layers);
+            assert_eq!(mesh_ta_regs.iter().find(|r| r.0 == 0x1c9e8).unwrap().1, target_layers & 0x4fff);
+            assert_eq!(mesh_ta_regs.iter().find(|r| r.0 == 0x0a5a1).unwrap().1, Profile::GATE);
+
+            // TA Work preserves layer TPC scaling, layer count, and bit 62 alongside mesh TA_SIZE.
+            assert_eq!(&mesh_ta[0x748..0x74c], &[0x42, 0, 0x18, 3]);
+            assert_eq!(read64(&mesh_ta, 0x768), read64(&ordinary_ta, 0x768));
+            assert_eq!(read32(&mesh_ta, 0x86c), 1);
+            assert_eq!(read64(&mesh_ta, 0x8a0), layers - 1);
+            assert_eq!(
+                read64(&mesh_ta, 0x908),
+                Profile::TA_SIZE | if layers > 1 { 1 << 62 } else { 0 }
+            );
+        }
     }
 }
 
-// Small I/O double for the production scratch allocation method.
-type Result<T = ()> = std::result::Result<T, i32>;
-const EINVAL: i32 = 22;
-const ENOMEM: i32 = 12;
+// Small I/O double for the production scratch allocation, reuse, and release methods.
+type Error = i32;
+type Result<T = ()> = std::result::Result<T, Error>;
+const EINVAL: Error = 22;
+const ENOMEM: Error = 12;
+const EIO: Error = 5;
+const EBUSY: Error = 16;
+const EEXIST: Error = 17;
+const GFP_NOWAIT: u32 = 1;
+const __GFP_NOWARN: u32 = 2;
+const __GFP_ZERO: u32 = 4;
+mod prot {
+    pub const PROT_GPU_SHARED_RW: () = ();
+}
 mod g16_timeline {
     pub struct Timer;
     pub static P_PREPARE_RENDER: () = ();
@@ -794,64 +379,422 @@ mod g16_timeline {
     }
 }
 const UAT_PGSZ: usize = 0x4000;
+#[derive(Debug, PartialEq)]
 struct Scratch {
     range: std::ops::Range<u64>,
+    render: bool,
 }
-struct ScratchVm {
+struct KVec<T>(Vec<T>);
+impl<T> KVec<T> {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    fn reserve(&mut self, additional: usize, _: u32) -> Result {
+        self.0.reserve(additional);
+        Ok(())
+    }
+    fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn remove(&mut self, index: usize) -> Result<T> {
+        Ok(self.0.remove(index))
+    }
+    fn push_within_capacity(&mut self, value: T) -> std::result::Result<(), T> {
+        if self.0.len() == self.0.capacity() {
+            return Err(value);
+        }
+        self.0.push(value);
+        Ok(())
+    }
+}
+impl<T> IntoIterator for KVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+impl<T> std::ops::Index<usize> for KVec<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+impl<T> std::ops::IndexMut<usize> for KVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.0[index]
+    }
+}
+#[derive(Clone)]
+struct TestArena {
     next: u64,
-    leases: Vec<(usize, usize)>,
-    writes: Vec<(u64, Vec<u8>)>,
+    end: u64,
 }
-impl ScratchVm {
-    fn lease_scratch(&mut self, _: bool, size: usize, metadata: usize) -> Result<Scratch> {
-        self.leases.push((size, metadata));
-        let start = self.next;
-        self.next += size as u64;
-        Ok(Scratch {
-            range: start..self.next,
+impl TestArena {
+    fn new(range: std::ops::Range<u64>) -> Self {
+        Self {
+            next: range.start,
+            end: range.end,
+        }
+    }
+    fn alloc(&mut self, size: u64, align: u64) -> Option<std::ops::Range<u64>> {
+        let start = (self.next + align - 1) & !(align - 1);
+        let end = start.checked_add(size)?;
+        if end > self.end {
+            return None;
+        }
+        self.next = end;
+        Some(start..end)
+    }
+}
+struct GpuPage {
+    bytes: std::cell::RefCell<Box<[u8; UAT_PGSZ]>>,
+    clears: std::cell::Cell<usize>,
+    phys_addr: u64,
+}
+impl GpuPage {
+    fn alloc(gfp: u32) -> Result<Self> {
+        assert_ne!(gfp & __GFP_ZERO, 0, "scratch backing must be __GFP_ZERO");
+        static NEXT_PHYS: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0x8_0000_0000);
+        let phys_addr = NEXT_PHYS.fetch_add(UAT_PGSZ as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self {
+            bytes: std::cell::RefCell::new(Box::new([0u8; UAT_PGSZ])),
+            clears: std::cell::Cell::new(0),
+            phys_addr,
         })
     }
+    fn phys(&self) -> u64 {
+        self.phys_addr
+    }
+    fn with_page_mapped(&self, f: impl FnOnce(*mut u8)) {
+        self.clears.set(self.clears.get() + 1);
+        f(self.bytes.borrow_mut().as_mut_ptr());
+    }
+}
+struct RBTreeNode(u64, GpuPage);
+impl RBTreeNode {
+    fn new(va: u64, page: GpuPage, _: u32) -> Result<Self> {
+        Ok(Self(va, page))
+    }
+}
+struct TestPages(std::collections::BTreeMap<u64, GpuPage>);
+impl TestPages {
+    fn new() -> Self {
+        Self(std::collections::BTreeMap::new())
+    }
+    fn get(&self, va: &u64) -> Option<&GpuPage> {
+        self.0.get(va)
+    }
+    fn insert(&mut self, node: RBTreeNode) {
+        assert!(self.0.insert(node.0, node.1).is_none());
+    }
+}
+struct TestLowPt {
+    mapped: std::collections::BTreeMap<u64, u64>,
+    allocs: Vec<std::ops::Range<u64>>,
+}
+impl TestLowPt {
+    fn new() -> Self {
+        Self {
+            mapped: std::collections::BTreeMap::new(),
+            allocs: Vec::new(),
+        }
+    }
+    fn translate(&self, va: u64) -> Result<Option<u64>> {
+        Ok(self.mapped.get(&va).copied())
+    }
+    fn prepare_map_gfp(&mut self, range: std::ops::Range<u64>, _: u32) -> Result {
+        self.allocs.push(range);
+        Ok(())
+    }
+    fn map_pages_gfp(
+        &mut self,
+        range: std::ops::Range<u64>,
+        phys: u64,
+        _: (),
+        _: bool,
+        _: u32,
+    ) -> Result {
+        assert_eq!(range.end - range.start, UAT_PGSZ as u64);
+        assert!(self.mapped.insert(range.start, phys).is_none());
+        Ok(())
+    }
+}
+struct ScratchVm {
+    low: TestLowPt,
+    pages: TestPages,
+    owned_bytes: usize,
+    compute_arena: TestArena,
+    render_arena: TestArena,
+    scratch_free: [KVec<std::ops::Range<u64>>; 2],
+    scratch_users: [usize; 2],
+    scratch_max_block: [usize; 2],
+    writes: Vec<(u64, Vec<u8>)>,
+    fail_write: bool,
+}
+impl ScratchVm {
+    fn new(render_start: u64) -> Self {
+        Self {
+            low: TestLowPt::new(),
+            pages: TestPages::new(),
+            owned_bytes: 0,
+            compute_arena: TestArena::new(0x10a0000000..0x10c0000000),
+            render_arena: TestArena::new(render_start..0x1100000000),
+            scratch_free: [KVec::new(), KVec::new()],
+            scratch_users: [0; 2],
+            scratch_max_block: [0; 2],
+            writes: Vec::new(),
+            fail_write: false,
+        }
+    }
+    fn fill_range(&self, range: std::ops::Range<u64>, byte: u8) {
+        for va in range.step_by(UAT_PGSZ) {
+            self.pages.get(&va).unwrap().bytes.borrow_mut().fill(byte);
+        }
+    }
+    fn page_byte(&self, va: u64) -> u8 {
+        self.pages.get(&va).unwrap().bytes.borrow()[0]
+    }
+    fn clear_count(&self, va: u64) -> usize {
+        self.pages.get(&va).unwrap().clears.get()
+    }
     fn write_low(&mut self, va: u64, data: &[u8]) -> Result {
+        if self.fail_write {
+            return Err(EIO);
+        }
         self.writes.push((va, data.to_vec()));
         Ok(())
     }
-    fn release_scratch(&mut self, _: Scratch) -> Result {
-        Ok(())
-    }
     fn has_pending_tables(&self) -> bool {
-        true
+        false
     }
     fn sync(&self) {}
     /* PREPARE_RENDER */
+    /* LEASE_SCRATCH */
+    /* RELEASE_SCRATCH */
 }
 
 #[test]
-fn payload_has_a_distinct_cleared_page_in_each_render_lease() {
-    let mut vm = ScratchVm {
-        next: 0x10e4000000,
-        leases: Vec::new(),
-        writes: Vec::new(),
-    };
+fn payload_has_a_distinct_zeroed_aperture_in_each_render_lease() {
+    assert_eq!(Profile::PAYLOAD_BYTES, 0x80000);
+    let mut vm = ScratchVm::new(0x10e4000000);
     let mut ordinary = parameters!(g16_render, 0, 1, 1);
     let ordinary_lease = vm.prepare_render(&mut ordinary).unwrap();
     assert_eq!(vm.writes.len(), 1);
     let mut previous = ordinary_lease.range;
     for _ in 0..8 {
         let mut mesh = parameters!(g16_render, 0, 1, 1);
-        mesh.mesh = Some(Profile { payload: 0 });
+        mesh.mesh = Some(Profile::default());
         vm.writes.clear();
         let lease = vm.prepare_render(&mut mesh).unwrap();
         let address = mesh.mesh.unwrap().payload;
+        assert_eq!(address & 0x3fff, 0);
         assert_eq!(lease.range.end - address, Profile::PAYLOAD_BYTES as u64);
+        assert_eq!(lease.range.end - address, 0x80000);
+        assert_eq!(
+            mesh.mesh.unwrap().payload_register(),
+            Some(0x0200_0000_0000_0000 | address)
+        );
         assert!(address >= mesh.aux_fb + 0x4000);
         assert!(lease.range.start >= previous.end);
-        let clears: Vec<_> = vm.writes.iter().filter(|(va, _)| *va >= address).collect();
-        assert_eq!(
-            clears.iter().map(|(_, data)| data.len()).sum::<usize>(),
-            Profile::PAYLOAD_BYTES
-        );
-        assert!(clears.iter().all(|(_, data)| data.iter().all(|&b| b == 0)));
+        // Fresh allocation zero-initializes the full [start..end) lease via
+        // __GFP_ZERO in alloc_low, covering Cluster 0 [0..256 KiB) and Cluster 1
+        // [256 KiB..512 KiB) without any reuse write_bytes pass.
+        for va in (address..address + Profile::PAYLOAD_BYTES as u64).step_by(UAT_PGSZ) {
+            assert_eq!(vm.page_byte(va), 0);
+            assert_eq!(vm.clear_count(va), 0);
+        }
+        assert_eq!(vm.writes.len(), 1);
+        assert_eq!(vm.writes[0].0, mesh.aux_fb + 0x600);
         previous = lease.range;
     }
-    assert_eq!(vm.leases[1].0 - vm.leases[0].0, Profile::PAYLOAD_BYTES);
+    assert_eq!(
+        (vm.low.allocs[1].end - vm.low.allocs[1].start)
+            - (vm.low.allocs[0].end - vm.low.allocs[0].start),
+        Profile::PAYLOAD_BYTES as u64
+    );
+}
+
+#[test]
+fn prepare_render_places_layermeta_heapmeta_and_payload_for_multilayer_and_msaa() {
+    let mut vm = ScratchVm::new(0x10e4000000);
+    let a = g16_render::Addresses::bootstrap();
+    let mut previous_end = 0x10e4000000;
+    for layers in [1u64, 2, 4, 16] {
+        for samples in [1u64, 2, 4] {
+            let mut mesh = parameters!(g16_render, 3, layers, samples);
+            if samples == 4 {
+                mesh.utile_width = 32;
+                mesh.utile_height = 16;
+            } else {
+                mesh.utile_width = 32;
+                mesh.utile_height = 32;
+            }
+            mesh.mesh = Some(Profile::default());
+            vm.writes.clear();
+            let (tilemap, tpc) = mesh.scratch_sizes().unwrap();
+            let lease = vm.prepare_render(&mut mesh).unwrap();
+            let meta = lease.range.start + (tilemap + tpc) as u64;
+            let payload = mesh.mesh.unwrap().payload;
+            assert!(lease.range.start >= previous_end);
+            assert_eq!(mesh.tilemap, lease.range.start);
+            assert_eq!(mesh.tpc, lease.range.start + tilemap as u64);
+            assert_eq!(mesh.layermeta, meta);
+            assert_eq!(mesh.heapmeta, meta + if layers > 1 { 0x100 } else { 0 });
+            assert_eq!(mesh.aux_fb, meta + 0x10000);
+            assert_eq!(payload, meta + 0x14000);
+            assert_eq!(payload & 0x3fff, 0);
+            assert_eq!(lease.range.end - payload, Profile::PAYLOAD_BYTES as u64);
+            for va in (meta..lease.range.end).step_by(UAT_PGSZ) {
+                assert_eq!(vm.page_byte(va), 0);
+            }
+            assert_eq!(vm.writes.len(), 1);
+            assert_eq!(vm.writes[0].0, mesh.aux_fb + 0x600);
+            let mut ta = [0; 0x940];
+            let mut frag = [0; 0xcc0];
+            mesh.tiling_work(&a, &mut ta).unwrap();
+            mesh.fragment_work(&a, &mut frag).unwrap();
+            assert_eq!(read32(&ta, 0x86c), 1);
+            assert_eq!(read64(&ta, 0x8a0), layers - 1);
+            assert_eq!(
+                read64(&ta, 0x908),
+                Profile::TA_SIZE | if layers > 1 { 1 << 62 } else { 0 }
+            );
+            assert_eq!(read32(&frag, 0x50), samples as u32);
+            assert_eq!(read32(&frag, 0xbac), u32::from(samples > 1));
+            previous_end = lease.range.end;
+        }
+    }
+}
+
+#[test]
+fn lease_scratch_partial_clear_skips_mesh_payload_on_reuse_and_clears_reused_metadata() {
+    let mut vm = ScratchVm::new(0x10e4000000);
+    // 1. Fresh native render: allocates __GFP_ZERO pages for the entire range.
+    let mut mesh1 = parameters!(g16_render, 0, 1, 1);
+    mesh1.mesh = Some(Profile::default());
+    let (tilemap, tpc) = mesh1.scratch_sizes().unwrap();
+    let lease1 = vm.prepare_render(&mut mesh1).unwrap();
+    let base = lease1.range.start;
+    let meta = base + (tilemap + tpc) as u64;
+    let payload = mesh1.mesh.unwrap().payload;
+    assert_eq!(payload, meta + 5 * UAT_PGSZ as u64);
+    assert_eq!(lease1.range.end, payload + Profile::PAYLOAD_BYTES as u64);
+    // Simulate GPU writing to every page in the lease, then retire & release.
+    vm.fill_range(lease1.range.clone(), 0x5a);
+    vm.release_scratch(lease1).unwrap();
+
+    // 2. Same-VM native reuse: ONLY the 5 metadata pages [meta..payload) are
+    // re-zeroed; tilemap/TPC and all 32 pages (512 KiB) of 0x1ca48 payload are
+    // left untouched without CPU kmap+memset.
+    let allocs_before = vm.low.allocs.len();
+    let mut mesh2 = parameters!(g16_render, 0, 1, 1);
+    mesh2.mesh = Some(Profile::default());
+    let lease2 = vm.prepare_render(&mut mesh2).unwrap();
+    assert_eq!(vm.low.allocs.len(), allocs_before);
+    assert_eq!(lease2.range.start, base);
+    for va in (base..meta).step_by(UAT_PGSZ) {
+        assert_eq!(vm.page_byte(va), 0x5a, "tilemap/tpc page {va:#x} must not be cleared");
+        assert_eq!(vm.clear_count(va), 0);
+    }
+    for va in (meta..payload).step_by(UAT_PGSZ) {
+        assert_eq!(vm.page_byte(va), 0, "metadata page {va:#x} must be cleared");
+        assert_eq!(vm.clear_count(va), 1);
+    }
+    for va in (payload..lease2.range.end).step_by(UAT_PGSZ) {
+        assert_eq!(vm.page_byte(va), 0x5a, "payload page {va:#x} must not be re-cleared");
+        assert_eq!(vm.clear_count(va), 0);
+    }
+
+    // 3. Release native lease and split it into multiple ordinary renders so an
+    // ordinary render's metadata pages land directly on former dirty 0x1ca48
+    // payload pages: those metadata pages MUST still be freshly zeroed!
+    vm.fill_range(lease2.range.clone(), 0xa5);
+    vm.release_scratch(lease2).unwrap();
+    let mut ordinary_leases = Vec::new();
+    let mut metadata_on_former_payload = false;
+    while {
+        let mut ord = parameters!(g16_render, 0, 1, 1);
+        let (o_tm, o_tpc) = ord.scratch_sizes().unwrap();
+        let ord_size = o_tm + o_tpc + 5 * UAT_PGSZ;
+        // Stop before allocating fresh VA outside the released native lease.
+        let free_avail = vm.scratch_free[1]
+            .iter()
+            .any(|r| r.end - r.start >= ord_size as u64);
+        if free_avail {
+            let lease = vm.prepare_render(&mut ord).unwrap();
+            let o_meta = lease.range.start + (o_tm + o_tpc) as u64;
+            if o_meta >= payload {
+                metadata_on_former_payload = true;
+            }
+            for va in (o_meta..o_meta + 5 * UAT_PGSZ as u64).step_by(UAT_PGSZ) {
+                assert_eq!(vm.page_byte(va), 0, "reused ordinary metadata {va:#x} must be zeroed");
+            }
+            ordinary_leases.push(lease);
+            true
+        } else {
+            false
+        }
+    } {}
+    assert!(metadata_on_former_payload, "test must cover ordinary metadata landing on former payload pages");
+    // Coalesce all ordinary leases back into one free range and verify native reuse.
+    for lease in ordinary_leases {
+        vm.release_scratch(lease).unwrap();
+    }
+    assert_eq!(vm.scratch_free[1].len(), 1);
+    let mut mesh3 = parameters!(g16_render, 0, 1, 1);
+    mesh3.mesh = Some(Profile::default());
+    let lease3 = vm.prepare_render(&mut mesh3).unwrap();
+    assert_eq!(lease3.range.start, base);
+    vm.release_scratch(lease3).unwrap();
+
+    // 4. Compute scratch reuse clears BOTH marker (+0x20000) and save_area (+0x24000).
+    let c1 = vm.lease_scratch(false, 0x28000, 0x20000, 2 * UAT_PGSZ).unwrap();
+    let c_base = c1.range.start;
+    vm.fill_range(c1.range.clone(), 0x77);
+    vm.release_scratch(c1).unwrap();
+    let c2 = vm.lease_scratch(false, 0x28000, 0x20000, 2 * UAT_PGSZ).unwrap();
+    assert_eq!(c2.range.start, c_base);
+    for va in (c_base..c_base + 0x20000).step_by(UAT_PGSZ) {
+        assert_eq!(vm.page_byte(va), 0x77);
+    }
+    for offset in [0x20000u64, 0x24000u64] {
+        assert_eq!(vm.page_byte(c_base + offset), 0);
+        assert_eq!(vm.clear_count(c_base + offset), 1);
+    }
+    vm.release_scratch(c2).unwrap();
+
+    // 4b. A write_low failure inside prepare_render releases the native scratch
+    // lease back to scratch_free (no leaked scratch_users).
+    vm.fail_write = true;
+    let mut mesh_fail = parameters!(g16_render, 0, 1, 1);
+    mesh_fail.mesh = Some(Profile::default());
+    assert_eq!(vm.prepare_render(&mut mesh_fail), Err(EIO));
+    assert_eq!(vm.scratch_users[1], 0);
+    assert_eq!(vm.scratch_free[1].len(), 1);
+    vm.fail_write = false;
+
+    // 5. Validation errors: zero size, misalignment, clear range out of bounds, overflow.
+    for (size, clear_from, clear_len) in [
+        (0, 0, 0),
+        (UAT_PGSZ + 1, 0, 0),
+        (2 * UAT_PGSZ, 1, UAT_PGSZ),
+        (2 * UAT_PGSZ, UAT_PGSZ, 1),
+        (2 * UAT_PGSZ, UAT_PGSZ, 2 * UAT_PGSZ),
+        (2 * UAT_PGSZ, 3 * UAT_PGSZ, 0),
+        (2 * UAT_PGSZ, usize::MAX - UAT_PGSZ + 1, UAT_PGSZ),
+    ] {
+        assert_eq!(
+            vm.lease_scratch(true, size, clear_from, clear_len),
+            Err(EINVAL),
+            "size={size:#x} clear_from={clear_from:#x} clear_len={clear_len:#x}"
+        );
+    }
 }

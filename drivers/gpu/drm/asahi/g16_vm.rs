@@ -234,26 +234,6 @@ impl AddressSpace {
         }
     }
 
-    /// Read a command word only while the execution owns its GEM mappings.
-    /// A decode must also wait for the GPU producer dependencies first; the
-    /// unwaited first-word peek relies on userspace writing native headers on
-    /// the CPU (see `submit_render`). Volatile access also avoids creating Rust
-    /// references to memory userspace can still write.
-    pub(crate) fn command_word(&mut self, va: u64) -> Result<u32> {
-        if va & 3 != 0 {
-            return Err(EINVAL);
-        }
-        let pa = self.low.translate(va)?.ok_or(EFAULT)?;
-        let base = pa & !(UAT_PGSZ as u64 - 1);
-        // SAFETY: the calling execution pins this VM's external mappings; the
-        // runtime/VM mutexes prevent unmapping for the duration of this borrow.
-        let page = unsafe { Page::borrow_phys(&base) }.ok_or(EFAULT)?;
-        page.with_pointer_into_page((pa - base) as usize, 4, |ptr| {
-            // SAFETY: the page helper checked the aligned word's bounds.
-            Ok(u32::from_le(unsafe { ptr.cast::<u32>().read_volatile() }))
-        })
-    }
-
     pub(crate) fn new() -> Result<Self> {
         Ok(Self {
             low: UatPageTable::new_with_ias(OAS, IAS)?,

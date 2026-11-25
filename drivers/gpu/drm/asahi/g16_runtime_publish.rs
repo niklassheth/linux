@@ -88,7 +88,7 @@ impl Bootstrap {
     }
 
     /// Lock `queues` briefly to run `check_cap_headroom` from the pump loop
-    /// before barrier/dependency/mesh preparation, using the same `cap`
+    /// before barrier/dependency preparation, using the same `cap`
     /// snapshot that the pump will latch on `EBUSY`.
     pub(crate) fn check_queue_headroom(
         &self,

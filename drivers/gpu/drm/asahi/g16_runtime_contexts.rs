@@ -98,7 +98,7 @@ impl Bootstrap {
     /// Lease a support object, its shared state page and hardware FList slot
     /// 3 + index. Render pools and private compute pools share the leases, so
     /// no two pools in use ever share a slot.
-    fn acquire_support_slot(&mut self, mode: g16_mesh::Mode) -> Result<Support> {
+    fn acquire_support_slot(&mut self, native: bool) -> Result<Support> {
         if self.render_failed {
             return Err(EIO);
         }
@@ -124,8 +124,7 @@ impl Bootstrap {
             submissions: AtomicU64::new(
                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
             ),
-            native: mode.enabled(),
-            mode,
+            native,
         })
     }
 
@@ -140,9 +139,14 @@ impl Bootstrap {
         Ok(())
     }
 
-    /// `mode`: the VM's native mesh mode, latched when it was created.
-    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode: g16_mesh::Mode) -> Result<Support> {
-        let lease = self.acquire_support_slot(mode)?;
+    /// `native`: whether native object/mesh renders were enabled when this VM
+    /// was created (latched at `VM_CREATE`).
+    pub(crate) fn acquire_render_support(
+        &mut self,
+        pool: &render::OperandPool,
+        native: bool,
+    ) -> Result<Support> {
+        let lease = self.acquire_support_slot(native)?;
         let mut header = pool.support(3 + u64::from(lease.index), lease.shared_state());
         if lease.native {
             render::initialize_native_support(&mut header);
@@ -153,7 +157,7 @@ impl Bootstrap {
 
     /// The support of a VM's private compute pool of `buffers` buffers.
     pub(crate) fn acquire_compute_support(&mut self, buffers: usize) -> Result<Support> {
-        let lease = self.acquire_support_slot(g16_mesh::Mode::Disabled)?;
+        let lease = self.acquire_support_slot(false)?;
         let header = compute::pool_support(3 + u64::from(lease.index), lease.shared_state(), buffers);
         self.publish_support(&lease, &header)?;
         Ok(lease)

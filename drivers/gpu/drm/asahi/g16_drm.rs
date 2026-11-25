@@ -20,7 +20,6 @@ use kernel::drm::{
     ioctl,
 };
 use kernel::sync::{Arc, CondVar, Mutex, MutexGuard};
-use kernel::error::to_result;
 use kernel::sync::aref::ARef;
 use kernel::uaccess::{UserPtr, UserSlice};
 use kernel::workqueue::{
@@ -47,17 +46,35 @@ const _: () = {
         | drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES as u64
         | drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING as u64
         | drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT as u64;
-    let downstream = [
+    let downstream_features = [
         drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES as u64,
         drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_BARRIER as u64,
+        drm_asahi_feature_DRM_ASAHI_FEATURE_NATIVE_MESH as u64,
+    ];
+    let downstream_render_flags = [
         drm_asahi_render_flags_DRM_ASAHI_RENDER_FEW_PRIMITIVES as u64,
         drm_asahi_render_flags_DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT as u64,
+        drm_asahi_render_flags_DRM_ASAHI_RENDER_NATIVE_MESH as u64,
     ];
+    assert!(drm_asahi_feature_DRM_ASAHI_FEATURE_NATIVE_MESH as u64 == 1 << 28);
+    assert!(drm_asahi_render_flags_DRM_ASAHI_RENDER_NATIVE_MESH as u64 == 1 << 28);
     assert!(upstream < 1 << 24);
+    let mut seen = 0u64;
     let mut i = 0;
-    while i < downstream.len() {
-        let bit = downstream[i];
+    while i < downstream_features.len() {
+        let bit = downstream_features[i];
         assert!(bit.is_power_of_two() && bit >= 1 << 24 && bit <= 1 << 30);
+        assert!(seen & bit == 0);
+        seen |= bit;
+        i += 1;
+    }
+    let mut seen = 0u64;
+    let mut i = 0;
+    while i < downstream_render_flags.len() {
+        let bit = downstream_render_flags[i];
+        assert!(bit.is_power_of_two() && bit >= 1 << 24 && bit <= 1 << 30);
+        assert!(seen & bit == 0);
+        seen |= bit;
         i += 1;
     }
 };
@@ -167,9 +184,11 @@ struct Vm {
     render_support: Option<Arc<crate::g16::Support>>,
     /// The render pool layout `render_support` describes, once rendering.
     render_pool: Option<render::OperandPool>,
-    /// The native mesh mode when this VM was created. Its support header and
-    /// every decode of its streams use it, whatever the runtime mode is later.
-    native_mode: crate::g16_mesh::Mode,
+    /// Whether native object/mesh renders (`DRM_ASAHI_RENDER_NATIVE_MESH`)
+    /// were enabled when this VM was created. Its render support header and
+    /// `SUBMIT` flag validation use this latch, whatever the runtime knob is
+    /// later.
+    native_mesh: bool,
     render_ready: bool,
     /// The runtime holds this VM root's TVB pool (created by its first render
     /// submission, released with the VM).
@@ -245,7 +264,6 @@ pub(crate) struct Data {
     _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _flags: KVec<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>>,
     _native_mesh: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::NativeMeshKnob>>>,
-    _native_mesh_attribute: NativeMeshAttribute,
     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
     _debugfs: kernel::debugfs::Dir,
@@ -281,81 +299,6 @@ impl drm::driver::Driver for Driver {
         (ASAHI_QUEUE_CREATE, drm_asahi_queue_create, ioctl::RENDER_ALLOW, File::queue_create),
         (ASAHI_QUEUE_DESTROY, drm_asahi_queue_destroy, ioctl::RENDER_ALLOW, File::queue_destroy),
         (ASAHI_SUBMIT, drm_asahi_submit, ioctl::RENDER_ALLOW, File::submit),
-    }
-}
-
-/// sysfs `asahi_native_mesh` on the GPU platform device: the native-index
-/// advertisement (`g16_mesh::advertise`), readable by anyone (0444).
-struct AttributeCell(core::cell::UnsafeCell<bindings::device_attribute>);
-
-// SAFETY: The attribute is written only here, at compile time; the device core
-// only reads it.
-unsafe impl Sync for AttributeCell {}
-
-static NATIVE_MESH_ATTRIBUTE: AttributeCell = AttributeCell(core::cell::UnsafeCell::new(bindings::device_attribute {
-    attr: bindings::attribute {
-        name: c"asahi_native_mesh".as_ptr(),
-        mode: 0o444,
-        // SAFETY: Zero is valid for the remaining (lockdep) fields.
-        ..unsafe { core::mem::zeroed() }
-    },
-    __bindgen_anon_1: bindings::device_attribute__bindgen_ty_1 { show: Some(show_native_mesh) },
-    __bindgen_anon_2: bindings::device_attribute__bindgen_ty_2 { store: None },
-}));
-
-/// A bounded line buffer for the advertisement.
-struct Line {
-    bytes: [u8; crate::g16_mesh::ADVERTISEMENT_MAX],
-    len: usize,
-}
-
-impl core::fmt::Write for Line {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let end = self.len.checked_add(s.len()).filter(|&end| end <= self.bytes.len()).ok_or(core::fmt::Error)?;
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
-unsafe extern "C" fn show_native_mesh(
-    _dev: *mut bindings::device,
-    _attr: *mut bindings::device_attribute,
-    buf: *mut core::ffi::c_char,
-) -> isize {
-    let (generation, mode) = crate::g16_mesh::snapshot();
-    let mut line = Line { bytes: [0; crate::g16_mesh::ADVERTISEMENT_MAX], len: 0 };
-    if crate::g16_mesh::advertise(generation, mode, &mut line).is_err() {
-        return EIO.to_errno() as isize;
-    }
-    // SAFETY: sysfs passes a PAGE_SIZE buffer; the line is at most ADVERTISEMENT_MAX bytes.
-    unsafe { core::ptr::copy_nonoverlapping(line.bytes.as_ptr(), buf.cast(), line.len) };
-    line.len as isize
-}
-
-/// Keeps `asahi_native_mesh` on the device until the driver unbinds.
-struct NativeMeshAttribute(*mut bindings::device);
-
-// SAFETY: The pointer is only passed to device_remove_file, which may run on any thread.
-unsafe impl Send for NativeMeshAttribute {}
-// SAFETY: No method takes `&self`.
-unsafe impl Sync for NativeMeshAttribute {}
-
-impl NativeMeshAttribute {
-    fn new<C: kernel::device::DeviceContext>(dev: &kernel::device::Device<C>) -> Result<Self> {
-        // `Device` is a transparent wrapper of the C `struct device`.
-        let raw = core::ptr::from_ref(dev).cast_mut().cast::<bindings::device>();
-        // SAFETY: The device is bound; the attribute is static.
-        to_result(unsafe { bindings::device_create_file(raw, NATIVE_MESH_ATTRIBUTE.0.get()) })?;
-        Ok(Self(raw))
-    }
-}
-
-impl Drop for NativeMeshAttribute {
-    fn drop(&mut self) {
-        // SAFETY: Dropped with the driver data at unbind, while the platform
-        // device (which outlives its driver data) still exists.
-        unsafe { bindings::device_remove_file(self.0, NATIVE_MESH_ATTRIBUTE.0.get()) };
     }
 }
 
@@ -411,8 +354,10 @@ pub(crate) fn register<'a>(
         knob.init(value);
         flags.push(KBox::pin_init(dir.read_write_file(name, knob), GFP_KERNEL)?, GFP_KERNEL)?;
     }
-    crate::g16_mesh::init_mode(crate::module_parameters::native_mesh.value());
-    let native_mesh_attribute = NativeMeshAttribute::new(pdev.as_ref())?;
+    let native_mesh_enabled =
+        crate::g16_mesh::parse_parameter(crate::module_parameters::native_mesh.value())
+            .ok_or(EINVAL)?;
+    crate::g16_mesh::set_enabled(native_mesh_enabled);
     let native_mesh = KBox::pin_init(
         dir.read_write_file(c_str!("native_mesh"), crate::g16_timeline::NativeMeshKnob),
         GFP_KERNEL,
@@ -464,7 +409,6 @@ pub(crate) fn register<'a>(
         _queue_cap: queue_cap,
         _flags: flags,
         _native_mesh: native_mesh,
-        _native_mesh_attribute: native_mesh_attribute,
         _dep_stats: dep_stats,
         _lane_cap: lane_cap,
         _debugfs: dir, });
@@ -670,6 +614,10 @@ pub(crate) struct File {
     device: DeviceRef,
     raw: AtomicPtr<bindings::drm_file>,
     id: u64,
+    /// Latched from `g16_mesh::enabled()` at DRM file open so `GET_PARAMS` and
+    /// `VM_CREATE` on this file descriptor always agree across runtime debugfs
+    /// toggles.
+    native_mesh: bool,
     state: Arc<Mutex<FileState>>,
     reaper: Arc<Reaper>,
     #[pin]
@@ -708,6 +656,7 @@ impl drm::file::DriverFile for File {
                 device: device.into(),
                 raw: AtomicPtr::new(core::ptr::null_mut()),
                 id: NEXT_FILE.fetch_add(1, Ordering::Relaxed),
+                native_mesh: crate::g16_mesh::enabled(),
                 drained <- kernel::new_condvar!("m4-file-drain"),
                 state,
                 reaper,

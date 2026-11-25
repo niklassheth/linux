@@ -302,9 +302,8 @@ impl WorkItem for Execution {
                         let dependencies =
                             resolve_barriers(&job.history, job.execution.barriers[job.next])?;
                         let execution = job.execution.clone();
-                        // Ordinary preparation leaves intra-queue waits to the
-                        // firmware. Paired mesh stream decoding waits for those
-                        // producer stamps before reading command words on CPU.
+                        // Render preparation leaves intra-queue waits to the
+                        // firmware without CPU command-stream reads.
                         // Userspace Normal-WB writes are ordered CPU-to-CPU by
                         // inbox.lock() Acquire, and firmware publication is
                         // ordered by flush()'s release + dsb sy barriers.

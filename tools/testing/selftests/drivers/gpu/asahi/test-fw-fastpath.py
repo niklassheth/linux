@@ -84,7 +84,7 @@ assert w_pos < a_pos < e_pos
 checks += 1
 
 # 6. reserve_flight(), check_wedge(), resolve_compute_dependencies(), and
-# submit_render() native-mesh CPU-hold all use FirmwareReader.
+# submit_render() avoid per-word fw.read_u32() (hot read paths use FirmwareReader).
 rf_fn = function(publish, 'reserve_flight')
 assert 'fw.read_u32(' not in rf_fn and 'reader.read_u32_relaxed(lane.pointers)' in rf_fn
 cw_fn = function(diag, 'check_wedge')
@@ -93,10 +93,6 @@ rcd_fn = function(compute, 'resolve_compute_dependencies')
 assert 'fw.read_u32(' not in rcd_fn and 'r.read_u32_relaxed(dep.address)' in rcd_fn
 sr_fn = function(render, 'submit_render')
 assert 'fw.read_u32(' not in sr_fn
-mesh_stamp_pos = sr_fn.index('reader.read_u32_relaxed(dep.address)?')
-mesh_acq_pos = sr_fn.index('reader.acquire_barrier();', mesh_stamp_pos)
-mesh_decode_pos = sr_fn.index('g16_mesh::decode(', mesh_acq_pos)
-assert mesh_stamp_pos < mesh_acq_pos < mesh_decode_pos
 checks += 1
 
 # 7. dma_wmb() and dsb_oshst() use Outer-Shareable store barriers without

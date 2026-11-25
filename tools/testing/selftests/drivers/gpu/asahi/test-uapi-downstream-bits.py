@@ -38,16 +38,22 @@ for name, table in (('feature', features), ('render flag', flags)):
             assert bit < 24, f'upstream {value} = bit {bit} reaches the downstream range'
 
 assert {k: v[0] for k, v in features.items() if v[1]} == {
-    'DRM_ASAHI_FEATURE_FEW_PRIMITIVES': 30, 'DRM_ASAHI_FEATURE_FRAGMENT_BARRIER': 29}
+    'DRM_ASAHI_FEATURE_FEW_PRIMITIVES': 30,
+    'DRM_ASAHI_FEATURE_FRAGMENT_BARRIER': 29,
+    'DRM_ASAHI_FEATURE_NATIVE_MESH': 28,
+}
 assert {k: v[0] for k, v in flags.items() if v[1]} == {
-    'DRM_ASAHI_RENDER_FEW_PRIMITIVES': 30, 'DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT': 29}
+    'DRM_ASAHI_RENDER_FEW_PRIMITIVES': 30,
+    'DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT': 29,
+    'DRM_ASAHI_RENDER_NATIVE_MESH': 28,
+}
 
 # The render path's accepted-flag mask, by name, resolved through the header.
 driver = ''.join(p.read_text() for p in sorted((root / 'drivers/gpu/drm/asahi').glob('g16_drm*.rs')))
 aliases = dict(re.findall(r'drm_asahi_render_flags_(DRM_ASAHI_RENDER_\w+) as (\w+)', driver))
-mask = re.search(r'c\.flags & !\(([^)]*)\)', driver).group(1)
+mask = re.search(r'c\.flags\s*& !\(([^)]*)\)', driver).group(1)
 accepted = {flags[{v: k for k, v in aliases.items()}[n.strip()]][0] for n in mask.split('|')}
-assert accepted == {1, 18, 29, 30}, accepted
+assert accepted == {1, 18, 28, 29, 30}, accepted
 assert 3 not in accepted
 
 mesa = os.environ.get('MESA_UAPI_HEADER')

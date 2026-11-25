@@ -233,6 +233,14 @@ enum drm_asahi_feature {
 	 * until the fragment stage.
 	 */
 	DRM_ASAHI_FEATURE_FRAGMENT_BARRIER = (1UL) << 29,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_NATIVE_MESH: Render commands accept
+	 * @DRM_ASAHI_RENDER_NATIVE_MESH to submit opaque VDM control streams
+	 * containing native Apple9 object/mesh shader dispatches, backed by
+	 * the kernel's per-render multi-cluster 0x1ca48 payload aperture.
+	 */
+	DRM_ASAHI_FEATURE_NATIVE_MESH = (1UL) << 28,
 };
 
 /**
@@ -852,6 +860,15 @@ enum drm_asahi_render_flags {
 	 * hazards. Requires @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.
 	 */
 	DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT = (1U << 29),
+
+	/**
+	 * @DRM_ASAHI_RENDER_NATIVE_MESH: The render's VDM control stream
+	 * contains native Apple9 object/mesh shader dispatches. The kernel
+	 * programs the extended native-mesh TA register state and per-render
+	 * 0x1ca48 multi-cluster payload aperture without parsing the command
+	 * stream on the CPU. Requires @DRM_ASAHI_FEATURE_NATIVE_MESH.
+	 */
+	DRM_ASAHI_RENDER_NATIVE_MESH = (1U << 28),
 };
 
 /**

@@ -116,7 +116,8 @@ impl Bootstrap {
         // Fast O(1) capacity check before VM locks, native-mesh page-table
         // walks/decode, or dependency resolution (lock order: queues -> owner).
         let mut queue = queues.lock();
-        self.check_cap_headroom(&queue, true, self.cap_state())?;
+        let cap = self.cap_state();
+        self.check_cap_headroom(&queue, true, cap)?;
         let mut mesh_params;
         // The VM's latched mode, not the current one: a VM created native keeps
         // decoding its streams after a runtime switch to 0.
@@ -199,7 +200,8 @@ impl Bootstrap {
             root,
             client_has_free_work,
             client_work_leased,
-            [1 + u32::from(initbm) + stage_deps[0], 2 + stage_deps[1], 0],
+            crate::g16_headroom::FlightCharge::render(initbm, stage_deps[0], stage_deps[1]),
+            cap,
         )?;
         self.prepare_queues(&mut queue)?;
         let result = self.submit_render_queue(
@@ -674,9 +676,13 @@ impl Bootstrap {
             (firsts[1] + 2 + stage_dependencies[1].iter().flatten().count() as u32) % 0x500,
         ];
         // Stage every byte this render publishes in one barrier-free writer
-        // pass with cached region lookups. Nothing becomes visible to firmware
-        // until flush() executes its release barrier before advancing lane
-        // heads and ringing the doorbell.
+        // pass with cached region lookups. `render_shared_state` and the TVB
+        // pool counter (`increment_staged`) are live cumulative counters
+        // already reachable by earlier work on this pool (advancing
+        // monotonically, with no transaction or rollback); all newly written
+        // per-Work descriptors, preludes, microsequences, notifiers, driver
+        // stamps, dependency items, and ring entries are ordered by flush()'s
+        // release barrier before advancing lane heads and ringing the doorbell.
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             let mut writer = fw.writer();

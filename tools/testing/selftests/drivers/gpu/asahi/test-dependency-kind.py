@@ -76,15 +76,18 @@ assert 'g16_stamp::reached(value, entry.any_value)' in wait_state
 assert 'g16_stamp::reached(value, prev)' in wait_state
 
 # Fragment lane ring-room accounts for a moved vdm_barrier_fragment item
-# (3 entries on lanes[1], not 2), and same_lane does not block repeat/reached
-# elision while still keeping unwaited in-flight 3D->3D barriers.
-publish = (driver / 'g16_runtime_publish.rs').read_text()
+# (3 entries on lanes[1], not 2) via FlightCharge::render, while preludes
+# (InitBM and fragment prelude) are excluded from lane_load, and same_lane does
+# not block repeat/reached elision while still keeping unwaited in-flight
+# 3D->3D barriers.
+headroom = (driver / 'g16_headroom.rs').read_text()
 assert re.search(
     r'let stage_deps = if params\.vdm_barrier_fragment \{[\s\S]*?'
-    r'\[1 \+ u32::from\(initbm\) \+ stage_deps\[0\], 2 \+ stage_deps\[1\], 0\]',
+    r'FlightCharge::render\(initbm, stage_deps\[0\], stage_deps\[1\]\)',
     render,
 )
-assert 'entries[stage].saturating_sub(1)' in publish
+assert 'ring_entries: [1 + initbm as u32 + ta_deps, 2 + frag_deps, 0],' in headroom
+assert 'lane_load: [1 + ta_deps, 1 + frag_deps, 0],' in headroom
 assert re.search(
     r'if uncovered_ts \{[\s\S]*?'
     r'\} else if queue\.waited\.covers\(lane, dep\.address, dep\.value, kind\) \{[\s\S]*?'

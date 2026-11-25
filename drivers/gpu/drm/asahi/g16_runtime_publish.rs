@@ -7,12 +7,56 @@
 use super::*;
 
 impl Bootstrap {
-    /// Current capacity snapshot for the pump's O(1) fast-skip check.
+    /// Current consistent capacity snapshot for the pump's O(1) fast-skip and
+    /// exact admission checks (loaded atomically from `CAPS`).
     pub(crate) fn cap_state(&self) -> crate::g16_headroom::CapBlock {
+        let (queue_cap, lane_cap) = crate::g16_timeline::CAPS.load();
         crate::g16_headroom::CapBlock {
             retire_gen: self.retire_gen,
-            queue_cap: crate::g16_timeline::QUEUE_CAP.load(Ordering::Relaxed),
-            lane_cap: crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed),
+            queue_cap,
+            lane_cap,
+        }
+    }
+
+    fn lane_loads(&self, queue: &FirmwareQueues) -> Option<[crate::g16_headroom::LaneLoad; 3]> {
+        queue.lanes.map(|lanes| {
+            lanes.map(|lane| {
+                self.ledger
+                    .lane(lane.pointers)
+                    .map_or(crate::g16_headroom::LaneLoad::default(), |b| {
+                        crate::g16_headroom::LaneLoad {
+                            works: b.works as usize,
+                            load: b.load as usize,
+                            owned: b.owned as usize,
+                        }
+                    })
+            })
+        })
+    }
+
+    fn map_headroom_block(&self, block: crate::g16_headroom::HeadroomBlock) -> Error {
+        match block {
+            crate::g16_headroom::HeadroomBlock::WorkSpaceExhausted => ENOSPC,
+            crate::g16_headroom::HeadroomBlock::WorkSpaceBusy => {
+                self.report_pressure(64, "Work storage");
+                EBUSY
+            }
+            crate::g16_headroom::HeadroomBlock::FlightsFull => {
+                self.report_pressure(128, "flights");
+                EBUSY
+            }
+            crate::g16_headroom::HeadroomBlock::QueueCap => {
+                self.report_pressure(16, "queue entries");
+                EBUSY
+            }
+            crate::g16_headroom::HeadroomBlock::LaneWorks => {
+                self.report_pressure(16, "workqueue");
+                EBUSY
+            }
+            crate::g16_headroom::HeadroomBlock::LaneCap => {
+                self.report_pressure(32, "lane entries");
+                EBUSY
+            }
         }
     }
 
@@ -29,20 +73,7 @@ impl Bootstrap {
         if self.render_failed {
             return Err(EIO);
         }
-        let lanes = queue.lanes.map(|lanes| {
-            lanes.map(|lane| {
-                self.ledger
-                    .lane(lane.pointers)
-                    .map_or(crate::g16_headroom::LaneLoad::default(), |b| {
-                        crate::g16_headroom::LaneLoad {
-                            works: b.works as usize,
-                            load: b.load as usize,
-                            owned: b.owned as usize,
-                        }
-                    })
-            })
-        });
-        match crate::g16_headroom::check_headroom(
+        crate::g16_headroom::check_headroom(
             render,
             self.work_space_left(render),
             self.flights.len(),
@@ -51,31 +82,9 @@ impl Bootstrap {
             cap.queue_cap as usize,
             crate::module_parameters::max_lane_works.value() as usize,
             cap.lane_cap as usize,
-            lanes,
-        ) {
-            Ok(()) => Ok(()),
-            Err(crate::g16_headroom::HeadroomBlock::WorkSpaceExhausted) => Err(ENOSPC),
-            Err(crate::g16_headroom::HeadroomBlock::WorkSpaceBusy) => {
-                self.report_pressure(64, "Work storage");
-                Err(EBUSY)
-            }
-            Err(crate::g16_headroom::HeadroomBlock::FlightsFull) => {
-                self.report_pressure(128, "flights");
-                Err(EBUSY)
-            }
-            Err(crate::g16_headroom::HeadroomBlock::QueueCap) => {
-                self.report_pressure(16, "queue entries");
-                Err(EBUSY)
-            }
-            Err(crate::g16_headroom::HeadroomBlock::LaneWorks) => {
-                self.report_pressure(16, "workqueue");
-                Err(EBUSY)
-            }
-            Err(crate::g16_headroom::HeadroomBlock::LaneCap) => {
-                self.report_pressure(32, "lane entries");
-                Err(EBUSY)
-            }
-        }
+            self.lane_loads(queue),
+        )
+        .map_err(|b| self.map_headroom_block(b))
     }
 
     /// Lock `queues` briefly to run `check_cap_headroom` from the pump loop
@@ -98,7 +107,8 @@ impl Bootstrap {
         root: u64,
         client_has_free_work: bool,
         client_work_leased: usize,
-        entries: [u32; 3],
+        charge: crate::g16_headroom::FlightCharge,
+        cap: crate::g16_headroom::CapBlock,
     ) -> Result {
         if self.render_failed {
             return Err(EIO);
@@ -130,66 +140,19 @@ impl Bootstrap {
             self.report_pressure(1, "ASIDs");
             return Err(EBUSY);
         }
-        // The firmware stops completing a queue's Works (its shared notifier
-        // stalls with the stamps already past, blocked=0x2) when too many
-        // are outstanding: k24-cap129 (129 Works on a lane) and k69 on #108,
-        // where compute waits on the own render lanes add firmware dependency
-        // items. Bound the
-        // whole queue's unretired Works plus their dependency items.
-        let cap = crate::g16_timeline::QUEUE_CAP.load(Ordering::Relaxed) as usize;
-        if cap != 0 {
-            if let Some(lanes) = &queue.lanes {
-                let outstanding: usize = lanes
-                    .iter()
-                    .filter_map(|l| self.ledger.lane(l.pointers))
-                    .map(|b| b.owned as usize)
-                    .sum();
-                let new = entries.iter().copied().max().unwrap_or(1) as usize;
-                if outstanding + new > cap {
-                    self.report_pressure(16, "queue entries");
-                    return Err(EBUSY);
-                }
-            }
-        }
-        // Check exact per-lane work and dependency-item caps in host memory
-        // BEFORE reading SGX MMIO channels or firmware lane cursors.
-        if let Some(lanes) = &queue.lanes {
-            let max_works = crate::module_parameters::max_lane_works.value() as usize;
-            let lane_cap = crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed) as usize;
-            for &stage in stages {
-                let lane = lanes[stage];
-                if max_works != 0
-                    && self
-                        .ledger
-                        .lane(lane.pointers)
-                        .map_or(0, |b| b.works as usize)
-                        >= max_works
-                {
-                    self.report_pressure(16, "workqueue");
-                    return Err(EBUSY);
-                }
-                // Dependency items on a lane deeper than its 128-Work window
-                // stall the firmware. Bound each lane's unretired Works plus
-                // the items queued on it (preludes are not Works).
-                if lane_cap != 0 {
-                    let load = self
-                        .ledger
-                        .lane(lane.pointers)
-                        .map_or(0, |b| b.load as usize);
-                    // Fragment always writes a prelude entry (not a Work)
-                    // before the fragment Work and any moved render item.
-                    let new = if stage == 1 {
-                        entries[stage].saturating_sub(1) as usize
-                    } else {
-                        entries[stage] as usize
-                    };
-                    if load + new > lane_cap {
-                        self.report_pressure(32, "lane entries");
-                        return Err(EBUSY);
-                    }
-                }
-            }
-        }
+        // Check exact queue and per-lane caps in host memory using the same
+        // consistent `cap` snapshot and `Ledger` units BEFORE reading SGX MMIO
+        // channels or firmware lane cursors.
+        crate::g16_headroom::check_exact_caps(
+            render,
+            charge,
+            cap.queue_cap as usize,
+            crate::module_parameters::max_lane_works.value() as usize,
+            cap.lane_cap as usize,
+            self.lane_loads(queue),
+        )
+        .map_err(|b| self.map_headroom_block(b))?;
+        let entries = charge.ring_entries;
         for &stage in stages {
             let channel = queue.priority as usize * 3 + stage;
             let staged_count = self

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Host tests of G16 O(1) admission headroom pre-check (g16_headroom.rs) and
-pump/submit wiring: QUEUE_CAP and LANE_CAP deferrals bail before VM locks,
-native-mesh decode, dependency resolution, MMIO, or firmware cursor reads,
-and skip retrying in the pump until a flight retires or a cap knob changes.
+"""Host tests of G16 O(1) admission headroom pre-check, exact Ledger-aligned
+cap checks, atomic CapPair updates (g16_headroom.rs), and pump/submit wiring:
+- QUEUE_CAP and LANE_CAP deferrals bail before VM locks, native-mesh decode,
+  dependency resolution, MMIO, or firmware cursor reads, and skip retrying in
+  the pump until a flight retires or a cap knob changes.
+- Empty queues always make forward progress even under queue_cap=1 / lane_cap=1.
+- Concurrent debugfs writes to queue_cap / lane_cap use atomic CapPair CAS and
+  can never produce (0, 0).
 """
 from pathlib import Path
 import os
@@ -31,22 +35,35 @@ render = (driver / 'g16_runtime_render.rs').read_text()
 compute = (driver / 'g16_runtime_compute.rs').read_text()
 retire = (driver / 'g16_runtime_retire.rs').read_text()
 pump = (driver / 'g16_drm_pump.rs').read_text()
+timeline = (driver / 'g16_timeline.rs').read_text()
 
-# submit_render checks headroom before native-mesh command_word / decode and dep resolution.
-sr = render[render.index('pub(crate) fn submit_render('):]
-assert sr.index('self.check_cap_headroom(&queue, true, self.cap_state())?') < sr.index('command_word(')
-assert sr.index('self.check_cap_headroom(&queue, true, self.cap_state())?') < sr.index('resolve_render_dependencies(')
+# Atomic CapPair replaces separate QUEUE_CAP / LANE_CAP atomics.
+assert 'pub(crate) static CAPS: crate::g16_headroom::CapPair' in timeline
+assert 'CAPS.update_lane(value)' in timeline and 'CAPS.update_queue(value)' in timeline
+assert 'crate::g16_timeline::CAPS.load()' in publish
 
-# submit_compute checks headroom before owner.lock() and dep resolution.
-sc = compute[compute.index('pub(crate) fn submit_compute('):]
-assert sc.index('self.check_cap_headroom(&queue, false, self.cap_state())?') < sc.index('owner.lock()')
-assert sc.index('self.check_cap_headroom(&queue, false, self.cap_state())?') < sc.index('resolve_compute_dependencies(')
+# submit_render checks headroom with a consistent cap snapshot before
+# native-mesh command_word / decode and dep resolution, and passes the same cap
+# into reserve_flight.
+sr = render[render.index('pub(crate) fn submit_render('):render.index('pub(super) fn submit_render_queue(')]
+assert sr.index('let cap = self.cap_state();') < sr.index('self.check_cap_headroom(&queue, true, cap)?')
+assert sr.index('self.check_cap_headroom(&queue, true, cap)?') < sr.index('command_word(')
+assert sr.index('self.check_cap_headroom(&queue, true, cap)?') < sr.index('resolve_render_dependencies(')
+assert 'FlightCharge::render(initbm, stage_deps[0], stage_deps[1])' in sr
 
-# reserve_flight checks LANE_CAP and max_lane_works before read_channel MMIO / lane.pointers reads,
-# and explicitly orders lane-cursor loads with reader.acquire_barrier().
+# submit_compute checks headroom with a consistent cap snapshot before
+# owner.lock() and dep resolution, and passes the same cap into reserve_flight.
+sc = compute[compute.index('pub(crate) fn submit_compute('):compute.index('pub(super) fn submit_compute_queue(')]
+assert sc.index('let cap = self.cap_state();') < sc.index('self.check_cap_headroom(&queue, false, cap)?')
+assert sc.index('self.check_cap_headroom(&queue, false, cap)?') < sc.index('owner.lock()')
+assert sc.index('self.check_cap_headroom(&queue, false, cap)?') < sc.index('resolve_compute_dependencies(')
+assert 'FlightCharge::compute(' in sc
+
+# reserve_flight checks exact caps (QUEUE_CAP, LANE_CAP, max_lane_works) before
+# read_channel MMIO / lane.pointers reads, and explicitly orders lane-cursor
+# loads with reader.acquire_barrier().
 rf = publish[publish.index('pub(super) fn reserve_flight('):publish.index('pub(super) fn read_channel(')]
-assert rf.index('LANE_CAP.load(') < rf.index('self.read_channel(')
-assert rf.index('max_lane_works.value()') < rf.index('self.read_channel(')
+assert rf.index('check_exact_caps(') < rf.index('self.read_channel(')
 assert rf.index('reader.read_u32_relaxed(lane.pointers + 0x30)?') < rf.index('reader.acquire_barrier();')
 
 # retire() bumps retire_gen when removing a retired flight.

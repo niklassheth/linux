@@ -154,7 +154,8 @@ impl Bootstrap {
     ) -> Result<Receipt> {
         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_COMPUTE);
         let mut queue = queues.lock();
-        self.check_cap_headroom(&queue, false, self.cap_state())?;
+        let cap = self.cap_state();
+        self.check_cap_headroom(&queue, false, cap)?;
         let mut client = owner.lock();
         let mut tally = DepTally::default();
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
@@ -167,7 +168,10 @@ impl Bootstrap {
             client.roots().low,
             client.has_free_work(false),
             client.work_leased(false),
-            [0, 0, 1 + dependencies.iter().flatten().count() as u32],
+            crate::g16_headroom::FlightCharge::compute(
+                dependencies.iter().flatten().count() as u32,
+            ),
+            cap,
         )?;
         self.prepare_queues(&mut queue)?;
         let result = self.submit_compute_queue(
@@ -291,8 +295,12 @@ impl Bootstrap {
         let entry_bytes = compute::entry(params.cdm);
         let timestamped = timestamps[0] != 0 || timestamps[1] != 0;
         // Stage every byte of this compute Work in one barrier-free writer
-        // pass with cached region lookups; flush() executes the single release
-        // barrier before advancing lane.head and ringing the doorbell.
+        // pass with cached region lookups. `support_shared` is a live
+        // cumulative counter already reachable by earlier work on this pool
+        // (monotonic, not rolled back on error); all newly written per-Work
+        // descriptors, microsequences, notifiers, dependency items, and ring
+        // entries are ordered by flush()'s release barrier before advancing
+        // lane.head and ringing the doorbell.
         {
             let fw = self._firmware_space.as_mut().ok_or(EIO)?;
             let mut writer = fw.writer();

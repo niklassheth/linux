@@ -827,9 +827,13 @@ impl PinnedDrop for File {
             }
         }
         if !drained {
-            // Completion was not established. Retain this file's roots and
-            // every pinned GEM page until reboot, so late DMA can't reach
-            // reused RAM. Other clients keep running.
+            // Completion was not established. Drop never-published VMs and the
+            // public timestamp list (retained_timestamps keeps all live backing)
+            // while retaining every root whose completion is uncertain.
+            state
+                .vms
+                .retain(|vm| !vm.pending.is_empty() || vm.has_firmware_state());
+            state.timestamps.clear();
             pr_err!("G16: closing a client whose GPU work didn't complete; leaking its address spaces\n");
             drop(state);
             core::mem::forget(self.state.clone());
@@ -841,6 +845,7 @@ impl PinnedDrop for File {
             // Never-published VMs have no firmware-visible state and drop
             // cleanly even after a device fault or VM_CREATE/fault race.
             state.vms.retain(|vm| vm.has_firmware_state());
+            state.timestamps.clear();
             if !state.vms.is_empty() || !state.retained_timestamps.is_empty() {
                 // Retain published roots and timestamp backing after any
                 // device/runtime fault until reset establishes quiescence.
@@ -870,6 +875,7 @@ impl PinnedDrop for File {
             }
         }
         drop(runtime);
+        state.timestamps.clear();
         state.vms.truncate(keep_vms);
         state.retained_timestamps.truncate(keep_timestamps);
         if keep_vms != 0 || keep_timestamps != 0 {

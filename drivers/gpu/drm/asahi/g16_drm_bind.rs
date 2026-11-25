@@ -19,12 +19,14 @@ impl Vm {
             || self.compute_space.lock().work_owned_any()
     }
 
-    pub(super) fn detach(&self, runtime: &mut crate::g16::Bootstrap) -> Result {
+    pub(super) fn detach(&mut self, runtime: &mut crate::g16::Bootstrap) -> Result {
         {
             let mut space = self.space.lock();
             runtime.report_vm_detach(space.roots().low);
             runtime.release_render_vm(&mut space)?;
         }
+        // The render root's TVB pool was just removed by `release_render_vm`.
+        self.tvb_ready = false;
         let mut compute = self.compute_space.lock();
         runtime.release_render_vm(&mut compute)?;
         Ok(())

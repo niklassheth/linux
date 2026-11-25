@@ -66,7 +66,7 @@ assert rel.index('space.unmap_work_alias_gfp(') < rel.index('fw.release_region_g
 assert rel.index('self.invalidate_client(dev_space);') < rel.index('fw.release_region_gfp(va, gfp)?')
 assert rel.index('fw.release_region_gfp(va + priv_size, gfp)?') < rel.index('space.finish_teardown_work(render, va)?')
 assert rel.index('space.finish_teardown_work(render, va)?') < rel.index('self.free_work_va[index]')
-assert 'space.low.clear_invalidations();' in rel
+assert rel.index('space.low.clear_invalidations();') < rel.index('for render in [false, true]')
 assert 'reserve_teardown_gfp(gfp)?' in prov_fn
 assert 'if fw.has_region(region)' in rel and 'fw.release_region_gfp(region, gfp)?' in rel
 

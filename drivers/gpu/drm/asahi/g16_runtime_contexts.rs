@@ -252,6 +252,24 @@ impl Bootstrap {
                 self.set_context(index, None)?;
             }
         }
+        // Drain any leftover pending tables or invalidations (e.g. from an
+        // earlier interrupted multi-range unmap) BEFORE tearing down the first
+        // Work slot so pre-reserved teardown capacity starts at length 0.
+        if space.has_pending_tables() {
+            space.sync();
+        }
+        space.low.clear_invalidations();
+        if let Some(dev_space) = self._address_space.as_ref() {
+            if dev_space.has_pending_tables() {
+                dev_space.sync();
+            }
+            self.invalidate_client(dev_space);
+        }
+        if let Some(fw) = self._firmware_space.as_ref() {
+            if fw.has_pending_tables() {
+                fw.sync();
+            }
+        }
         // Detach and free every Work slot owned by this VM. Move each idle slot
         // into `tearing_down` BEFORE any destructive unmap or region release so
         // it can never be leased again while remaining tracked in `owned` for

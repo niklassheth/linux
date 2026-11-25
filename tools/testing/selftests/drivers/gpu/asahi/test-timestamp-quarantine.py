@@ -59,11 +59,15 @@ assert unbind_arm.index('runtime.release_timestamp(') < unbind_arm.index('state.
 vc = function(ioctl, 'vm_create')
 assert vc.index('device.failed.load(Ordering::Acquire)') < vc.index('AddressSpace::new()')
 
-# 3. File::drop() checks device.failed || runtime.render_failed() under runtime.lock(),
-#    drops never-published VMs (has_firmware_state() == false) even on faulted close,
-#    and on healthy close detaches every VM / releases every timestamp independently
-#    before dropping runtime and truncating cleanly detached items.
+# 2c. vm_destroy() withdraws visibility before drain_vm() and detach().
+vd = function(ioctl, 'vm_destroy')
+assert vd.index('state.vms[index].visible = false;') < vd.index('drain_vm(')
+
+# 3. File::drop() filters never-published VMs and clears state.timestamps on
+#    drain-timeout, faulted close, and healthy close (after drop(runtime)).
 fdrop = drm[drm.index('impl PinnedDrop for File'):drm.index('static FENCE_KEY')]
+assert fdrop.count('state.timestamps.clear();') >= 3
+assert 'retain(|vm| !vm.pending.is_empty() || vm.has_firmware_state())' in fdrop
 lock_pos = fdrop.index('let mut runtime = self.device.runtime.lock();')
 guard_pos = fdrop.index('self.device.failed.load(Ordering::Acquire) || runtime.render_failed()', lock_pos)
 retain_pos = fdrop.index('state.vms.retain(|vm| vm.has_firmware_state());', guard_pos)
@@ -71,9 +75,10 @@ non_empty_pos = fdrop.index('!state.vms.is_empty() || !state.retained_timestamps
 detach_pos = fdrop.index('.detach(&mut runtime)', non_empty_pos)
 rel_pos = fdrop.index('.release_timestamp(', detach_pos)
 drop_rt_pos = fdrop.index('drop(runtime);', rel_pos)
-trunc_vm_pos = fdrop.index('state.vms.truncate(keep_vms);', drop_rt_pos)
+clear_ts_pos = fdrop.index('state.timestamps.clear();', drop_rt_pos)
+trunc_vm_pos = fdrop.index('state.vms.truncate(keep_vms);', clear_ts_pos)
 trunc_ts_pos = fdrop.index('state.retained_timestamps.truncate(keep_timestamps);', trunc_vm_pos)
-assert lock_pos < guard_pos < retain_pos < non_empty_pos < detach_pos < rel_pos < drop_rt_pos < trunc_vm_pos < trunc_ts_pos
+assert lock_pos < guard_pos < retain_pos < non_empty_pos < detach_pos < rel_pos < drop_rt_pos < clear_ts_pos < trunc_vm_pos < trunc_ts_pos
 
 # 4. Behavioral Rust test modeling the quarantine state machine across faulted
 #    unbind + rebind attempts.

@@ -496,6 +496,26 @@ impl Bootstrap {
         Ok(lanes)
     }
 
+    /// For the SUBMIT ioctl: try to satisfy an unprovisioned queue from an
+    /// already-acknowledged recycled queue region with zero fresh page
+    /// allocations. Returns `Ok(true)` if the queue is now provisioned, or
+    /// `Ok(false)` when fresh pages must be preallocated outside locks.
+    pub(crate) fn provision_queue_recycled(&mut self, owner: &mut FirmwareQueues) -> Result<bool> {
+        if self.render_failed {
+            return Err(EIO);
+        }
+        if owner.lanes.is_some() {
+            return Ok(true);
+        }
+        self.recycle_queues()?;
+        if self.free_queues.is_empty() {
+            return Ok(false);
+        }
+        let mut empty = KVec::new();
+        self.prepare_lanes_prealloc(owner, &mut empty)?;
+        Ok(true)
+    }
+
     /// For the SUBMIT ioctl: install the queue's firmware rings using pages
     /// preallocated outside retirement locks (`GFP_NOWAIT | __GFP_NOWARN` inside).
     pub(crate) fn provision_queue(

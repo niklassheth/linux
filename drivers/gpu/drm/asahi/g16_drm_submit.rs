@@ -408,23 +408,37 @@ impl File {
             for p in &parameters {
                 if let Parameters::Render(r) = p {
                     if let Some((tilemap, tpc)) = r.scratch_sizes() {
+                        let mesh_extra = if vm.native_mode.enabled()
+                            && vm
+                                .space
+                                .lock()
+                                .command_word(r.encoder)
+                                .is_ok_and(crate::g16_mesh::may_be_native)
+                        {
+                            crate::g16_mesh::Profile::PAYLOAD_BYTES
+                        } else {
+                            0
+                        };
                         let size = tilemap
                             .checked_add(tpc)
                             .and_then(|n| n.checked_add(5 * crate::pgtable::UAT_PGSZ))
-                            .and_then(|n| {
-                                n.checked_add(if vm.native_mode.enabled() {
-                                    crate::g16_mesh::Profile::PAYLOAD_BYTES
-                                } else {
-                                    0
-                                })
-                            })
+                            .and_then(|n| n.checked_add(mesh_extra))
                             .ok_or(ENOMEM)?;
                         max_render_scratch = max_render_scratch.max(size);
                     }
                 }
             }
         }
-        let need_queue = !firmware.lock().provisioned();
+        // Try to claim an acknowledged recycled queue region first so memory
+        // pressure never rejects a queue that needs zero fresh pages.
+        let need_queue = if !firmware.lock().provisioned() {
+            !device
+                .runtime
+                .lock()
+                .provision_queue_recycled(&mut firmware.lock())?
+        } else {
+            false
+        };
         let need_render_scratch = if max_render_scratch != 0 {
             vm.space
                 .lock()

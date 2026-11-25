@@ -137,11 +137,12 @@ impl File {
             .iter()
             .position(|v| v.id == data.vm_id && v.visible)
             .ok_or(ENOENT)?;
-        if state.queues.iter().any(|q| q.vm == data.vm_id) {
-            // Removing the public handle must not invalidate existing queues.
-            // They retain this VM until the last queue is destroyed.
-            state.vms[index].visible = false;
-        } else {
+        // Withdraw the public VM handle immediately before checking queues or
+        // unlocking to drain. Existing queues retain the VM until the last
+        // queue is destroyed; no concurrent QUEUE_CREATE can attach during
+        // drain, and a partial detach failure leaves the VM unreachable.
+        state.vms[index].visible = false;
+        if !state.queues.iter().any(|q| q.vm == data.vm_id) {
             // No queue can submit to this VM any more, so only its own
             // pending work can still use its tables. Other clients' work
             // never touches them: don't wait for the whole device.
@@ -151,10 +152,12 @@ impl File {
             let index = state
                 .vms
                 .iter()
-                .position(|v| v.id == data.vm_id && v.visible)
+                .position(|v| v.id == data.vm_id && !v.visible)
                 .ok_or(ENOENT)?;
-            state.vms[index].detach(&mut device.runtime.lock())?;
-            state.vms.swap_remove(index);
+            if !state.queues.iter().any(|q| q.vm == data.vm_id) {
+                state.vms[index].detach(&mut device.runtime.lock())?;
+                state.vms.swap_remove(index);
+            }
         }
         Ok(0)
     }

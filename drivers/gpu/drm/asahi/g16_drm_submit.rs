@@ -349,13 +349,18 @@ impl File {
                 vm.compute_ready = true;
             }
         }
-        // Prune signaled fences first so `pending_jobs` reflects live queued
-        // submissions on this VM when sizing per-VM Work pools.
-        vm.pending.retain(|f| {
+        // Prune signaled fences first so per-kind pending counts reflect live
+        // queued submissions on this VM when sizing per-VM Work pools.
+        let keep_live = |f: &mut dma_fence::Fence| {
             // SAFETY: Each entry owns its live fence reference.
             !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
-        });
+        };
+        vm.pending.retain(keep_live);
+        vm.pending_render.retain(keep_live);
+        vm.pending_compute.retain(keep_live);
         let pending_jobs = vm.pending.len();
+        let pending_renders = vm.pending_render.len();
+        let pending_computes = vm.pending_compute.len();
 
         // Provision what this queue's or VM root's publication would otherwise
         // allocate in the job worker (firmware rings, TVB pool, per-VM Work
@@ -365,43 +370,39 @@ impl File {
         // so reclaim can never deadlock against retirement of earlier fences.
         const MAX_VM_WORK_SLOTS: usize = 64;
         let tvb = renders != 0 && !vm.tvb_ready;
-        let (render_work_target, render_work_add) = if renders != 0 {
+        let (render_owned, render_work_add, render_min_add) = if renders != 0 {
             let need = usize::from(renders);
             let space = vm.space.lock();
             let owned = space.work_owned(true);
-            let queued_want = (pending_jobs + 1).saturating_mul(need).min(MAX_VM_WORK_SLOTS);
+            let queued_want = (pending_renders + 1)
+                .saturating_mul(need)
+                .min(MAX_VM_WORK_SLOTS);
             let idle_want = if space.has_free_work(true) {
                 owned
             } else {
                 owned.saturating_add(need).min(MAX_VM_WORK_SLOTS)
             };
             let want = queued_want.max(idle_want);
-            if owned < want {
-                (want, want - owned)
-            } else {
-                (0, 0)
-            }
+            (owned, want.saturating_sub(owned), usize::from(owned == 0))
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
-        let (compute_work_target, compute_work_add) = if computes != 0 {
+        let (compute_owned, compute_work_add, compute_min_add) = if computes != 0 {
             let need = usize::from(computes);
             let space = vm.compute_space.lock();
             let owned = space.work_owned(false);
-            let queued_want = (pending_jobs + 1).saturating_mul(need).min(MAX_VM_WORK_SLOTS);
+            let queued_want = (pending_computes + 1)
+                .saturating_mul(need)
+                .min(MAX_VM_WORK_SLOTS);
             let idle_want = if space.has_free_work(false) {
                 owned
             } else {
                 owned.saturating_add(need).min(MAX_VM_WORK_SLOTS)
             };
             let want = queued_want.max(idle_want);
-            if owned < want {
-                (want, want - owned)
-            } else {
-                (0, 0)
-            }
+            (owned, want.saturating_sub(owned), usize::from(owned == 0))
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
         let mut max_render_scratch = 0usize;
         if renders != 0 {
@@ -478,15 +479,61 @@ impl File {
         } else {
             KVec::new()
         };
-        let mut prealloc_render_work = if render_work_add != 0 {
-            alloc_pages(render_work_add * 7)?
-        } else {
-            KVec::new()
+        // Allocate mandatory executable Work slots (`min_add`) with `?`, then
+        // grow pipelining headroom up to `want_add` best-effort so memory
+        // pressure never rejects a submission whose VM already owns a slot.
+        let alloc_work_slots = |want_add: usize,
+                                min_add: usize,
+                                pages_per_slot: usize|
+         -> Result<(usize, KVec<crate::g16_vm::GpuPage>)> {
+            if want_add == 0 {
+                return Ok((0, KVec::new()));
+            }
+            let mut pages = KVec::with_capacity(min_add * pages_per_slot, GFP_KERNEL)?;
+            for _ in 0..min_add * pages_per_slot {
+                pages
+                    .push_within_capacity(crate::g16_vm::GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?)
+                    .map_err(|_| EIO)?;
+            }
+            let mut slots = min_add;
+            for _ in min_add..want_add {
+                if pages.reserve(pages_per_slot, GFP_KERNEL).is_err() {
+                    break;
+                }
+                let start_len = pages.len();
+                let mut ok = true;
+                for _ in 0..pages_per_slot {
+                    match crate::g16_vm::GpuPage::alloc(GFP_KERNEL | __GFP_ZERO) {
+                        Ok(page) => {
+                            let _ = pages.push_within_capacity(page);
+                        }
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    pages.truncate(start_len);
+                    break;
+                }
+                slots += 1;
+            }
+            Ok((slots, pages))
         };
-        let mut prealloc_compute_work = if compute_work_add != 0 {
-            alloc_pages(compute_work_add * 2)?
+        let (render_slots_alloc, mut prealloc_render_work) =
+            alloc_work_slots(render_work_add, render_min_add, 7)?;
+        let render_work_target = if render_slots_alloc != 0 {
+            render_owned + render_slots_alloc
         } else {
-            KVec::new()
+            0
+        };
+        let (compute_slots_alloc, mut prealloc_compute_work) =
+            alloc_work_slots(compute_work_add, compute_min_add, 2)?;
+        let compute_work_target = if compute_slots_alloc != 0 {
+            compute_owned + compute_slots_alloc
+        } else {
+            0
         };
         let mut prealloc_render_scratch = if need_render_scratch {
             alloc_pages(max_render_scratch / crate::pgtable::UAT_PGSZ)?
@@ -527,20 +574,28 @@ impl File {
                 vm.tvb_ready = true;
             }
             if render_work_target != 0 {
-                runtime.provision_work(
+                match runtime.provision_work(
                     &mut vm.space.lock(),
                     true,
                     render_work_target,
                     &mut prealloc_render_work,
-                )?;
+                ) {
+                    Ok(()) => {}
+                    Err(err) if (err == ENOMEM || err == ENOSPC) && render_min_add == 0 => {}
+                    Err(err) => return Err(err),
+                }
             }
             if compute_work_target != 0 {
-                runtime.provision_work(
+                match runtime.provision_work(
                     &mut vm.compute_space.lock(),
                     false,
                     compute_work_target,
                     &mut prealloc_compute_work,
-                )?;
+                ) {
+                    Ok(()) => {}
+                    Err(err) if (err == ENOMEM || err == ENOSPC) && compute_min_add == 0 => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         // Every submission retains the VM's mappings until it completes.
@@ -563,6 +618,12 @@ impl File {
             _timestamps: timestamp_bindings,
         };
         vm.pending.reserve(1, GFP_KERNEL)?;
+        if renders != 0 {
+            vm.pending_render.reserve(1, GFP_KERNEL)?;
+        }
+        if computes != 0 {
+            vm.pending_compute.reserve(1, GFP_KERNEL)?;
+        }
         let completion = dma_fence::Fence::from_fence(&unique);
         let worker_completion = completion.clone();
         let execution = Arc::pin_init(
@@ -576,9 +637,20 @@ impl File {
             }),
             GFP_KERNEL,
         )?;
-        state.vms[index]
-            .pending
-            .push(completion.clone(), GFP_KERNEL)?;
+        let vm = &mut state.vms[index];
+        vm.pending
+            .push_within_capacity(completion.clone())
+            .map_err(|_| EIO)?;
+        if renders != 0 {
+            vm.pending_render
+                .push_within_capacity(completion.clone())
+                .map_err(|_| EIO)?;
+        }
+        if computes != 0 {
+            vm.pending_compute
+                .push_within_capacity(completion.clone())
+                .map_err(|_| EIO)?;
+        }
         let queue = state
             .queues
             .iter_mut()

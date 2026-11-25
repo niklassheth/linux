@@ -11,7 +11,7 @@
 use crate::{g16_compute as compute, g16_render as render};
 use core::{
     ops::Range,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use kernel::dma_fence::{self, RawDmaFence};
 use kernel::drm::sched;
@@ -23,7 +23,10 @@ use kernel::sync::{Arc, CondVar, Mutex, MutexGuard};
 use kernel::error::to_result;
 use kernel::sync::aref::ARef;
 use kernel::uaccess::{UserPtr, UserSlice};
-use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
+use kernel::workqueue::{
+    self, impl_has_delayed_work, impl_has_work, new_delayed_work, new_work, DelayedWork, Work,
+    WorkItem,
+};
 use kernel::{bindings, c_str, device::{Bound, Core}, drm, platform, prelude::*, scatterlist, uapi};
 
 #[path = "g16_drm_ioctl.rs"]
@@ -150,6 +153,10 @@ struct Vm {
     /// mapping.
     snapshot: Option<Arc<KVVec<Mapping>>>,
     pending: KVec<dma_fence::Fence>,
+    /// Live fences of submissions carrying render / compute commands, for
+    /// per-kind Work pool sizing in SUBMIT.
+    pending_render: KVec<dma_fence::Fence>,
+    pending_compute: KVec<dma_fence::Fence>,
     // Count overlapping drains. Submit to this VM sleeps until all finish;
     // unrelated file ioctls and other VMs can still acquire file state.
     draining: u32,
@@ -688,7 +695,8 @@ impl drm::file::DriverFile for File {
                 device: device.into(),
                 state: reaper_state,
                 armed: AtomicBool::new(false),
-                work <- new_work!("m4-reaper"),
+                backoff: AtomicU32::new(0),
+                work <- new_delayed_work!("m4-reaper"),
             }),
             GFP_KERNEL,
         )?;
@@ -734,39 +742,55 @@ impl drm::file::DriverFile for File {
     }
 }
 
-/// Unmaps a file's deferred GEM closes once their snapshots complete. Every
-/// fence in a snapshot is one of this file's job fences, so the pump queues
-/// this work when it signals a job of an armed file (signal_finished); file
-/// ioctls also reap opportunistically. Holds the file state, not the File.
+/// Unmaps a file's deferred GEM closes and finishes detaching hidden, unowned
+/// VMs once their fences complete. Every completion path (`signal_finished` and
+/// `Execution::drop`) wakes this work when `armed` is set; recoverable hidden-VM
+/// detach failures reschedule with bounded backoff. Holds file state, not File.
 #[pin_data]
 struct Reaper {
     device: DeviceRef,
     state: Arc<Mutex<FileState>>,
-    /// Some VM of this file has deferred closes. Changed under file state.
+    /// Some VM of this file has deferred closes or hidden-VM teardown pending.
+    /// Changed under file state or with `SeqCst` when handing off teardown.
     armed: AtomicBool,
+    /// Exponential backoff shift (`50ms << shift`, capped at `800ms`) for
+    /// retrying recoverable background VM detach failures.
+    backoff: AtomicU32,
     #[pin]
-    work: Work<Reaper>,
+    work: DelayedWork<Reaper>,
 }
 
-impl_has_work! { impl HasWork<Self> for Reaper { self.work } }
+impl_has_delayed_work! { impl HasDelayedWork<Self> for Reaper { self.work } }
 
 impl WorkItem for Reaper {
     type Pointer = Arc<Self>;
 
     fn run(this: Arc<Self>) {
-        let mut state = this.state.lock();
-        reap(&mut state, &this.device, &this.armed);
+        let retry_detach = {
+            let mut state = this.state.lock();
+            reap(&mut state, &this.device, &this.armed)
+        };
+        if retry_detach {
+            let shift = this.backoff.fetch_add(1, Ordering::Relaxed).min(4);
+            let delay = kernel::time::msecs_to_jiffies(50u32 << shift);
+            let _ = workqueue::system_dfl().enqueue_delayed(this, delay);
+        } else {
+            this.backoff.store(0, Ordering::Relaxed);
+        }
     }
 }
 
-/// Unmap every deferred close whose snapshot has completed; disarm the
-/// reaper once none remain. Called with file state held.
-fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
+/// Unmap every deferred close whose snapshot has completed and detach any
+/// drained hidden queue-less VM; disarm the reaper once none remain. Returns
+/// `true` if a drained hidden VM hit a recoverable detach failure and should
+/// be retried after backoff. Called with file state held.
+fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) -> bool {
     if state.closed || device.failed.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     let mut runtime = None;
     let mut left = false;
+    let mut retry_detach = false;
     for vm in state.vms.iter_mut() {
         let mut index = 0;
         while index < vm.deferred.len() {
@@ -786,7 +810,7 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
                 // failed close-time unbind always has.
                 device.failed.store(true, Ordering::Release);
                 pr_err!("G16: failed to unbind a deferred closed GEM object: {:?}\n", error);
-                return;
+                return false;
             }
         }
     }
@@ -804,11 +828,16 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
             });
             if state.vms[i].pending.is_empty() {
                 let rt = runtime.get_or_insert_with(|| device.runtime.lock());
-                if state.vms[i].detach(rt).is_ok() {
-                    continue;
+                if !rt.render_failed() {
+                    if state.vms[i].detach(rt).is_ok() {
+                        continue;
+                    }
+                    left = true;
+                    retry_detach = true;
                 }
+            } else {
+                left = true;
             }
-            left = true;
         }
         state.vms.swap(keep_vms, i);
         keep_vms += 1;
@@ -818,6 +847,7 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
     if !left {
         armed.store(false, Ordering::Relaxed);
     }
+    retry_detach && !device.failed.load(Ordering::Acquire)
 }
 
 #[pinned_drop]

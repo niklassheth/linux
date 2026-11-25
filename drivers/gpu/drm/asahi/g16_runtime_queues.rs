@@ -608,7 +608,14 @@ impl Bootstrap {
         if owner.lanes.is_none() {
             self.collect_destroyed_queues()?;
             if self.free_queues.is_empty() {
-                self.recycle_queues()?;
+                match self.recycle_queues() {
+                    Ok(()) => {}
+                    // Optional recycling ran out of bookkeeping memory, but
+                    // fresh backing pages are already preallocated: proceed
+                    // with fresh initialization instead of rejecting SUBMIT.
+                    Err(err) if err == ENOMEM && prealloc.len() >= Self::QUEUE_INIT_PAGES => {}
+                    Err(err) => return Err(err),
+                }
             }
             let identity = self.next_object_va;
             self.next_object_va = identity.checked_add(0x24000).ok_or(ENOSPC)?;

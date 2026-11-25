@@ -100,6 +100,8 @@ impl File {
                 mappings: KVVec::new(),
                 snapshot: None,
                 pending: KVec::new(),
+                pending_render: KVec::new(),
+                pending_compute: KVec::new(),
                 draining: 0,
                 reservation,
                 render_support: None,

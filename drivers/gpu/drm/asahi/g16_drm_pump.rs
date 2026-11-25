@@ -59,6 +59,16 @@ impl Engine {
 }
 
 impl Execution {
+    /// Signal this execution's completion fence and wake the file reaper if
+    /// armed (deferred GEM closes or hidden-VM teardown). Pairs with `SeqCst`
+    /// stores on `reaper.armed`.
+    pub(super) fn signal_and_wake_reaper(&self) {
+        let _ = self.completion.signal();
+        if self.reaper.armed.load(Ordering::SeqCst) {
+            let _ = workqueue::system_dfl().enqueue(self.reaper.clone());
+        }
+    }
+
     /// Call only after dropping the engine and runtime locks.
     pub(super) fn signal_finished(&self, job: Running) {
         if let Some(ring) = &self.device.timeline {
@@ -67,13 +77,7 @@ impl Execution {
         if let Some(error) = job.error {
             job.execution.completion.set_error(error);
         }
-        let _ = job.execution.completion.signal();
-        // A deferred GEM close of this file may wait for this fence. Pairs
-        // with the SeqCst store in Object::close.
-        let reaper = &job.execution.reaper;
-        if reaper.armed.load(Ordering::SeqCst) {
-            let _ = workqueue::system_dfl().enqueue(reaper.clone());
-        }
+        job.execution.signal_and_wake_reaper();
     }
 }
 
@@ -474,7 +478,7 @@ impl PinnedDrop for Execution {
         // Such a job never published to firmware, but its fence must finish.
         if !self.started.load(Ordering::Acquire) {
             self.completion.set_error(ECANCELED);
-            let _ = self.completion.signal();
+            self.signal_and_wake_reaper();
         }
     }
 }
